@@ -18,9 +18,10 @@ Milestone 1 is in progress. Today the app serves the whole lease lifecycle —
 a paid **spawn** (a tenant-signed Lease Request in, a running workload and its
 access details out), a paid **extension**, and the free **status**,
 **termination** and **availability** routes — applies its **image policy** to
-every spawn and every availability answer, sweeps expired leases, publishes
-its Provider Profile, Listings and Liveness to its Relay Set, and prints the
-connector route table it expects. Eviction and listing versioning are being
+every spawn and every availability answer, sweeps expired leases, evicts a
+lease on an operator's command with a signed Eviction Notice, publishes its
+Provider Profile, Listings, Liveness and Eviction Notices to its Relay Set,
+and prints the connector route table it expects. Listing versioning is being
 added ticket by ticket.
 
 ## Spec, decisions and vocabulary
@@ -85,6 +86,10 @@ parts:
 - `relay_set`, `connector_url`, `connector_seal_key`, `[[settlement]]`,
   `isolation`, `liveness_cadence_s`, `geohash`, `publish_url`: the Provider
   Directory — see [The Provider Directory](#the-provider-directory).
+- `operator_bind_addr` (default `127.0.0.1:8090`) and `operator_url` (default
+  `http://127.0.0.1:8090`): the loopback-only operator endpoint `toon-provider
+  evict` talks to. See [Eviction](#eviction) — **this port must never be
+  exposed off the host the provider runs on.**
 
 ## Routes and the connector
 
@@ -187,6 +192,66 @@ failed delete never leaves a workload running for free. All of this survives a
 restart: running leases keep their expiry, tenant, listing version and access
 details, and ended leases restore as ended.
 
+## Eviction
+
+An **eviction** ends a lease before expiry on the *provider's* decision —
+abuse, a policy violation, maintenance — rather than the tenant's (spec
+§6.7). It stops and deletes the workload immediately, the same as a
+termination, and publishes a signed **Eviction Notice**: a public record that
+this provider evicted this lease, and why. Nothing is refunded.
+
+**`toon-provider evict --config <path> --workload-id <hex> --reason <code>
+[--message <text>]`** is the operator command. It does not touch the lease
+state file: it sends `{ "workload_id", "reason", "message"? }` to the
+*running* provider process's operator endpoint (`POST /operator/evict` at
+`operator_url`, default `http://127.0.0.1:8090`), because only that process
+holds the lease table and the compute backend needed to act on it. It prints
+the JSON answer and exits non-zero if the provider refused it.
+
+Reason codes (`--reason`), this provider's own vocabulary for the spec's "a
+reason code" — pick the closest and use `message` for anything it doesn't say:
+
+| Code | Meaning |
+|---|---|
+| `abuse` | The workload abused this provider or something reachable from it |
+| `policy` | The workload violated a policy stated outside this protocol |
+| `maintenance` | The provider needs the capacity back (e.g. host maintenance) |
+| `other` | Anything else — say what in `message` |
+
+A successful eviction answers:
+
+```json
+{ "workload_id": "…", "state": { "ended": "eviction" }, "notice_published": true }
+```
+
+`state` is the same §6.7 encoding `status` and `terminate` use.
+`notice_published` says whether the Eviction Notice reached every relay of
+the Relay Set; a relay refusal, or the directory publisher being unreachable,
+does not undo the eviction — the workload is already gone by the time the
+notice is built, the same log-don't-raise discipline as the Provider Profile,
+Listings and Liveness (see [The Provider Directory](#the-provider-directory)).
+Evicting an id this provider does not hold, or one whose lease has already
+ended, is refused `unknown_workload` and publishes nothing. After an
+eviction, `status` reports `{ "ended": "eviction" }` with no `access`, and
+`extend` refuses `expired`, exactly as after a termination or an expiry.
+
+The Eviction Notice is `K_EVICTION` (`nostr/kinds.rs`), a REGULAR kind — one
+event per eviction, replacing nothing — signed by the provider's Nostr key
+and carrying `["x", "<workload_id>"]` and `["L","toon.network"]`. Content:
+
+```json
+{ "workload_id": "…", "reason": "maintenance", "message": "…" }
+```
+
+**The operator endpoint must never be exposed.** `POST /operator/evict`
+carries no signature and no payment — reaching it at all is what authorises
+an eviction — so it is served on its own listener, bound to
+`operator_bind_addr` (default `127.0.0.1:8090`, and `validate` refuses
+anything that is not a loopback address), and it is never part of the
+connector's route table (`toon-provider routes` output is unchanged by this
+feature). Do not publish this port through the connector, through a compose
+port mapping, or through anything else reachable off the box.
+
 ## Availability and image policy
 
 `POST /availability` (free, unsigned) answers whether a spawn would run,
@@ -235,8 +300,8 @@ cached across leases" — a manifest is the only blob this milestone fetches).
 
 ## The Provider Directory
 
-The provider publishes three kinds of event to every relay in its Relay Set
-(spec §4), all signed with `nostr_private_key` and all carrying
+The provider publishes these events to every relay in its Relay Set (spec
+§4, §6.7), all signed with `nostr_private_key` and all carrying
 `["L","toon.network"]`:
 
 | Event | Class | Carries |
@@ -244,12 +309,15 @@ The provider publishes three kinds of event to every relay in its Relay Set
 | **Provider Profile** | replaceable | `ilp_address`, `connector_url`, `connector_seal_key`, `relays`, `settlement[]`, `isolation`, `hidden`, `host`, `liveness_cadence_s` |
 | **Listing**, one per tier | addressable, `d` = listing name | content `{version, resources, arch, lease_interval_s, price, capabilities}`; tags `a` (the Profile), `L`, `l isolation:…`, `l arch:…`, `l gpu:…`, one `t` per capability, optional `g` |
 | **Liveness** | replaceable | `{ "available": { "<listing>": n } }` with `n` = capacity − live leases, and `["expiration", now + 5 × cadence]` (ADR 0007) |
+| **Eviction Notice**, one per eviction | regular | `{ "workload_id", "reason", "message" }`; tag `x` = the workload id. See [Eviction](#eviction). |
 
 Everything a relay should filter on is a single-letter tag; numbers stay in
 content, because NIP-01 filters never match inside content (ADR 0002).
 
 The Profile and the Listings go out at startup and change only when the config
-does — which is a restart. Liveness goes out every `liveness_cadence_s`.
+does — which is a restart. Liveness goes out every `liveness_cadence_s`. An
+Eviction Notice goes out once, immediately, whenever `toon-provider evict`
+succeeds.
 
 **Publishing costs money.** A relay write on the TOON Network is a paid packet
 on the paid relay route, never the free ephemeral lane (ADR 0007). The
