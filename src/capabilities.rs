@@ -1,10 +1,10 @@
-//! Matching for the free-form capability strings a provider advertises on its
-//! offer (`nesting`, `lxc`, `vm`, …).
+//! Matching for the free-form capability strings a provider grants on a listing
+//! (`nesting`, `docker`, `vm`, …).
 //!
-//! One place, because the provider grants a capability and the consumer checks
+//! One place, because the provider grants a capability and the tenant checks
 //! for it, and the two disagreeing is exactly the bug worth designing out: a
-//! consumer that skips a provider it could have used is a wasted search, and
-//! one that buys from a provider that cannot serve it is a wasted lease.
+//! tenant that skips a provider it could have used is a wasted search, and one
+//! that buys from a provider that cannot serve it is a wasted lease.
 //!
 //! Matching is trimmed and case-insensitive — these strings are hand-written
 //! in provider config files — but never fuzzy. A near-miss like `nested` does

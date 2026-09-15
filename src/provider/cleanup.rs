@@ -1,96 +1,60 @@
-// Expiry sweep: the only path that reclaims a container once its lease runs out,
-// and the only one that frees the vmid for re-use.
+// The expiry sweep: the only path that ends a lease once its time runs out, and
+// the only one that frees a workload id for re-use.
+//
+// There is no grace period. A lease whose `expires_at` has passed bought no
+// further Lease Interval, and an unpaid workload must not keep running.
 
 use anyhow::Result;
 use tracing::{error, info, warn};
 
-use super::persistence::{persist_standby_slots, persist_workloads};
-use super::ProviderService;
+use super::persistence::persist_leases;
+use super::{now_secs, ProviderService};
 
-const CLEANUP_INTERVAL_SECS: u64 = 30;
+/// At most 30 seconds may pass between a lease expiring and its workload being
+/// destroyed.
+pub const SWEEP_INTERVAL_SECS: u64 = 30;
 
 impl ProviderService {
-    pub(super) async fn cleanup_loop(&self) -> Result<()> {
-        let interval = tokio::time::Duration::from_secs(CLEANUP_INTERVAL_SECS);
+    pub(super) async fn expiry_sweep_loop(&self) -> Result<()> {
+        let interval = tokio::time::Duration::from_secs(SWEEP_INTERVAL_SECS);
 
         loop {
             tokio::time::sleep(interval).await;
-
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_secs();
-
-            self.reap_expired_workloads(now).await;
-            self.reap_expired_standby_slots(now).await;
+            self.sweep_expired_leases(now_secs()).await;
         }
     }
 
-    async fn reap_expired_workloads(&self, now: u64) {
-        let mut workloads = self.active_workloads.lock().await;
-        let expired: Vec<u32> = workloads
+    /// End every lease at or past its expiry. Public so a test can drive the
+    /// sweep on a chosen instant rather than waiting out the interval.
+    pub async fn sweep_expired_leases(&self, now: u64) {
+        let mut leases = self.leases.lock().await;
+        let expired: Vec<u32> = leases
             .iter()
-            .filter(|(_, w)| w.expires_at <= now)
-            .map(|(vmid, _)| *vmid)
+            .filter(|(_, l)| l.expires_at <= now)
+            .map(|(id, _)| *id)
             .collect();
 
-        for vmid in expired {
-            info!("Cleaning up expired workload: {}", vmid);
+        for id in expired {
+            info!("lease {} expired; destroying its workload", id);
 
-            if workloads.remove(&vmid).is_none() {
+            if leases.remove(&id).is_none() {
                 continue;
             }
 
-            // Delete unconditionally: the workload is already out of the map, so
-            // a failed stop that skipped the delete would leak the container and
-            // its vmid forever, with no retry. `delete --force` handles running
-            // and stopped alike.
-            if let Err(e) = self.backend.stop_container(vmid).await {
-                warn!("stop failed for {} ({}), deleting anyway", vmid, e);
+            // Delete unconditionally: the lease is already out of the table, so
+            // a failed stop that skipped the delete would leak the container
+            // and its id forever, with no retry.
+            if let Err(e) = self.backend.stop_container(id).await {
+                warn!("stop failed for {} ({}), deleting anyway", id, e);
             }
-            let result = self.backend.delete_container(vmid).await;
-
-            // Untrack regardless of backend success: the lease is over.
-            self.state_machine.lock().await.untrack(vmid);
-
-            match result {
-                Ok(_) => {
-                    info!("Cleaned up workload {}", vmid);
-                    self.stats.lock().await.total_jobs_completed += 1;
-                }
-                Err(e) => error!("Failed to cleanup workload {}: {}", vmid, e),
+            match self.backend.delete_container(id).await {
+                Ok(_) => info!("workload {} destroyed", id),
+                Err(e) => error!("failed to destroy workload {}: {}", id, e),
             }
 
-            // Persist per workload, not once per sweep: a crash midway through
+            // Persist per lease, not once per sweep: a crash midway through
             // would otherwise resurrect entries whose containers are gone.
-            persist_workloads(&workloads, &self.config.workload_state_path);
+            persist_leases(&leases, &self.config.lease_state_path);
         }
-    }
-
-    /// Drop slots whose lease window passed without a failover. The watchdog
-    /// already skips past-expiry slots, but without this the map grows unbounded
-    /// on a long-running provider.
-    async fn reap_expired_standby_slots(&self, now: u64) {
-        let mut slots = self.standby_slots.lock().await;
-        let expired: Vec<String> = slots
-            .iter()
-            .filter(|(_, slot)| slot.expires_at <= now)
-            .map(|(workload_id, _)| workload_id.clone())
-            .collect();
-        if expired.is_empty() {
-            return;
-        }
-        for workload_id in expired {
-            if let Some(slot) = slots.remove(&workload_id) {
-                info!(
-                    "Expiring standby slot for workload {} (index {}/{}, primary {}, expired at {})",
-                    workload_id,
-                    slot.standby_index,
-                    slot.standby_count,
-                    slot.primary_npub,
-                    slot.expires_at
-                );
-            }
-        }
-        persist_standby_slots(&slots, &self.config.standby_state_path);
     }
 }

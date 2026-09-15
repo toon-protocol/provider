@@ -29,10 +29,10 @@ pub fn warm_standby_role(
     WarmStandbyRole::NotAddressed
 }
 
-/// True iff two npub strings name the same key. Providers store their own npub
-/// as hex while the consumer CLI ships bech32, so both sides must be
+/// True iff two npub strings name the same key. A provider stores its own
+/// npub as hex while a tenant may ship bech32, so both sides must be
 /// canonicalized before comparison — direct string comparison silently broke
-/// warm-standby for every bech32 consumer.
+/// warm standby for every bech32 tenant.
 ///
 /// Falls back to string equality only when *neither* side parses, which keeps
 /// placeholder npubs in unit tests working without risking false positives on

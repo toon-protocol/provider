@@ -1,17 +1,21 @@
-// Provider-side workload lifecycle, driven by heartbeats observed across
-// M-of-N Nostr relays.
+// Provider-side workload lifecycle, driven by Liveness observed across M-of-N
+// Nostr relays.
 //
 // Single-writer invariant: a workload emits `PublishLeaseRevocation` only after
-// its own local state has left `Live`, and a standby cannot promote until it
+// its own local state has left `Live`, and a standby cannot take over until it
 // observes that revocation. So at most one provider is `Live` at any moment.
+//
+// Kept for Milestone 3, unwired: the app tracks nothing in this state machine
+// and feeds it no observations. ADR 0010 (takeover on liveness expiry without
+// state) may reshape the takeover path before it is wired.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Replication mode chosen by the consumer at spawn. Only `WarmStandby` makes
+/// Replication mode chosen by the tenant at spawn. Only `WarmStandby` makes
 /// eviction emit `PublishLeaseRevocation`; `Checkpointed` respawns from the
-/// latest Blossom checkpoint on the same provider.
+/// latest checkpoint on the same provider.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum ReplicationMode {
@@ -51,7 +55,7 @@ pub enum WorkloadState {
     Suspect {
         since: u64,
     },
-    /// Heartbeats absent past T2; lease is forfeit on this provider.
+    /// Liveness absent past T2; lease is forfeit on this provider.
     Evicted {
         at: u64,
     },
@@ -68,11 +72,11 @@ pub enum WorkloadState {
     },
 }
 
-/// A heartbeat the provider received from the relay pool. `seen_at` is our
-/// local clock; `event_timestamp` is the heartbeat's claimed creation time, and
+/// A liveness the provider received from the relay pool. `seen_at` is our
+/// local clock; `event_timestamp` is the liveness's claimed creation time, and
 /// anything older than `stale_secs` is ignored to defeat replay-on-relay.
 #[derive(Debug, Clone)]
-pub struct HeartbeatObservation {
+pub struct LivenessObservation {
     pub provider_npub: String,
     pub relay_url: String,
     pub seen_at: u64,
@@ -91,7 +95,7 @@ pub struct QuorumConfig {
     pub t1_secs: u64,
     /// Suspect → Evicted after this many seconds without recovery.
     pub t2_secs: u64,
-    /// Heartbeats older than this on the wire don't count.
+    /// Liveness older than this on the wire don't count.
     pub stale_secs: u64,
 }
 
@@ -114,7 +118,7 @@ pub struct DurableWorkload {
     pub state: WorkloadState,
     pub replication: ReplicationMode,
     pub restart_policy: RestartPolicy,
-    /// Blossom URI of the latest checkpoint, when there is one.
+    /// URI of the latest checkpoint, when there is one.
     pub state_uri: Option<String>,
     pub created_at: u64,
     pub expires_at: u64,
@@ -188,7 +192,7 @@ impl WorkloadStateMachine {
     pub fn tick(
         &mut self,
         now: u64,
-        observations: &[HeartbeatObservation],
+        observations: &[LivenessObservation],
     ) -> Vec<StateMachineEvent> {
         let mut events = Vec::new();
         let cfg = self.config;
@@ -342,7 +346,7 @@ fn evict(workload: &mut DurableWorkload, now: u64, events: &mut Vec<StateMachine
     workload.state = WorkloadState::Evicted { at: now };
     events.push(StateMachineEvent::Evicted {
         workload_id: workload.workload_id,
-        reason: "heartbeat-quorum-lost-past-t2",
+        reason: "liveness-quorum-lost-past-t2",
     });
 
     match (&workload.replication, workload.restart_policy) {

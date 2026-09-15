@@ -1,7 +1,8 @@
 // Docker compute backend. Shells out to the `docker` CLI.
 //
-// No state is persisted: the container's existence on the host IS the state,
-// and `find_available_id` scans for `paygress-<n>`.
+// No state is persisted here: the container's existence on the host IS the
+// state, and `find_available_id` scans for `toon-<n>`. The lease that pays for
+// it is bookkeeping the provider keeps separately (`provider::persistence`).
 
 use std::process::Stdio;
 
@@ -11,9 +12,8 @@ use tokio::process::Command;
 
 use crate::compute::{
     container_name, id_from_container_name, ComputeBackend, ContainerConfig, ContainerStatus,
-    NodeStatus,
+    NodeStatus, WORKLOAD_NAME_PREFIX,
 };
-use crate::luks::{create_encrypted_volume, destroy_encrypted_volume};
 
 pub struct DockerBackend {
     /// `None` = the host's default `bridge`.
@@ -51,15 +51,9 @@ impl Default for DockerBackend {
 #[async_trait]
 impl ComputeBackend for DockerBackend {
     async fn find_available_id(&self, range_start: u32, range_end: u32) -> Result<u32> {
+        let name_filter = format!("name={}", WORKLOAD_NAME_PREFIX);
         let output = self
-            .docker(&[
-                "ps",
-                "-a",
-                "--format",
-                "{{.Names}}",
-                "--filter",
-                "name=paygress-",
-            ])
+            .docker(&["ps", "-a", "--format", "{{.Names}}", "--filter", &name_filter])
             .await?;
         let names = String::from_utf8_lossy(&output.stdout);
         let used: std::collections::HashSet<u32> =
@@ -95,7 +89,7 @@ impl ComputeBackend for DockerBackend {
             args.push(net.clone());
         }
 
-        for port in &config.template_ports {
+        for port in &config.ports {
             args.push("-p".into());
             args.push(format!(
                 "{}:{}/{}",
@@ -103,34 +97,17 @@ impl ComputeBackend for DockerBackend {
             ));
         }
 
-        for (k, v) in &config.template_env {
+        for (k, v) in &config.env {
             args.push("-e".into());
             args.push(format!("{}={}", k, v));
         }
 
-        for arg in &config.extra_runtime_args {
-            args.push(arg.clone());
-        }
-
-        // vmid-scoped so two instances of a template don't share state. The
-        // encrypted form bind-mounts the ext4 mountpoint of a LUKS-on-loop
-        // file, so a host operator's post-eviction `tar` yields ciphertext.
+        // Named per workload id, so two leases never share state and a
+        // re-spawn at the same id cannot inherit the last tenant's volume
+        // (`delete_container` removes it).
         if let Some(path) = &config.data_path {
-            match config.volume_encryption_key.as_ref() {
-                Some(key) => {
-                    let vol = create_encrypted_volume(config.id, config.storage_gb, key)
-                        .await
-                        .with_context(|| {
-                            format!("create LUKS-encrypted volume for id={}", config.id)
-                        })?;
-                    args.push("-v".into());
-                    args.push(format!("{}:{}", vol.mount_path.display(), path));
-                }
-                None => {
-                    args.push("-v".into());
-                    args.push(format!("{}-data:{}", container_name(config.id), path));
-                }
-            }
+            args.push("-v".into());
+            args.push(format!("{}-data:{}", container_name(config.id), path));
         }
 
         // Image must be last: docker treats anything after it as the
@@ -170,16 +147,10 @@ impl ComputeBackend for DockerBackend {
     async fn delete_container(&self, id: u32) -> Result<()> {
         let name = container_name(id);
         let _ = self.docker(&["rm", "-f", &name]).await;
-        // Remove both volume backings so a re-spawn at the same id can't
-        // inherit stale state. `destroy_encrypted_volume`'s luksErase is the
-        // load-bearing step: it overwrites the keyslots so the ciphertext stays
-        // unreadable even if the operator copied the file first.
+        // Remove the volume too, so a re-spawn at the same id cannot inherit
+        // the last tenant's state.
         let volume = format!("{}-data", name);
         let _ = self.docker(&["volume", "rm", "-f", &volume]).await;
-        if let Err(e) = destroy_encrypted_volume(id).await {
-            // Never propagate: cleanup_loop relies on this being best-effort.
-            tracing::warn!("destroy_encrypted_volume(id={}) non-fatal: {}", id, e);
-        }
         Ok(())
     }
 
@@ -228,7 +199,7 @@ mod tests {
 
     #[test]
     fn name_for_is_deterministic() {
-        assert_eq!(container_name(1234), "paygress-1234");
+        assert_eq!(container_name(1234), "toon-1234");
     }
 
     #[test]
@@ -237,27 +208,24 @@ mod tests {
         // out to docker from a unit test.
         let cfg = ContainerConfig {
             id: 42,
-            name: "paygress-42".to_string(),
+            name: "toon-42".to_string(),
             image: "alpine:latest".to_string(),
             cpu_cores: 1,
             memory_mb: 256,
             storage_gb: 1,
-            password: "x".to_string(),
             ssh_key: None,
             host_port: Some(30042),
-            template_ports: vec![crate::compute::PortMapping {
+            ports: vec![crate::compute::PortMapping {
                 host_port: 17777,
                 container_port: 7777,
                 protocol: "tcp".to_string(),
             }],
-            template_env: {
+            env: {
                 let mut m = std::collections::HashMap::new();
                 m.insert("FOO".to_string(), "bar".to_string());
                 m
             },
-            extra_runtime_args: vec!["--ulimit".to_string(), "nofile=1024:1024".to_string()],
             data_path: Some("/var/data".to_string()),
-            volume_encryption_key: None,
         };
 
         let mut args: Vec<String> = vec![
@@ -272,20 +240,20 @@ mod tests {
             "--memory".into(),
             format!("{}m", cfg.memory_mb),
         ];
-        for port in &cfg.template_ports {
+        for port in &cfg.ports {
             args.push("-p".into());
             args.push(format!(
                 "{}:{}/{}",
                 port.host_port, port.container_port, port.protocol
             ));
         }
-        for (k, v) in &cfg.template_env {
+        for (k, v) in &cfg.env {
             args.push("-e".into());
             args.push(format!("{}={}", k, v));
         }
         args.push(cfg.image.clone());
 
-        assert!(args.contains(&"paygress-42".to_string()));
+        assert!(args.contains(&"toon-42".to_string()));
         assert!(args.contains(&"17777:7777/tcp".to_string()));
         assert!(args.contains(&"FOO=bar".to_string()));
         assert_eq!(args.last().map(|s| s.as_str()), Some("alpine:latest"));

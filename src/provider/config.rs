@@ -1,187 +1,194 @@
+// Provider configuration: one TOML file, no environment variables.
+//
+// Paygress spread its settings over a JSON config, an `.env` file read by the
+// nginx module and CLI flags. A provider joining the TOON marketplace needs
+// nobody's approval and should need one file, so this is the only source.
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::nostr::PodSpec;
-
+/// Which `ComputeBackend` the provider runs workloads on.
+///
+/// Docker is the only one in this milestone. The enum stays so that adding a
+/// backend is a config change rather than a new config shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum BackendType {
+#[serde(rename_all = "lowercase")]
+pub enum BackendKind {
     #[default]
-    Proxmox,
-    LXD,
-    /// Requires the `docker` CLI. Templates use public Docker images that LXD
-    /// cannot run natively.
     Docker,
-    /// One VM per spawn, each with its own kernel. Requires `/dev/kvm` and
-    /// `qemu-system-x86_64`; does not serve Docker templates.
-    Kvm,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     #[serde(default)]
-    pub backend_type: BackendType,
+    pub backend: BackendKind,
 
-    pub proxmox_url: String,
-    pub proxmox_token_id: String,
-    pub proxmox_token_secret: String,
-    pub proxmox_node: String,
-
-    /// Disable TLS verification against the Proxmox API. Needed for the
-    /// self-signed cert Proxmox ships with; leaving it off means the API token
-    /// is only sent to a verified host.
-    #[serde(default)]
-    pub proxmox_accept_invalid_certs: bool,
-    pub proxmox_storage: String,
-    pub proxmox_template: String,
-    pub proxmox_bridge: String,
-    pub vmid_range_start: u32,
-    pub vmid_range_end: u32,
-
-    pub nostr_private_key: String,
-    pub nostr_relays: Vec<String>,
-
+    /// Name this provider publishes for itself.
     pub provider_name: String,
-    pub provider_location: Option<String>,
+
+    /// The address tenants reach workloads at. Ports are exposed as
+    /// `public_ip:host_port`; there are no hostnames and no TLS.
     pub public_ip: String,
+
+    /// Nostr secret key. It signs everything this provider publishes and is
+    /// the identity a Lease Request is addressed to.
+    pub nostr_private_key: String,
+
+    /// The relays this provider publishes its profile, listings and liveness
+    /// to. Nothing is published yet; the directory lands in a later ticket.
+    #[serde(default)]
+    pub relay_set: Vec<String>,
+
+    /// Privileges beyond an ordinary workload that this provider is willing to
+    /// grant, e.g. `docker`, `nesting`.
+    #[serde(default)]
     pub capabilities: Vec<String>,
 
-    pub specs: Vec<PodSpec>,
-    pub whitelisted_mints: Vec<String>,
+    /// Where the HTTP app listens. The provider's TOON connector is the only
+    /// thing that should be able to reach it.
+    #[serde(default = "default_http_bind_addr")]
+    pub http_bind_addr: String,
 
-    pub heartbeat_interval_secs: u64,
-    pub minimum_duration_seconds: u64,
+    /// Inclusive range of backend workload ids this provider may use.
+    #[serde(default = "default_id_range_start")]
+    pub workload_id_range_start: u32,
+    #[serde(default = "default_id_range_end")]
+    pub workload_id_range_end: u32,
 
-    // Tunnel settings, for providers behind NAT.
-    #[serde(default)]
-    pub tunnel_enabled: bool,
-    #[serde(default)]
-    pub tunnel_interface: Option<String>,
+    /// First host port handed out for a workload's SSH forward. Unset derives
+    /// one from the workload id.
     #[serde(default)]
     pub ssh_port_start: Option<u16>,
-    #[serde(default)]
-    pub ssh_port_end: Option<u16>,
 
-    /// Shared CDK SQLite wallet. ngx_l402 opens the same file (`CASHU_DB_PATH`)
-    /// to melt the proceeds to Lightning.
-    #[serde(default = "default_cashu_wallet_db_path")]
-    pub cashu_wallet_db_path: String,
-
-    /// Where the active-workload table is mirrored to disk. It is the only
-    /// record that a lease exists — the backend knows a container is running but
-    /// not who paid for it or when it expires. Held purely in memory, a restart
-    /// leaks every container and its vmid.
-    #[serde(default = "default_workload_state_path")]
-    pub workload_state_path: String,
-
-    #[serde(default = "default_standby_state_path")]
-    pub standby_state_path: String,
-
-    /// Bind address for the optional HTTP+ngx_l402 interface, the port
-    /// `nginx/conf.d/paygress-l402.conf` proxies to. Omit to run Nostr-DM only.
-    #[serde(default)]
-    pub http_bind_addr: Option<String>,
-
-    /// Lightning address (`user@domain`) where ngx_l402 sweeps accumulated
-    /// ecash. Written as `LNURL_ADDRESS` in `/etc/paygress/.env`.
-    #[serde(default)]
-    pub lightning_address: Option<String>,
-
-    /// Base image every KVM overlay is cut from. Unset means stock Ubuntu; a
-    /// provider serving CI points these at an image carrying docker and act
-    /// (`images/ci-sandbox/build.sh`), since the KVM backend has no per-workload
-    /// image to install them into. Ignored by every other backend.
-    #[serde(default)]
-    pub kvm_base_image_path: Option<String>,
-
-    /// Fetched to `kvm_base_image_path` on first spawn when that file is
-    /// missing.
-    #[serde(default)]
-    pub kvm_base_image_url: Option<String>,
+    /// Where the lease table is mirrored to disk. It is the only record that a
+    /// lease exists — the backend knows a container is running but not whose it
+    /// is or when it expires — so held purely in memory, a restart would strand
+    /// every paid workload.
+    #[serde(default = "default_lease_state_path")]
+    pub lease_state_path: String,
 }
 
 impl ProviderConfig {
-    /// Host port forwarded to the workload's SSH. Derived rather than stored,
-    /// so the spawn reply, the status reply and the HTTP interface all name the
-    /// same port for a given vmid.
-    pub(crate) fn ssh_host_port(&self, vmid: u32) -> u16 {
+    /// Host port forwarded to a workload's SSH. Derived rather than stored, so
+    /// every answer that names a port for a given id names the same one.
+    pub fn ssh_host_port(&self, id: u32) -> u16 {
         match self.ssh_port_start {
-            Some(start) => start + (vmid - self.vmid_range_start) as u16,
-            None => 30000 + (vmid % 10000) as u16,
+            Some(start) => {
+                start.saturating_add(id.saturating_sub(self.workload_id_range_start) as u16)
+            }
+            None => 30000 + (id % 10000) as u16,
         }
     }
 }
 
-fn default_cashu_wallet_db_path() -> String {
-    "./paygress-cashu-wallet.sqlite".to_string()
+fn default_http_bind_addr() -> String {
+    "127.0.0.1:8080".to_string()
 }
 
-fn default_standby_state_path() -> String {
-    "./paygress-standby-slots.json".to_string()
+fn default_id_range_start() -> u32 {
+    1000
 }
 
-fn default_workload_state_path() -> String {
-    "./paygress-workloads.json".to_string()
+fn default_id_range_end() -> u32 {
+    1999
+}
+
+fn default_lease_state_path() -> String {
+    "./toon-provider-leases.json".to_string()
 }
 
 impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
-            backend_type: BackendType::Proxmox,
-            proxmox_url: "https://localhost:8006/api2/json".to_string(),
-            proxmox_token_id: "root@pam!paygress".to_string(),
-            proxmox_token_secret: String::new(),
-            proxmox_node: "pve".to_string(),
-            proxmox_accept_invalid_certs: false,
-            proxmox_storage: "local-lvm".to_string(),
-            proxmox_template: "local:vztmpl/ubuntu-22.04-standard.tar.zst".to_string(),
-            proxmox_bridge: "vmbr0".to_string(),
-            vmid_range_start: 1000,
-            vmid_range_end: 1999,
-            nostr_private_key: String::new(),
-            nostr_relays: vec![
-                "wss://relay.damus.io".to_string(),
-                "wss://nos.lol".to_string(),
-            ],
-            provider_name: "Paygress Provider".to_string(),
-            provider_location: None,
+            backend: BackendKind::Docker,
+            provider_name: "TOON Provider".to_string(),
             public_ip: "127.0.0.1".to_string(),
-            capabilities: vec!["lxc".to_string()],
-            specs: vec![PodSpec {
-                id: "basic".to_string(),
-                name: "Basic".to_string(),
-                description: "1 vCPU, 1GB RAM".to_string(),
-                cpu_millicores: 1000,
-                memory_mb: 1024,
-                rate_msats_per_sec: 50,
-            }],
-            whitelisted_mints: vec!["https://testnut.cashu.space".to_string()],
-            heartbeat_interval_secs: 60,
-            minimum_duration_seconds: 60,
-            tunnel_enabled: false,
-            tunnel_interface: None,
+            nostr_private_key: String::new(),
+            relay_set: Vec::new(),
+            capabilities: Vec::new(),
+            http_bind_addr: default_http_bind_addr(),
+            workload_id_range_start: default_id_range_start(),
+            workload_id_range_end: default_id_range_end(),
             ssh_port_start: None,
-            ssh_port_end: None,
-            cashu_wallet_db_path: default_cashu_wallet_db_path(),
-            workload_state_path: default_workload_state_path(),
-            standby_state_path: default_standby_state_path(),
-            http_bind_addr: None,
-            lightning_address: None,
-            kvm_base_image_path: None,
-            kvm_base_image_url: None,
+            lease_state_path: default_lease_state_path(),
         }
     }
 }
 
 pub fn load_config(path: &str) -> Result<ProviderConfig> {
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read config file: {}", path))?;
-
-    serde_json::from_str(&content).context("Failed to parse provider config")
+    let content =
+        std::fs::read_to_string(path).with_context(|| format!("read provider config at {}", path))?;
+    toml::from_str(&content).with_context(|| format!("parse provider config at {}", path))
 }
 
 pub fn save_config(path: &str, config: &ProviderConfig) -> Result<()> {
-    let content = serde_json::to_string_pretty(config)?;
-    std::fs::write(path, content)
-        .with_context(|| format!("Failed to write config file: {}", path))?;
+    let content = toml::to_string_pretty(config).context("encode provider config")?;
+    std::fs::write(path, content).with_context(|| format!("write provider config to {}", path))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_minimal_toml_file_is_enough() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider.toml");
+        std::fs::write(
+            &path,
+            r#"
+provider_name = "Test Provider"
+public_ip = "203.0.113.7"
+nostr_private_key = "nsec1example"
+"#,
+        )
+        .unwrap();
+
+        let cfg = load_config(path.to_str().unwrap()).unwrap();
+        assert_eq!(cfg.provider_name, "Test Provider");
+        assert_eq!(cfg.public_ip, "203.0.113.7");
+        assert_eq!(cfg.backend, BackendKind::Docker);
+        assert_eq!(cfg.http_bind_addr, "127.0.0.1:8080");
+        assert_eq!(cfg.lease_state_path, "./toon-provider-leases.json");
+    }
+
+    #[test]
+    fn config_round_trips_through_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider.toml");
+        let cfg = ProviderConfig {
+            provider_name: "Round Trip".to_string(),
+            relay_set: vec!["wss://relay.toon.example".to_string()],
+            capabilities: vec!["docker".to_string()],
+            ssh_port_start: Some(40000),
+            ..ProviderConfig::default()
+        };
+
+        save_config(path.to_str().unwrap(), &cfg).unwrap();
+        let back = load_config(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(back.provider_name, "Round Trip");
+        assert_eq!(back.relay_set, vec!["wss://relay.toon.example".to_string()]);
+        assert_eq!(back.capabilities, vec!["docker".to_string()]);
+        assert_eq!(back.ssh_port_start, Some(40000));
+    }
+
+    #[test]
+    fn ssh_host_port_is_stable_for_an_id() {
+        let cfg = ProviderConfig {
+            ssh_port_start: Some(40000),
+            workload_id_range_start: 1000,
+            ..ProviderConfig::default()
+        };
+        assert_eq!(cfg.ssh_host_port(1000), 40000);
+        assert_eq!(cfg.ssh_host_port(1007), 40007);
+        assert_eq!(cfg.ssh_host_port(1007), cfg.ssh_host_port(1007));
+    }
+
+    #[test]
+    fn ssh_host_port_falls_back_to_a_derived_port() {
+        let cfg = ProviderConfig::default();
+        assert_eq!(cfg.ssh_host_port(1042), 31042);
+    }
 }

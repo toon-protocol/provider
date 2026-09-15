@@ -1,39 +1,28 @@
-// Compute backend trait shared by the Docker, LXD, KVM and Proxmox backends.
+// The compute port: everything the provider does to hardware goes through
+// `ComputeBackend`, so the lease lifecycle can be tested against a fake.
+//
+// Docker is the only implementation in this milestone. The trait stays
+// backend-agnostic — ids, not Docker handles; `Result`, not exit codes — so an
+// LXD, Proxmox or KVM backend can return without touching its callers.
 
 use std::collections::HashMap;
-use std::process::Stdio;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+
+/// Prefix on every host-visible workload name. `find_available_id` scans for
+/// it, so a backend must never create a workload outside this namespace.
+pub const WORKLOAD_NAME_PREFIX: &str = "toon-";
 
 /// Host-visible name for a workload. `find_available_id` parses the id back out
 /// of this form, so the two must stay in sync.
 pub fn container_name(id: u32) -> String {
-    format!("paygress-{}", id)
+    format!("{}{}", WORKLOAD_NAME_PREFIX, id)
 }
 
 pub fn id_from_container_name(name: &str) -> Option<u32> {
-    name.strip_prefix("paygress-")?.parse().ok()
-}
-
-/// Run `program`, failing with the child's stderr when it exits non-zero.
-pub(crate) async fn run_checked(program: &str, args: &[&str]) -> Result<String> {
-    let out = tokio::process::Command::new(program)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .with_context(|| format!("invoke {}", program))?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "{} failed: {}",
-            program,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    name.strip_prefix(WORKLOAD_NAME_PREFIX)?.parse().ok()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,9 +34,9 @@ pub struct NodeStatus {
     pub disk_total: u64,
 }
 
-/// One published port mapping. Docker-only; LXD/Proxmox expose just SSH via
-/// `ContainerConfig::host_port`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One published port mapping, exposed on the host as `host_port`. Distinct
+/// from the SSH forward in `ContainerConfig::host_port`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortMapping {
     pub host_port: u16,
     pub container_port: u16,
@@ -55,33 +44,25 @@ pub struct PortMapping {
     pub protocol: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainerConfig {
     pub id: u32,
     pub name: String,
+    /// What to run. A content-addressed OCI reference once the image path
+    /// lands; a plain tag until then.
     pub image: String,
     pub cpu_cores: u32,
     pub memory_mb: u32,
     pub storage_gb: u32,
-    pub password: String,
+    /// The tenant's SSH public key. There is no password: no usable credential
+    /// ever travels in a response.
     pub ssh_key: Option<String>,
-    /// SSH host-port forward. Distinct from `template_ports`.
+    /// SSH host-port forward. Distinct from `ports`.
     pub host_port: Option<u16>,
-    pub template_ports: Vec<PortMapping>,
-    /// Template defaults plus consumer overrides.
-    pub template_env: HashMap<String, String>,
-    /// Extra `docker run` flags from the template definition.
-    pub extra_runtime_args: Vec<String>,
+    pub ports: Vec<PortMapping>,
+    pub env: HashMap<String, String>,
     /// In-container path for persistent state. `None` = stateless.
     pub data_path: Option<String>,
-    /// 32-byte LUKS key for the data volume. When set the Docker backend builds
-    /// a LUKS-on-loop file instead of a plain named volume. No-op when
-    /// `data_path` is `None`.
-    ///
-    /// `serde(skip)`: this is consumer key material. It stays in memory for the
-    /// life of the process and is never written to provider-side state.
-    #[serde(skip)]
-    pub volume_encryption_key: Option<[u8; 32]>,
 }
 
 #[async_trait]
@@ -124,9 +105,9 @@ mod tests {
 
     #[test]
     fn container_name_round_trips() {
-        assert_eq!(container_name(1234), "paygress-1234");
-        assert_eq!(id_from_container_name("paygress-1234"), Some(1234));
+        assert_eq!(container_name(1234), "toon-1234");
+        assert_eq!(id_from_container_name("toon-1234"), Some(1234));
         assert_eq!(id_from_container_name("something-else"), None);
-        assert_eq!(id_from_container_name("paygress-notanumber"), None);
+        assert_eq!(id_from_container_name("toon-notanumber"), None);
     }
 }
