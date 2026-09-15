@@ -19,8 +19,8 @@ use anyhow::Result;
 use nostr_sdk::{Event, EventBuilder, Keys, Kind, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use super::kinds::{K_LISTING, K_LIVENESS, K_PROFILE, TOON_LABEL};
-use super::wire::Resources;
+use super::kinds::{K_EVICTION, K_LISTING, K_LIVENESS, K_PROFILE, TOON_LABEL};
+use super::wire::{EvictionReason, Resources};
 use crate::provider::{Listing, ProviderConfig};
 
 /// One settlement leg a provider's connector accepts: which chain, which
@@ -196,6 +196,40 @@ pub fn listing_content(listing: &Listing) -> ListingContent {
         standby_price: None,
         capabilities: listing.capabilities.clone(),
     }
+}
+
+/// The content of an Eviction Notice (`K_EVICTION`, regular), spec §6.7: a
+/// provider's signed public record that it evicted a lease, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvictionContent {
+    pub workload_id: String,
+    pub reason: EvictionReason,
+    pub message: String,
+}
+
+/// An Eviction Notice. Unlike the Profile, a Listing or Liveness this is a
+/// REGULAR kind: it records one decision at one instant rather than
+/// describing an ongoing state, so nothing about it should ever replace a
+/// previous publication — a provider that evicts twice leaves two notices.
+pub fn eviction_event(
+    workload_id: &str,
+    reason: EvictionReason,
+    message: &str,
+    keys: &Keys,
+    now: u64,
+) -> Result<Event> {
+    let content = EvictionContent {
+        workload_id: workload_id.to_string(),
+        reason,
+        message: message.to_string(),
+    };
+    Ok(
+        EventBuilder::new(Kind::Custom(K_EVICTION), serde_json::to_string(&content)?)
+            .tags([Tag::parse(["x", workload_id])?, label_tag()?])
+            .custom_created_at(Timestamp::from(now))
+            .sign_with_keys(keys)?,
+    )
 }
 
 /// Liveness. Replaceable, so a relay holds exactly one per provider however

@@ -280,6 +280,55 @@ pub struct ExtendResponse {
     pub expires_at: u64,
 }
 
+/// Why a provider evicted a lease (spec §6.7: "a reason code"). Serialised in
+/// snake_case and carried, as a plain string, in an Eviction Notice's content.
+///
+/// The spec names no fixed vocabulary beyond "a reason code", so these four
+/// are this provider's own choice, documented in the README: broad enough to
+/// cover the cases spec §6.7 gives as examples (abuse, policy, maintenance)
+/// plus a catch-all that pushes the provider to explain itself in `message`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvictionReason {
+    /// The workload abused this provider or something reachable from it.
+    Abuse,
+    /// The workload violated a policy the provider states outside this
+    /// protocol (e.g. an acceptable-use policy).
+    Policy,
+    /// The provider needs the capacity back, e.g. for host maintenance.
+    Maintenance,
+    /// Anything else; `message` should say what.
+    Other,
+}
+
+/// Body of the loopback-only `POST /operator/evict`. No signature and no
+/// payment: this is not a tenant route reached through the connector, it is
+/// the operator of this box telling its own provider process to stop a
+/// lease, so the only thing that authenticates it is being able to reach the
+/// port at all (`ProviderConfig::operator_bind_addr` refuses to be anything
+/// but loopback).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvictRequest {
+    pub workload_id: String,
+    pub reason: EvictionReason,
+    /// Published verbatim in the Eviction Notice; empty when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// The answer to a successful eviction (spec §6.7). The lease is always
+/// ended, even when the Eviction Notice could not be published to every
+/// relay — `notice_published` says whether it was (the per-relay detail is
+/// in the log, the way every other directory publication reports it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvictResponse {
+    pub workload_id: String,
+    pub state: LeaseState,
+    pub notice_published: bool,
+}
+
 /// Every refusal code the spec names (§5). Serialised in snake_case, exactly
 /// as the spec writes them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
