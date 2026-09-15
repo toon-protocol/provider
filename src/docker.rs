@@ -12,7 +12,7 @@ use tokio::process::Command;
 
 use crate::compute::{
     container_name, id_from_container_name, ComputeBackend, ContainerConfig, ContainerStatus,
-    NodeStatus, WORKLOAD_NAME_PREFIX,
+    NodeStatus, SSH_CONTAINER_PORT, SSH_PUBLIC_KEY_ENV, WORKLOAD_NAME_PREFIX,
 };
 
 pub struct DockerBackend {
@@ -42,7 +42,7 @@ impl DockerBackend {
             "--restart".into(),
             "unless-stopped".into(),
             "--cpus".into(),
-            config.cpu_cores.to_string(),
+            format!("{:.3}", f64::from(config.cpu_millicores) / 1000.0),
             "--memory".into(),
             format!("{}m", config.memory_mb),
         ];
@@ -50,6 +50,20 @@ impl DockerBackend {
         if let Some(net) = &self.network {
             args.push("--network".into());
             args.push(net.clone());
+        }
+
+        // The SSH forward first, then the tenant's ports. The key rides in
+        // as an environment variable: `docker run` cannot write a file into
+        // an image before it starts, and every sshd image reads its keys
+        // from somewhere different, so the image (or the spawn's
+        // entrypoint) is what installs it.
+        if let Some(host_port) = config.host_port {
+            args.push("-p".into());
+            args.push(format!("{}:{}/tcp", host_port, SSH_CONTAINER_PORT));
+        }
+        if let Some(key) = &config.ssh_key {
+            args.push("-e".into());
+            args.push(format!("{}={}", SSH_PUBLIC_KEY_ENV, key));
         }
 
         for port in &config.ports {
@@ -230,10 +244,10 @@ mod tests {
             id: 42,
             name: "toon-42".to_string(),
             image: "alpine:latest".to_string(),
-            cpu_cores: 1,
+            cpu_millicores: 1500,
             memory_mb: 256,
             storage_gb: 1,
-            ssh_key: None,
+            ssh_key: Some("ssh-ed25519 AAAA tenant".to_string()),
             host_port: Some(30042),
             ports: vec![crate::compute::PortMapping {
                 host_port: 17777,
@@ -249,6 +263,15 @@ mod tests {
         let args = DockerBackend::new().run_args(&cfg);
 
         assert!(args.contains(&"toon-42".to_string()));
+        assert!(
+            args.contains(&"1.500".to_string()),
+            "millicores become a fractional --cpus"
+        );
+        assert!(
+            args.contains(&"30042:22/tcp".to_string()),
+            "the SSH forward"
+        );
+        assert!(args.contains(&"SSH_PUBLIC_KEY=ssh-ed25519 AAAA tenant".to_string()));
         assert!(args.contains(&"17777:7777/tcp".to_string()));
         assert!(args.contains(&"FOO=bar".to_string()));
         assert!(args.contains(&"toon-42-data:/var/data".to_string()));
@@ -270,7 +293,7 @@ mod tests {
             id: 7,
             name: "toon-7".to_string(),
             image: "alpine:latest".to_string(),
-            cpu_cores: 1,
+            cpu_millicores: 1000,
             memory_mb: 64,
             storage_gb: 1,
             ssh_key: None,
@@ -281,8 +304,12 @@ mod tests {
             args: vec![],
             data_path: None,
         };
-        assert!(!DockerBackend::new()
-            .run_args(&cfg)
-            .contains(&"-v".to_string()));
+        let args = DockerBackend::new().run_args(&cfg);
+        assert!(!args.contains(&"-v".to_string()));
+        assert!(
+            !args.contains(&"-p".to_string()),
+            "no SSH forward without a key or port"
+        );
+        assert!(!args.iter().any(|a| a.starts_with("SSH_PUBLIC_KEY=")));
     }
 }

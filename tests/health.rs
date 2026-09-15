@@ -3,23 +3,19 @@
 
 mod common;
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use tokio::sync::Mutex;
 use tower::ServiceExt;
 
-use common::FakeBackend;
+use common::{FakeBackend, FakeClock};
 use toon_provider::{router, AppState, ProviderConfig};
 
 fn app() -> axum::Router {
-    router(AppState {
-        config: Arc::new(ProviderConfig::default()),
-        backend: FakeBackend::new(),
-        leases: Arc::new(Mutex::new(HashMap::new())),
-    })
+    let config = ProviderConfig {
+        nostr_private_key: nostr_sdk::Keys::generate().secret_key().to_secret_hex(),
+        ..ProviderConfig::default()
+    };
+    router(AppState::new(config, FakeBackend::new(), FakeClock::at(1_700_000_000)).unwrap())
 }
 
 async fn get(path: &str) -> (StatusCode, serde_json::Value) {

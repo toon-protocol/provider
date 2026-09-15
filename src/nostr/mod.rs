@@ -8,6 +8,7 @@
 
 mod identity;
 pub mod kinds;
+pub mod lease_request;
 pub mod wire;
 
 pub use identity::*;

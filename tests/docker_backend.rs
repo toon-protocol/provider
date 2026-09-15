@@ -29,7 +29,7 @@ fn config() -> ContainerConfig {
         id: TEST_ID,
         name: toon_provider::compute::container_name(TEST_ID),
         image: IMAGE.to_string(),
-        cpu_cores: 1,
+        cpu_millicores: 1000,
         memory_mb: 64,
         storage_gb: 1,
         ssh_key: None,

@@ -3,11 +3,13 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use toon_provider::compute::{ComputeBackend, ContainerConfig, ContainerStatus, NodeStatus};
+use toon_provider::Clock;
 
 /// One thing the provider asked the compute backend to do. Tests assert on this
 /// sequence rather than on the provider's internal state.
@@ -24,7 +26,13 @@ pub enum BackendCall {
 #[derive(Default)]
 pub struct FakeBackend {
     calls: Mutex<Vec<BackendCall>>,
+    /// Every `ContainerConfig` a create was asked for, in order — what the
+    /// provider told the backend to run.
+    created: Mutex<Vec<ContainerConfig>>,
     containers: Mutex<HashMap<u32, ContainerStatus>>,
+    /// When set, the next create fails with this message, as a daemon that
+    /// cannot pull the image or is out of disk would.
+    fail_next_create: Mutex<Option<String>>,
 }
 
 impl FakeBackend {
@@ -34,6 +42,10 @@ impl FakeBackend {
 
     pub fn calls(&self) -> Vec<BackendCall> {
         self.calls.lock().unwrap().clone()
+    }
+
+    pub fn created(&self) -> Vec<ContainerConfig> {
+        self.created.lock().unwrap().clone()
     }
 
     pub fn status_of(&self, id: u32) -> ContainerStatus {
@@ -54,6 +66,10 @@ impl FakeBackend {
             .insert(id, ContainerStatus::Running);
     }
 
+    pub fn fail_next_create(&self, why: &str) {
+        *self.fail_next_create.lock().unwrap() = Some(why.to_string());
+    }
+
     fn record(&self, call: BackendCall) {
         self.calls.lock().unwrap().push(call);
     }
@@ -72,7 +88,11 @@ impl ComputeBackend for FakeBackend {
     }
 
     async fn create_container(&self, config: &ContainerConfig) -> Result<String> {
+        if let Some(why) = self.fail_next_create.lock().unwrap().take() {
+            anyhow::bail!("{}", why);
+        }
         self.record(BackendCall::Create(config.id));
+        self.created.lock().unwrap().push(config.clone());
         self.containers
             .lock()
             .unwrap()
@@ -120,5 +140,29 @@ impl ComputeBackend for FakeBackend {
 
     async fn get_container_status(&self, id: u32) -> Result<ContainerStatus> {
         Ok(self.status_of(id))
+    }
+}
+
+/// A clock the test moves by hand, so expiry and request freshness are
+/// decided on chosen instants rather than on the wall.
+pub struct FakeClock(AtomicU64);
+
+impl FakeClock {
+    pub fn at(now: u64) -> Arc<Self> {
+        Arc::new(Self(AtomicU64::new(now)))
+    }
+
+    pub fn set(&self, now: u64) {
+        self.0.store(now, Ordering::SeqCst);
+    }
+
+    pub fn advance(&self, secs: u64) {
+        self.0.fetch_add(secs, Ordering::SeqCst);
+    }
+}
+
+impl Clock for FakeClock {
+    fn now(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
     }
 }

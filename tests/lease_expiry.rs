@@ -8,7 +8,8 @@ mod common;
 use std::sync::Arc;
 
 use common::{BackendCall, FakeBackend};
-use toon_provider::{LeaseRecord, ProviderConfig, ProviderService};
+use toon_provider::nostr::wire::Role;
+use toon_provider::{LeaseRecord, LeaseState, ProviderConfig, ProviderService};
 
 const LIVE: u32 = 1000;
 const EXPIRED: u32 = 1001;
@@ -17,11 +18,16 @@ const NOW: u64 = 1_700_000_000;
 fn lease(id: u32, expires_at: u64) -> LeaseRecord {
     LeaseRecord {
         id,
-        workload_id: Some(format!("wid-{}", id)),
-        tenant_npub: "npub1tenant".to_string(),
-        listing: "basic.v1".to_string(),
+        workload_id: format!("{:02x}", id % 256).repeat(32),
+        tenant: "ee6afe4b4a6e4fe49d6c35359d1161a6fd26fbe5d6eefcbab1c9c147731bf08a".to_string(),
+        listing: "basic".to_string(),
+        listing_version: 1,
+        role: Role::Standalone,
+        state: LeaseState::Running,
         created_at: NOW - 600,
         expires_at,
+        ssh_port: 40000,
+        ports: vec![],
     }
 }
 
@@ -38,10 +44,12 @@ fn service(state_path: String, backend: Arc<FakeBackend>) -> ProviderService {
     ProviderService::with_backend(
         ProviderConfig {
             lease_state_path: state_path,
+            nostr_private_key: nostr_sdk::Keys::generate().secret_key().to_secret_hex(),
             ..ProviderConfig::default()
         },
         backend,
     )
+    .unwrap()
 }
 
 #[tokio::test]

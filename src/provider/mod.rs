@@ -5,44 +5,36 @@
 // Paygress ran five loops here — offer publication, heartbeat, a Nostr DM
 // request listener, a standby watchdog and the expiry sweep. Two are left: the
 // sweep in `cleanup`, and the HTTP app in `provider_http`. Directory
-// publication and the lease routes land in later tickets.
+// publication lands in a later ticket.
 
 mod cleanup;
 mod config;
 mod persistence;
 pub mod routes;
+mod spawn;
 mod standby;
 
 pub use config::{load_config, BackendKind, Listing, ProviderConfig, MAX_PORTS_PER_WORKLOAD};
-pub use persistence::LeaseRecord;
+pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
+pub use spawn::{spawn, VOLUME_MOUNT_PATH};
 pub use standby::StandbySlot;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::clock::{system_clock, Clock};
 use crate::compute::{ComputeBackend, ContainerStatus};
 use crate::docker::DockerBackend;
 use crate::provider_http::AppState;
 
 use persistence::{load_leases, persist_leases};
 
-/// Seconds since the Unix epoch.
-pub(crate) fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 pub struct ProviderService {
-    config: Arc<ProviderConfig>,
-    backend: Arc<dyn ComputeBackend>,
-    leases: Arc<Mutex<HashMap<u32, LeaseRecord>>>,
+    state: AppState,
 }
 
 impl ProviderService {
@@ -50,27 +42,30 @@ impl ProviderService {
         let backend: Arc<dyn ComputeBackend> = match config.backend {
             BackendKind::Docker => Arc::new(DockerBackend::new()),
         };
-        Ok(Self::with_backend(config, backend))
+        Self::with_backend(config, backend)
     }
 
     /// Builds the service over a caller-supplied backend, so the lease
     /// lifecycle can be driven against a fake without Docker.
-    pub fn with_backend(config: ProviderConfig, backend: Arc<dyn ComputeBackend>) -> Self {
-        Self {
-            config: Arc::new(config),
-            backend,
-            leases: Arc::new(Mutex::new(HashMap::new())),
-        }
+    pub fn with_backend(config: ProviderConfig, backend: Arc<dyn ComputeBackend>) -> Result<Self> {
+        Self::with_backend_and_clock(config, backend, system_clock())
+    }
+
+    /// …and a caller-supplied clock, so expiry is decided on chosen instants.
+    pub fn with_backend_and_clock(
+        config: ProviderConfig,
+        backend: Arc<dyn ComputeBackend>,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Self> {
+        Ok(Self {
+            state: AppState::new(config, backend, clock)?,
+        })
     }
 
     /// Arc-clones of this service's own state, so the HTTP app and the expiry
     /// sweep see the same lease table.
     pub fn app_state(&self) -> AppState {
-        AppState {
-            config: self.config.clone(),
-            backend: self.backend.clone(),
-            leases: self.leases.clone(),
-        }
+        self.state.clone()
     }
 
     /// Reload leases from disk and reconcile them against the backend.
@@ -79,16 +74,16 @@ impl ProviderService {
     /// the provider was down would otherwise be tracked forever and
     /// re-announced as capacity that isn't there.
     pub async fn restore_leases(&self) {
-        let persisted = load_leases(&self.config.lease_state_path);
+        let persisted = load_leases(&self.state.config.lease_state_path);
         if persisted.is_empty() {
             return;
         }
 
-        let now = now_secs();
+        let now = self.state.clock.now();
         let mut restored = HashMap::new();
         let mut dropped = 0usize;
         for (id, lease) in persisted {
-            match self.backend.get_container_status(id).await {
+            match self.state.backend.get_container_status(id).await {
                 Ok(ContainerStatus::Absent) => {
                     info!("workload {} no longer exists on the backend; dropping", id);
                     dropped += 1;
@@ -112,25 +107,30 @@ impl ProviderService {
             "restored {} lease(s) from {} ({} dropped as missing, {} already expired and due \
              for the next sweep)",
             restored.len(),
-            self.config.lease_state_path,
+            self.state.config.lease_state_path,
             dropped,
             expired,
         );
 
-        let mut lock = self.leases.lock().await;
+        let mut lock = self.state.leases.lock().await;
         *lock = restored;
         // Write back now so dropped entries don't linger until the next sweep.
-        persist_leases(&lock, &self.config.lease_state_path);
+        persist_leases(&lock, &self.state.config.lease_state_path);
     }
 
     /// Run the provider until one of its loops exits.
     pub async fn run(&self) -> Result<()> {
-        info!("starting TOON provider: {}", self.config.provider_name);
+        info!(
+            "starting TOON provider: {} ({}, {} listing version(s))",
+            self.state.config.provider_name,
+            self.state.config.ilp_address,
+            self.state.config.listings.len()
+        );
 
         self.restore_leases().await;
 
         let state = self.app_state();
-        let bind_addr = self.config.http_bind_addr.clone();
+        let bind_addr = self.state.config.http_bind_addr.clone();
 
         tokio::select! {
             result = crate::provider_http::serve(state, &bind_addr) => {

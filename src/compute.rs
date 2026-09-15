@@ -29,6 +29,14 @@ pub fn id_from_container_name(name: &str) -> Option<u32> {
     name.strip_prefix(WORKLOAD_NAME_PREFIX)?.parse().ok()
 }
 
+/// The environment variable a workload finds the tenant's SSH public key in.
+/// The one convention this provider imposes on an image that wants to serve
+/// SSH (spec §9: the tenant's key, and nothing else, opens the workload).
+pub const SSH_PUBLIC_KEY_ENV: &str = "SSH_PUBLIC_KEY";
+
+/// The container port `ContainerConfig::host_port` forwards to.
+pub const SSH_CONTAINER_PORT: u16 = 22;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeStatus {
     pub cpu_usage: f64,
@@ -52,16 +60,20 @@ pub struct PortMapping {
 pub struct ContainerConfig {
     pub id: u32,
     pub name: String,
-    /// What to run. A content-addressed OCI reference once the image path
-    /// lands; a plain tag until then.
+    /// What to run: a content-addressed OCI reference, `reference@digest`,
+    /// so the backend verifies the bytes it pulls.
     pub image: String,
-    pub cpu_cores: u32,
+    /// CPU as the listing prices it. 1000 = one core.
+    pub cpu_millicores: u32,
     pub memory_mb: u32,
     pub storage_gb: u32,
     /// The tenant's SSH public key. There is no password: no usable credential
-    /// ever travels in a response.
+    /// ever travels in a response. Handed to the workload as the environment
+    /// variable `SSH_PUBLIC_KEY_ENV`; an image whose sshd installs it gets
+    /// SSH at `host_port`, and an image can always bridge it with the spawn's
+    /// entrypoint and args.
     pub ssh_key: Option<String>,
-    /// SSH host-port forward. Distinct from `ports`.
+    /// SSH host-port forward to `SSH_CONTAINER_PORT`. Distinct from `ports`.
     pub host_port: Option<u16>,
     pub ports: Vec<PortMapping>,
     pub env: HashMap<String, String>,

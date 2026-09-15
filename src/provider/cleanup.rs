@@ -7,8 +7,8 @@
 use anyhow::Result;
 use tracing::{error, info, warn};
 
-use super::persistence::persist_leases;
-use super::{now_secs, ProviderService};
+use super::persistence::{persist_leases, LeaseEnd, LeaseState};
+use super::ProviderService;
 
 /// At most 30 seconds may pass between a lease expiring and its workload being
 /// destroyed.
@@ -20,39 +20,44 @@ impl ProviderService {
 
         loop {
             tokio::time::sleep(interval).await;
-            self.sweep_expired_leases(now_secs()).await;
+            self.sweep_expired_leases(self.state.clock.now()).await;
         }
     }
 
     /// End every lease at or past its expiry. Public so a test can drive the
     /// sweep on a chosen instant rather than waiting out the interval.
     pub async fn sweep_expired_leases(&self, now: u64) {
-        let mut leases = self.leases.lock().await;
+        let mut leases = self.state.leases.lock().await;
         let expired: Vec<u32> = leases
             .iter()
-            .filter(|(_, l)| l.expires_at <= now)
+            .filter(|(_, l)| l.state.is_live() && l.expires_at <= now)
             .map(|(id, _)| *id)
             .collect();
 
         for id in expired {
             info!("lease {} expired; destroying its workload", id);
 
+            // The transition, then the removal: an ended lease holds nothing
+            // and the table only carries what still does.
+            if let Some(lease) = leases.get_mut(&id) {
+                lease.state = LeaseState::Ended(LeaseEnd::Expiry);
+            }
             leases.remove(&id);
 
             // Delete unconditionally: the lease is already out of the table, so
             // a failed stop that skipped the delete would leak the workload
             // and its id forever, with no retry.
-            if let Err(e) = self.backend.stop_container(id).await {
+            if let Err(e) = self.state.backend.stop_container(id).await {
                 warn!("stop failed for {} ({}), deleting anyway", id, e);
             }
-            match self.backend.delete_container(id).await {
+            match self.state.backend.delete_container(id).await {
                 Ok(_) => info!("workload {} destroyed", id),
                 Err(e) => error!("failed to destroy workload {}: {}", id, e),
             }
 
             // Persist per lease, not once per sweep: a crash midway through
             // would otherwise resurrect entries whose workloads are gone.
-            persist_leases(&leases, &self.config.lease_state_path);
+            persist_leases(&leases, &self.state.config.lease_state_path);
         }
     }
 }

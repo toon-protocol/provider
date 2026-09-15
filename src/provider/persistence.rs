@@ -9,6 +9,40 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
+use crate::nostr::wire::{Access, PortAccess, Role};
+
+/// Why a lease ended (spec §6.7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseEnd {
+    /// No payment bought another Lease Interval.
+    Expiry,
+    /// The tenant asked for it to end.
+    Termination,
+    /// The provider decided it should end.
+    Eviction,
+}
+
+/// `Provisioning → Running → Ended(…)` for a standalone or primary lease.
+/// A standby's `Reserved` state is a later milestone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseState {
+    /// Accepted and paid; the workload is being started. Holds the workload
+    /// id and counts against capacity already, so a racing spawn cannot take
+    /// either.
+    Provisioning,
+    Running,
+    Ended(LeaseEnd),
+}
+
+impl LeaseState {
+    /// Whether the lease still holds its workload id and its capacity slot.
+    pub fn is_live(self) -> bool {
+        !matches!(self, LeaseState::Ended(_))
+    }
+}
+
 /// One lease: a tenant's prepaid right to one workload on this provider, until
 /// it expires.
 ///
@@ -22,24 +56,42 @@ pub struct LeaseRecord {
     /// the host.
     pub id: u32,
 
-    /// The tenant-chosen workload id from the spawn, when there is one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workload_id: Option<String>,
+    /// The tenant-chosen workload id from the spawn (32 bytes, hex).
+    pub workload_id: String,
 
-    /// The Nostr identity this lease belongs to. A payer need not be the
-    /// tenant, so this is never derived from who paid.
-    pub tenant_npub: String,
+    /// The tenant: the hex public key that signed the spawn. A payer need
+    /// not be the tenant, so this is never derived from who paid.
+    pub tenant: String,
 
-    /// The listing version this lease was spawned from. An extension must buy
-    /// time on the same one.
-    #[serde(default)]
+    /// The listing and version this lease was spawned from. An extension
+    /// must buy time on the same version (ADR 0009).
     pub listing: String,
+    pub listing_version: u32,
+
+    pub role: Role,
+    pub state: LeaseState,
 
     pub created_at: u64,
 
     /// The first instant the lease no longer applies. The expiry sweep reaps
     /// anything at or past it.
     pub expires_at: u64,
+
+    /// The SSH forward and the published ports, as handed to the tenant.
+    pub ssh_port: u16,
+    #[serde(default)]
+    pub ports: Vec<PortAccess>,
+}
+
+impl LeaseRecord {
+    /// The access details a tenant reaches this workload at.
+    pub fn access(&self, host: &str) -> Access {
+        Access {
+            host: host.to_string(),
+            ssh_port: self.ssh_port,
+            ports: self.ports.clone(),
+        }
+    }
 }
 
 /// Mirror the lease table to disk.
@@ -111,11 +163,19 @@ mod tests {
     fn lease(id: u32, expires_at: u64) -> LeaseRecord {
         LeaseRecord {
             id,
-            workload_id: Some(format!("wid-{}", id)),
-            tenant_npub: "npub1tenant".to_string(),
-            listing: "basic.v1".to_string(),
+            workload_id: format!("wid-{}", id),
+            tenant: "ee6afe4b4a6e4fe49d6c35359d1161a6fd26fbe5d6eefcbab1c9c147731bf08a".to_string(),
+            listing: "basic".to_string(),
+            listing_version: 1,
+            role: Role::Standalone,
+            state: LeaseState::Running,
             created_at: 1000,
             expires_at,
+            ssh_port: 40000 + id as u16,
+            ports: vec![PortAccess {
+                container_port: 443,
+                host_port: 41000,
+            }],
         }
     }
 
@@ -136,13 +196,12 @@ mod tests {
 
         let loaded = load_leases(&p);
         assert_eq!(loaded.len(), 2);
-        // expires_at drives the expiry sweep and tenant_npub says whose lease
-        // it is; losing either would strand or misassign a paid workload.
-        assert_eq!(loaded[&2000].expires_at, 1234567890);
+        // expires_at drives the expiry sweep, tenant says whose lease it is,
+        // and the access details are what status answers; losing any would
+        // strand or misassign a paid workload.
+        assert_eq!(loaded[&2000], map[&2000]);
         assert_eq!(loaded[&2001].expires_at, 1234567999);
-        assert_eq!(loaded[&2000].tenant_npub, "npub1tenant");
-        assert_eq!(loaded[&2000].workload_id.as_deref(), Some("wid-2000"));
-        assert_eq!(loaded[&2000].listing, "basic.v1");
+        assert_eq!(loaded[&2000].state, LeaseState::Running);
 
         let _ = std::fs::remove_file(&p);
     }
@@ -177,5 +236,12 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert!(loaded.contains_key(&2001));
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn an_ended_lease_holds_nothing() {
+        assert!(LeaseState::Provisioning.is_live());
+        assert!(LeaseState::Running.is_live());
+        assert!(!LeaseState::Ended(LeaseEnd::Expiry).is_live());
     }
 }

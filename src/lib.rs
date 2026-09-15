@@ -6,6 +6,7 @@
 //! `TOON_Network` repository for the spec, ADRs and glossary.
 
 pub mod capabilities;
+pub mod clock;
 pub mod compute;
 pub mod docker;
 pub mod durable_workload;
@@ -14,9 +15,11 @@ pub mod provider;
 pub mod provider_http;
 pub mod reputation;
 
+pub use clock::{system_clock, Clock, SystemClock};
 pub use compute::{ComputeBackend, ContainerConfig, ContainerStatus, NodeStatus, PortMapping};
 pub use docker::DockerBackend;
 pub use provider::{
-    load_config, render_routes, BackendKind, LeaseRecord, Listing, ProviderConfig, ProviderService,
+    load_config, render_routes, BackendKind, LeaseEnd, LeaseRecord, LeaseState, Listing,
+    ProviderConfig, ProviderService,
 };
 pub use provider_http::{router, AppState};

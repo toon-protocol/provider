@@ -117,7 +117,7 @@ mod tests {
                 id: 1,
                 name: "toon-1".to_string(),
                 image: "img".to_string(),
-                cpu_cores: 1,
+                cpu_millicores: 1000,
                 memory_mb: 1024,
                 storage_gb: 10,
                 ssh_key: None,
