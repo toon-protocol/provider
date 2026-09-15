@@ -1,97 +1,48 @@
 [package]
-name = "paygress-cli"
-version = "0.1.9"
+name = "toon-provider"
+version = "0.1.0"
 edition = "2021"
-authors = ["Dhananjay Purohit <dhananjaypurohit7@gmail.com>", "Ritik Jain <ritikjain1272@gmail.com>"]
-description = "Pay-per-use compute marketplace using Cashu ecash and Nostr — no accounts, no signups"
+description = "Sell leases on workloads over the TOON Network"
 license = "Apache-2.0"
-repository = "https://github.com/DhananjayPurohit/paygress"
-homepage = "https://paygress.net"
-documentation = "https://github.com/DhananjayPurohit/paygress#readme"
+repository = "https://github.com/toon-protocol/TOON_Network"
 readme = "README.md"
-keywords = ["cashu", "nostr", "lightning", "compute", "ecash"]
-categories = ["command-line-utilities", "network-programming"]
+keywords = ["toon", "compute", "marketplace", "nostr", "lease"]
+categories = ["network-programming"]
 
 [lib]
-name = "paygress"
+name = "toon_provider"
 path = "src/lib.rs"
 
-# CLI tool binary
 [[bin]]
-name = "paygress-cli"
-path = "src/cli/main.rs"
-
-# Observatory snapshot crawler (powers the dashboard).
-[[bin]]
-name = "paygress-snapshot"
-path = "src/bin/paygress_snapshot.rs"
-
-[features]
-default = []
+name = "toon-provider"
+path = "src/main.rs"
 
 [dependencies]
-# Core dependencies
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.143"
+toml = "0.8"
 tokio = { version = "1.0", features = ["full"] }
 anyhow = "1.0"
-thiserror = "1"
-rand = "0.8"
+async-trait = "0.1"
 
-# Cashu dependencies — cdk-sqlite matches ngx_l402's backend so both
-# processes share the same wallet database file for Lightning sweep.
-cdk-sqlite = { version = "0.17.3", features = ["wallet"] }
-cdk = { version = "0.17.3", default-features = false, features = ["wallet"] }
-# BIP39 mnemonic -> 64-byte seed (Cashu/NUT-13). Must match ngx_l402_core's
-# derivation so the shared wallet opens identically in both processes.
-bip39 = { version = "2.1.0", features = ["unicode-normalization"] }
+# The provider's Nostr identity. Its key signs what the provider publishes and
+# is the identity a Lease Request is addressed to. Nothing DM-related: nip04
+# and nip59 went with the DM transport.
+nostr-sdk = "0.43"
 
-# Nostr dependencies
-nostr-sdk = { version = "0.43", features = ["nip04", "nip44", "nip59"] }
+# HTTP app, behind the provider's own TOON connector.
+axum = "0.7"
+
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-uuid = { version = "1.0", features = ["v4"] }
-futures-util = "0.3"
-
-# HTTP server dependencies
-axum = "0.7"
-chrono = { version = "0.4", features = ["serde"] }
-
-# HTTP client dependencies (for MCP → HTTP)
-reqwest = { version = "0.11", features = ["json"] }
-
-# MCP server dependencies
-rmcp = { version = "0.2.1", features = ["server", "transport-io", "macros"] }
-# rmcp's #[tool] macro derives parameter schemas via schemars 0.8.
-schemars = "0.8"
-async-trait = "0.1"
-
-# Environment file loading
-dotenv = "0.15"
-
-# CLI dependencies
-clap = { version = "4", features = ["derive"] }
-indicatif = "0.17"
-colored = "2"
-
-# Proxmox integration dependencies
-serde_urlencoded = "0.7"
-futures = "0.3"
-num_cpus = "1.0"
-
-# Blossom client + content-addressed storage encryption (Unit 6).
-chacha20poly1305 = "0.10"
-sha2 = "0.10"
-hex = "0.4"
-base64 = "0.22"
-
 [dev-dependencies]
-tokio-test = "0.4"
-wiremock = "0.5"
+tower = { version = "0.4", features = ["util"] }
 proptest = "1"
+rand = "0.8"
 tempfile = "3"
-base64 = "0.22"
 
 [profile.release]
 # Optimize for small binary size
@@ -99,4 +50,3 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 panic = "abort"
-

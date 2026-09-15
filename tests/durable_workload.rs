@@ -1,10 +1,10 @@
-//! One deterministic test per `paygress::durable_workload` transition, plus a
+//! One deterministic test per `toon_provider::durable_workload` transition, plus a
 //! proptest for the single-writer invariant.
 
 use proptest::prelude::*;
 
-use paygress::durable_workload::{
-    DurableWorkload, HeartbeatObservation, QuorumConfig, ReplicationMode, RestartPolicy,
+use toon_provider::durable_workload::{
+    DurableWorkload, LivenessObservation, QuorumConfig, ReplicationMode, RestartPolicy,
     StateMachineEvent, WorkloadState, WorkloadStateMachine,
 };
 
@@ -35,7 +35,7 @@ fn workload(id: u32, provider: &str, replication: ReplicationMode, now: u64) -> 
     }
 }
 
-/// Heartbeat quorum is a provider-level signal, so only warm-standby
+/// Liveness quorum is a provider-level signal, so only warm-standby
 /// workloads act on losing it — they have a standby to promote. Tests
 /// exercising the Suspect / eviction path must use this mode.
 fn warm_standby() -> ReplicationMode {
@@ -44,8 +44,8 @@ fn warm_standby() -> ReplicationMode {
     }
 }
 
-fn observation(provider: &str, relay: &str, when: u64) -> HeartbeatObservation {
-    HeartbeatObservation {
+fn observation(provider: &str, relay: &str, when: u64) -> LivenessObservation {
+    LivenessObservation {
         provider_npub: provider.to_string(),
         relay_url: relay.to_string(),
         seen_at: when,
@@ -53,8 +53,8 @@ fn observation(provider: &str, relay: &str, when: u64) -> HeartbeatObservation {
     }
 }
 
-/// A full N-of-N heartbeat sweep for `PROVIDER_A` at `when`.
-fn all_relays(when: u64) -> Vec<HeartbeatObservation> {
+/// A full N-of-N liveness sweep for `PROVIDER_A` at `when`.
+fn all_relays(when: u64) -> Vec<LivenessObservation> {
     RELAYS
         .iter()
         .map(|r| observation(PROVIDER_A, r, when))
@@ -119,7 +119,7 @@ fn suspect_recovers_to_live_within_t2() {
     sm.track(workload(1, PROVIDER_A, warm_standby(), 0));
     let _ = sm.tick(10, &all_relays(10));
     let _ = sm.tick(200, &[]); // → Suspect
-    let _ = sm.tick(220, &all_relays(220)); // heartbeats resume before T2
+    let _ = sm.tick(220, &all_relays(220)); // liveness observations resume before T2
     assert!(matches!(sm.state_of(1), Some(WorkloadState::Live { .. })));
 }
 
@@ -212,7 +212,7 @@ fn stale_observation_does_not_count_for_quorum() {
     sm.track(workload(1, PROVIDER_A, ReplicationMode::None, 0));
 
     // event_timestamp is an hour before the tick; stale_secs = 180.
-    let stale = HeartbeatObservation {
+    let stale = LivenessObservation {
         provider_npub: PROVIDER_A.to_string(),
         relay_url: RELAYS[0].to_string(),
         seen_at: 10,
@@ -222,7 +222,7 @@ fn stale_observation_does_not_count_for_quorum() {
 
     assert!(
         matches!(sm.state_of(1), Some(WorkloadState::Provisioning { .. })),
-        "stale heartbeat must not advance Provisioning → Live"
+        "stale liveness must not advance Provisioning → Live"
     );
 }
 
