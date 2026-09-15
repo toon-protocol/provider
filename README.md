@@ -73,6 +73,11 @@ parts:
   every `handler_url` in the route table.
 - `nostr_private_key`: the provider's identity. A Lease Request is addressed
   to its public key.
+- `[image_policy]`: what this provider refuses to run — `deny_digests`
+  (exact `sha256:…` digests), `deny_references` (cheap prefix denial on
+  `image.reference`, a trailing `*` matches a suffix), `max_image_bytes`
+  (total size cap). All optional; the default is permissive. See
+  [Availability and image policy](#availability-and-image-policy).
 
 ## Routes and the connector
 
@@ -119,6 +124,52 @@ image can bridge it with the spawn's own `entrypoint` and `args` (e.g.
 `["/bin/sh"]` + `["-c", "PUBLIC_KEY=\"$SSH_PUBLIC_KEY\" exec /init"]` for
 `linuxserver/openssh-server`). No password is ever issued. A volume, when
 asked for, is mounted at `/data`.
+
+## Availability and image policy
+
+`POST /availability` (free, unsigned) answers whether a spawn would run,
+without starting anything — advice, not a reservation: a spawn that later
+fails is still billed (ADR 0003). Body:
+
+```json
+{ "listing": "basic", "version": 1,
+  "image": { "reference": "docker.io/library/alpine", "digest": "sha256:…" } }
+```
+
+This is the ticket's shape, not the spec draft's flatter `image_digest`; an
+unknown field (including `image_digest`) is `invalid_request`. The route
+always answers HTTP 200 — the answer *is* the payload:
+
+```json
+{ "would_run": true }
+{ "would_run": false, "error": "wrong_listing_version", "message": "…" }
+```
+
+It applies, in order: the listing version exists (`wrong_listing_version`),
+the image policy below (`refused_image` / `no_matching_arch`), and capacity
+(`no_capacity`). A paid spawn applies the identical image-policy check at the
+same point in its own validation order (§6.2 step 5, between
+`workload_id_taken` and `no_capacity`), so a positive `availability` answer
+and a spawn's outcome never disagree, and `availability` never calls the
+compute backend.
+
+**Image policy** (`[image_policy]` in the config) is a deny list of exact
+digests, a cheap deny list of reference prefixes, and a maximum image size.
+Size and architecture come from the upstream OCI registry: the provider
+fetches the manifest or index named by `image.digest` over plain HTTP(S)
+(`docker.io` references resolve against `registry-1.docker.io`, with an
+anonymous token from the challenge in `Www-Authenticate` when the registry
+answers 401 — the generic bearer flow every OCI-distribution registry
+supports; other registries are tried anonymously first). Given an index, the
+manifest matching the listing's `arch` is selected (`no_matching_arch` if
+none matches); given a manifest, size is the config blob plus every layer's
+declared size. The fetched bytes are always verified against the requested
+digest before anything is read out of them; a mismatch, or a registry that
+cannot be reached at all, is `refused_image` — there is no distinct "registry
+down" code, since a tenant's availability check or spawn has no use for
+anything but a refusal right now. Verified manifests are cached in memory,
+keyed by digest, for the life of the process (issue #1's "verified blobs
+cached across leases" — a manifest is the only blob this milestone fetches).
 
 ## Build, test and run
 
