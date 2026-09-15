@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use tracing::{error, info, warn};
 
 use super::config::{Listing, MAX_PORTS_PER_WORKLOAD};
+use super::image_policy;
 use super::persistence::{persist_leases, LeaseRecord, LeaseState};
 use crate::compute::{container_name, ContainerConfig, PortMapping};
 use crate::nostr::lease_request::{self, Op};
@@ -108,6 +109,22 @@ pub async fn spawn(
             ));
         }
         check_image(&content)?;
+        // Step 5 continued: the provider's own image policy — a deny list
+        // and a size cap, resolved against the upstream registry. The same
+        // check `availability` applies, so a positive `availability` answer
+        // and a paid spawn's outcome never disagree (spec §9). This holds
+        // the lease-table lock across a network fetch; deliberately so, to
+        // keep the same atomicity `workload_id_taken`/capacity/insert
+        // already relied on, at the cost of serialising spawns behind an
+        // uncached image lookup (a repeat digest is served from
+        // `OciRegistry`'s in-memory cache without another fetch).
+        image_policy::check(
+            &state.image_registry,
+            &state.image_policy,
+            &listing,
+            &content.image,
+        )
+        .await?;
         let running = leases
             .values()
             .filter(|l| l.state.is_live() && l.listing == listing.name)
