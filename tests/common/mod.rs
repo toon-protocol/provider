@@ -2,6 +2,8 @@
 //! so this is pulled in with `mod common;` rather than imported from the lib.
 #![allow(dead_code)]
 
+pub mod harness;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
