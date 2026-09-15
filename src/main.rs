@@ -3,7 +3,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use toon_provider::{load_config, render_routes, ProviderService};
+use toon_provider::{load_config, persisted_leases, render_routes, ProviderService};
 
 #[derive(Parser)]
 #[command(name = "toon-provider", version, about = "Sell leases on workloads over the TOON Network", long_about = None)]
@@ -19,8 +19,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Print the connector `[[routes]]` rows this provider expects: one spawn
-    /// and one extend row per listing version at the listing price, plus the
-    /// free availability, status and terminate rows.
+    /// and one extend row per LIVE listing version at that version's price,
+    /// plus the free availability, status and terminate rows.
+    ///
+    /// A retired listing version keeps its rows until its last lease ends
+    /// (ADR 0009), so this reads the persisted lease table at
+    /// `lease_state_path` — read-only — to decide which retired versions are
+    /// still live. Run it against a running provider's state file: the rows
+    /// it stops printing are the rows to delete from the connector config.
     Routes,
 }
 
@@ -31,7 +37,8 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Routes) => {
-            print!("{}", render_routes(&config));
+            let leases = persisted_leases(&config.lease_state_path);
+            print!("{}", render_routes(&config, &leases));
             Ok(())
         }
         None => {

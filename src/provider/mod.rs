@@ -32,6 +32,7 @@ pub use config::{
 };
 pub use image_policy::{ImagePolicy, OciRegistry};
 pub use lifecycle::{extend, status, terminate};
+pub use persistence::persisted_leases;
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
 pub use spawn::{spawn, VOLUME_MOUNT_PATH};
