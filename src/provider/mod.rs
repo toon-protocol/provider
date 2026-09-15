@@ -10,10 +10,12 @@
 mod cleanup;
 mod config;
 mod persistence;
+pub mod routes;
 mod standby;
 
-pub use config::{load_config, BackendKind, ProviderConfig};
+pub use config::{load_config, BackendKind, Listing, ProviderConfig, MAX_PORTS_PER_WORKLOAD};
 pub use persistence::LeaseRecord;
+pub use routes::{render_routes, route_table, RouteRow};
 pub use standby::StandbySlot;
 
 use std::collections::HashMap;

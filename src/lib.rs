@@ -16,5 +16,7 @@ pub mod reputation;
 
 pub use compute::{ComputeBackend, ContainerConfig, ContainerStatus, NodeStatus, PortMapping};
 pub use docker::DockerBackend;
-pub use provider::{load_config, BackendKind, LeaseRecord, ProviderConfig, ProviderService};
+pub use provider::{
+    load_config, render_routes, BackendKind, LeaseRecord, Listing, ProviderConfig, ProviderService,
+};
 pub use provider_http::{router, AppState};
