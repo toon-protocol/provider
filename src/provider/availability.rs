@@ -8,8 +8,9 @@
 // reservation: a spawn that later fails is still billed (ADR 0003), and this
 // function never touches `ComputeBackend` or the lease table's write side.
 
+use super::image_policy;
+use super::persistence::count_live;
 use crate::nostr::wire::{AvailabilityRequest, AvailabilityResponse, ErrorCode, ErrorResponse};
-use crate::provider::image_policy;
 use crate::provider_http::AppState;
 
 /// Serve one `POST /availability`. Never fails: every refusal reason becomes
@@ -58,10 +59,7 @@ async fn check(state: &AppState, body: &[u8]) -> Result<(), ErrorResponse> {
     // against the listing name's declared capacity — read-only, so this
     // never races a spawn's insert into taking a slot.
     let leases = state.leases.lock().await;
-    let running = leases
-        .values()
-        .filter(|l| l.state.is_live() && l.listing == listing.name)
-        .count();
+    let running = count_live(&leases, &listing.name);
     if running >= state.config.capacity_of(&listing.name) as usize {
         return Err(ErrorResponse::new(
             ErrorCode::NoCapacity,

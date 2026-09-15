@@ -15,7 +15,7 @@ use tracing::{error, info, warn};
 
 use super::config::{Listing, MAX_PORTS_PER_WORKLOAD};
 use super::image_policy;
-use super::persistence::{persist_leases, LeaseRecord, LeaseState};
+use super::persistence::{count_live, persist_leases, LeaseRecord, LeaseState};
 use crate::compute::{container_name, ContainerConfig, PortMapping};
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
@@ -125,10 +125,7 @@ pub async fn spawn(
             &content.image,
         )
         .await?;
-        let running = leases
-            .values()
-            .filter(|l| l.state.is_live() && l.listing == listing.name)
-            .count();
+        let running = count_live(&leases, &listing.name);
         if running >= state.config.capacity_of(&listing.name) as usize {
             return Err(ErrorResponse::new(
                 ErrorCode::NoCapacity,
