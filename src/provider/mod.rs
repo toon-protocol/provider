@@ -7,14 +7,20 @@
 // sweep in `cleanup`, and the HTTP app in `provider_http`. Directory
 // publication lands in a later ticket.
 
+mod availability;
 mod cleanup;
 mod config;
+pub mod image_policy;
 mod persistence;
 pub mod routes;
 mod spawn;
 mod standby;
 
-pub use config::{load_config, BackendKind, Listing, ProviderConfig, MAX_PORTS_PER_WORKLOAD};
+pub use availability::availability;
+pub use config::{
+    load_config, BackendKind, ImagePolicyConfig, Listing, ProviderConfig, MAX_PORTS_PER_WORKLOAD,
+};
+pub use image_policy::{ImagePolicy, OciRegistry};
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
 pub use spawn::{spawn, VOLUME_MOUNT_PATH};
