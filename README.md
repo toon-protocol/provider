@@ -14,9 +14,12 @@ tenant paying through hops is served identically to one paying directly.
 
 ## Status
 
-Milestone 1 is in progress. Today the app serves `/health` and sweeps expired
-leases; the lease routes, the directory events and the image path are being
-added ticket by ticket.
+Milestone 1 is in progress. Today the app serves a paid **spawn** (a
+tenant-signed Lease Request in, a running workload and its access details
+out), sweeps expired leases, and prints the connector route table it expects.
+Extension, status, termination, availability, the directory events and the
+image policy are being added ticket by ticket; their routes answer
+`invalid_request` "not implemented" until then.
 
 ## Spec, decisions and vocabulary
 
@@ -56,7 +59,66 @@ nothing calls them — they are Milestone 3 work.
 ## Configuration
 
 One TOML file, no environment variables. Copy
-[`provider.example.toml`](provider.example.toml) and edit it.
+[`provider.example.toml`](provider.example.toml) and edit it. The important
+parts:
+
+- `ilp_address`: the provider's ILP address, e.g. `g.acme`. Every route is a
+  suffix of it.
+- `[[listings]]`: one per tier and version — `name`, `version`, `resources
+  {cpu_millicores, memory_mb, storage_gb, gpu?}`, `arch`, `lease_interval_s`,
+  `price` (integer µUSDC per Lease Interval), `capabilities`, `capacity`.
+  A price change is a new version with its own routes (ADR 0009). `capacity`
+  is how many leases of that name may run at once, across its versions.
+- `handler_base_url`: where the *connector* reaches this app; the origin of
+  every `handler_url` in the route table.
+- `nostr_private_key`: the provider's identity. A Lease Request is addressed
+  to its public key.
+
+## Routes and the connector
+
+The provider's connector terminates payment and forwards each ILP route to
+one HTTP path here:
+
+| ILP route | HTTP path | Price |
+|---|---|---|
+| `<addr>.<listing>.v<n>.spawn` | `POST /listings/<listing>/v<n>/spawn` | listing price |
+| `<addr>.<listing>.v<n>.extend` | `POST /listings/<listing>/v<n>/extend` | listing price |
+| `<addr>.availability` | `POST /availability` | 0 |
+| `<addr>.status` | `POST /status` | 0 |
+| `<addr>.terminate` | `POST /terminate` | 0 |
+
+`toon-provider routes --config provider.toml` prints these as connector
+`[[routes]]` rows, ready to paste into the connector's config. Every answer
+is JSON; a refusal is `{ "error": "<code>", "message": "…" }` with a 4xx
+status and the spec's code, and on a paid route it is still billed.
+
+## Spawning
+
+The spawn body is `{ "request": <Lease Request> }`: a Nostr event of kind
+`K_LEASE_REQUEST` signed by the tenant, with tags `p` (this provider's
+pubkey), `op` = `spawn` and `expiration` (at most 300 s after `created_at`),
+whose content is
+
+```json
+{ "workload_id": "<32 random bytes, hex>",
+  "image": { "reference": "docker.io/library/alpine", "digest": "sha256:…" },
+  "env": { "KEY": "value" }, "ports": [ { "container_port": 443, "protocol": "tcp" } ],
+  "volume_gb": 2, "ssh_public_key": "ssh-ed25519 AAAA… tenant",
+  "entrypoint": ["/bin/sh"], "args": ["-c", "…"] }
+```
+
+The image is pulled as `reference@digest`, so the daemon verifies the bytes
+and picks the manifest for its own architecture. Anything else in the
+content — a runtime flag, a host mount, a device, a capability — is refused
+as `invalid_request`; privileges come only from the listing (ADR 0004).
+
+**SSH.** The tenant's key is handed to the workload as the environment
+variable `SSH_PUBLIC_KEY`, and `access.ssh_port` forwards to container port
+22. An image whose sshd installs that variable serves SSH as-is; any other
+image can bridge it with the spawn's own `entrypoint` and `args` (e.g.
+`["/bin/sh"]` + `["-c", "PUBLIC_KEY=\"$SSH_PUBLIC_KEY\" exec /init"]` for
+`linuxserver/openssh-server`). No password is ever issued. A volume, when
+asked for, is mounted at `/data`.
 
 ## Build, test and run
 

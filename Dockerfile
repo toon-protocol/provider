@@ -4,6 +4,9 @@
 #   docker run -v /var/run/docker.sock:/var/run/docker.sock \
 #              -v ./provider.toml:/etc/toon-provider/provider.toml \
 #              toon-provider
+#
+# Workloads then run on the HOST daemon, and their SSH forwards and ports are
+# published on the host — so `public_ip` is the host's address.
 FROM rust:1.85-slim-bookworm AS builder
 
 WORKDIR /app
@@ -13,11 +16,16 @@ RUN cargo build --release --locked --bin toon-provider
 
 FROM debian:bookworm-slim
 
+# curl for a compose healthcheck against /health; certificates for the
+# daemon's registry pulls are the daemon's business, not this image's.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    docker.io \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Only the CLI, from the official image: the `docker.io` apt package would
+# drag in a whole engine this container never runs.
+COPY --from=docker:28-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=builder /app/target/release/toon-provider /usr/local/bin/toon-provider
 
 WORKDIR /var/lib/toon-provider

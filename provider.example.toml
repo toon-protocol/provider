@@ -5,12 +5,17 @@ backend = "docker"
 
 provider_name = "Example Provider"
 
+# The provider's ILP address. Every route is a suffix of it:
+# <ilp_address>.<listing>.v<n>.spawn / .extend, and the free
+# <ilp_address>.availability / .status / .terminate.
+ilp_address = "g.acme"
+
 # Where tenants reach workloads. Ports are exposed as public_ip:host_port;
 # there are no hostnames and no TLS.
 public_ip = "203.0.113.7"
 
 # Signs everything this provider publishes, and is the identity a Lease
-# Request is addressed to.
+# Request is addressed to. Hex or nsec1….
 nostr_private_key = "nsec1..."
 
 # The relays this provider publishes its Profile, Listings and Liveness to.
@@ -23,14 +28,40 @@ capabilities = ["docker"]
 # able to reach it.
 http_bind_addr = "127.0.0.1:8080"
 
+# Where the CONNECTOR reaches the app: the origin of every handler_url that
+# `toon-provider routes` prints. Inside compose this is the service name.
+handler_base_url = "http://127.0.0.1:8080"
+
 # Inclusive range of backend workload ids this provider may use.
 workload_id_range_start = 1000
 workload_id_range_end = 1999
 
-# First host port handed out for a workload's SSH forward. Omit to derive one
-# from the workload id.
+# First host port handed out for a workload's SSH forward (to container port
+# 22). Omit to derive one from the workload id.
 ssh_port_start = 40000
+
+# First host port of the published-port blocks: workload id i (from
+# workload_id_range_start) owns 16 ports from workload_port_start + 16 * i.
+# Must not overlap the SSH forwards.
+workload_port_start = 60000
 
 # Where the lease table is mirrored. It is the only record that a lease
 # exists, so a restart without it strands every paid workload.
 lease_state_path = "/var/lib/toon-provider/leases.json"
+
+# What this provider sells: one [[listings]] per tier and version. A price or
+# resource change is a NEW VERSION (bump `version`, keep the old entry until
+# its last lease ends) so running leases keep the price they started at.
+[[listings]]
+name = "basic"            # stable across versions; an ILP address segment
+version = 1
+arch = "amd64"            # amd64 | arm64
+lease_interval_s = 3600   # one payment buys this many seconds
+price = 1000              # µUSDC per Lease Interval, on spawn and on extend
+capabilities = []         # granted to every workload of this tier
+capacity = 4              # leases of this tier that may run at once, all versions
+[listings.resources]
+cpu_millicores = 500
+memory_mb = 512
+storage_gb = 10
+# gpu = "rtx-4090"        # when the tier includes one
