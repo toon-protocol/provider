@@ -15,7 +15,7 @@ use common::harness::{
     error_of, harness, harness_with, listing, post, spawn, spawn_content, workload_id, Harness,
     RequestSpec, INTERVAL, NOW, PUBLIC_IP,
 };
-use common::{BackendCall, FakeBackend, FakeClock};
+use common::{BackendCall, FakeBackend, FakeClock, FakeDirectory};
 use std::sync::Arc;
 use toon_provider::Clock;
 
@@ -466,6 +466,7 @@ async fn restarted(h: &Harness, at: u64, backend: Arc<FakeBackend>) -> Harness {
         h.state_path.clone(),
         backend,
         FakeClock::at(at),
+        FakeDirectory::new(),
         common::stub_registry().await,
         toon_provider::provider::ImagePolicyConfig::default(),
     )

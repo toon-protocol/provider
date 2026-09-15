@@ -15,7 +15,7 @@ use common::harness::{
     digest, error_of, harness, harness_with, harness_with_policy, listing, post, restart, spawn,
     spawn_content, workload_id, RequestSpec, INTERVAL, NOW, PUBLIC_IP, SSH_KEY,
 };
-use common::{BackendCall, FakeBackend, FakeClock};
+use common::{BackendCall, FakeBackend, FakeClock, FakeDirectory};
 use toon_provider::compute::PortMapping;
 use toon_provider::nostr::kinds::K_LEASE_REQUEST;
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, SpawnContent};
@@ -570,6 +570,7 @@ async fn a_spawned_lease_survives_a_restart() {
         h.state_path.clone(),
         backend.clone(),
         FakeClock::at(NOW + 10),
+        FakeDirectory::new(),
         common::stub_registry().await,
         ImagePolicyConfig::default(),
     )
@@ -747,6 +748,7 @@ async fn a_denied_image_is_reported_before_a_full_listing() {
         state_path,
         FakeBackend::new(),
         FakeClock::at(NOW),
+        FakeDirectory::new(),
         registry,
         policy,
     )

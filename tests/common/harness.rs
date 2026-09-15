@@ -20,7 +20,7 @@ use nostr_sdk::{EventBuilder, Keys, Kind, PublicKey, Tag, TagKind, Timestamp};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use super::{FakeBackend, FakeClock};
+use super::{FakeBackend, FakeClock, FakeDirectory};
 use toon_provider::nostr::kinds::K_LEASE_REQUEST;
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, Resources, SpawnContent};
 use toon_provider::provider::ImagePolicyConfig;
@@ -46,6 +46,9 @@ pub struct Harness {
     pub service: ProviderService,
     pub backend: Arc<FakeBackend>,
     pub clock: Arc<FakeClock>,
+    /// So a test can read back what the provider published — an Eviction
+    /// Notice, chiefly — without paying a relay.
+    pub directory: Arc<FakeDirectory>,
     pub provider: PublicKey,
     pub state_path: String,
     pub provider_key: String,
@@ -96,6 +99,7 @@ pub async fn harness_with_policy(
         state_path,
         FakeBackend::new(),
         FakeClock::at(NOW),
+        FakeDirectory::new(),
         super::stub_registry().await,
         image_policy,
     )
@@ -112,6 +116,7 @@ pub async fn restart(
     state_path: String,
     backend: Arc<FakeBackend>,
     clock: Arc<FakeClock>,
+    directory: Arc<FakeDirectory>,
     registry: MockServer,
     image_policy: ImagePolicyConfig,
 ) -> Harness {
@@ -130,14 +135,20 @@ pub async fn restart(
         },
         ..ProviderConfig::default()
     };
-    let service =
-        ProviderService::with_backend_and_clock(config, backend.clone(), clock.clone()).unwrap();
+    let service = ProviderService::with_backend_clock_and_directory(
+        config,
+        backend.clone(),
+        clock.clone(),
+        directory.clone(),
+    )
+    .unwrap();
     let provider = Keys::parse(&provider_key).unwrap().public_key();
     Harness {
         app: router(service.app_state()),
         service,
         backend,
         clock,
+        directory,
         provider,
         state_path,
         provider_key,

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 use toon_provider::nostr::directory_events::{
-    ListingContent, LivenessContent, ProfileContent, Settlement,
+    EvictionContent, ListingContent, LivenessContent, ProfileContent, Settlement,
 };
 use toon_provider::nostr::kinds::K_LEASE_REQUEST;
 use toon_provider::nostr::wire::*;
@@ -196,6 +196,73 @@ fn extend_status_and_terminate_shapes_round_trip() {
     };
     let back: ExtendResponse =
         serde_json::from_str(&serde_json::to_string(&response).unwrap()).unwrap();
+    assert_eq!(back, response);
+}
+
+#[test]
+fn eviction_reasons_serialise_as_the_readmes_snake_case_codes() {
+    for (reason, code) in [
+        (EvictionReason::Abuse, "abuse"),
+        (EvictionReason::Policy, "policy"),
+        (EvictionReason::Maintenance, "maintenance"),
+        (EvictionReason::Other, "other"),
+    ] {
+        assert_eq!(serde_json::to_value(reason).unwrap(), json!(code));
+        assert_eq!(
+            serde_json::from_value::<EvictionReason>(json!(code)).unwrap(),
+            reason
+        );
+    }
+}
+
+#[test]
+fn evict_request_round_trips_with_and_without_a_message() {
+    let request = EvictRequest {
+        workload_id: "ab".repeat(32),
+        reason: EvictionReason::Maintenance,
+        message: Some("rebooting the host for a kernel update".to_string()),
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["workload_id"], request.workload_id);
+    assert_eq!(value["reason"], "maintenance");
+    assert_eq!(value["message"], "rebooting the host for a kernel update");
+    let back: EvictRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(back, request);
+
+    let no_message = EvictRequest {
+        message: None,
+        ..request
+    };
+    let value = serde_json::to_value(&no_message).unwrap();
+    assert!(
+        value.get("message").is_none(),
+        "an omitted message must not round-trip as null"
+    );
+    let back: EvictRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(back, no_message);
+}
+
+#[test]
+fn an_unknown_field_in_an_evict_request_is_refused() {
+    let value = json!({
+        "workload_id": "ab".repeat(32),
+        "reason": "abuse",
+        "runtime_flags": ["--privileged"],
+    });
+    assert!(serde_json::from_value::<EvictRequest>(value).is_err());
+}
+
+#[test]
+fn evict_response_round_trips_the_ended_state_and_publication_outcome() {
+    let response = EvictResponse {
+        workload_id: "ab".repeat(32),
+        state: LeaseState::Ended(LeaseEnd::Eviction),
+        notice_published: true,
+    };
+    let value = serde_json::to_value(&response).unwrap();
+    assert_eq!(value["state"], json!({ "ended": "eviction" }));
+    assert_eq!(value["notice_published"], true);
+    let back: EvictResponse = serde_json::from_value(value).unwrap();
     assert_eq!(back, response);
 }
 
@@ -474,6 +541,31 @@ fn liveness_round_trips_its_per_listing_availability() {
         serde_json::from_value::<LivenessContent>(value).unwrap(),
         liveness
     );
+}
+
+#[test]
+fn eviction_content_round_trips_the_spec_shape() {
+    let content = EvictionContent {
+        workload_id: "ab".repeat(32),
+        reason: EvictionReason::Abuse,
+        message: "repeated port scans from the workload".to_string(),
+    };
+    let value = serde_json::to_value(&content).unwrap();
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["message", "reason", "workload_id"],
+        "spec §6.7: {{ workload_id, reason, message }}, no more and no fewer"
+    );
+    assert_eq!(value["reason"], "abuse");
+    let back: EvictionContent = serde_json::from_value(value).unwrap();
+    assert_eq!(back, content);
 }
 
 #[test]
