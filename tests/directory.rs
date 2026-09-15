@@ -24,7 +24,7 @@ use toon_provider::nostr::directory_events::{
 };
 use toon_provider::nostr::kinds::{K_LEASE_REQUEST, K_LISTING, K_LIVENESS, K_PROFILE, TOON_LABEL};
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, Resources, SpawnContent};
-use toon_provider::{router, Clock, Listing, ProviderConfig, ProviderService};
+use toon_provider::{router, Clock, Directory, Listing, ProviderConfig, ProviderService};
 
 const NOW: u64 = 1_700_000_000;
 const INTERVAL: u64 = 3600;
@@ -400,6 +400,30 @@ async fn a_relay_that_refuses_a_write_does_not_stop_the_provider() {
 async fn a_publication_every_relay_took_is_not_retried() {
     let h = harness();
     assert!(h.service.publish_directory().await.unwrap());
+}
+
+// ── reading Liveness back ───────────────────────────────────────────────────
+
+#[tokio::test]
+async fn query_liveness_answers_for_the_provider_that_published_it_and_nobody_else() {
+    // The port's other half: a provider is LIVE ON A RELAY while that relay
+    // holds an unexpired Liveness from it (spec §4.3). Milestone 3's Takeover
+    // is the caller; this pins the contract now.
+    let h = harness();
+    h.service.publish_liveness(NOW).await.unwrap();
+    let published = h.directory.of_kind(K_LIVENESS).remove(0);
+    h.directory.seed_liveness(published.clone());
+
+    let found = h.directory.query_liveness(h.provider).await.unwrap();
+    assert_eq!(found.map(|e| e.id), Some(published.id));
+
+    let stranger = Keys::generate().public_key();
+    assert!(h
+        .directory
+        .query_liveness(stranger)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 // ── what must never be published ────────────────────────────────────────────
