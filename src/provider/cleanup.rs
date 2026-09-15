@@ -38,59 +38,60 @@ impl ProviderService {
     /// has run out. Public so a test can drive the sweep on a chosen instant
     /// rather than waiting out the interval.
     pub async fn sweep_expired_leases(&self, now: u64) {
-        sweep(&self.state, now).await
-    }
-}
+        let state = &self.state;
 
-pub(crate) async fn sweep(state: &AppState, now: u64) {
-    // One pass under the lock decides everything; the backend calls happen
-    // after it, so a sweep never holds the table against the HTTP handlers
-    // while a daemon takes its time.
-    let pending: Vec<u32> = {
-        let mut leases = state.leases.lock().await;
+        // One pass under the lock decides everything; the backend calls
+        // happen after it, so a sweep never holds the table against the HTTP
+        // handlers while a daemon takes its time.
+        let pending: Vec<u32> = {
+            let mut leases = state.leases.lock().await;
 
-        for lease in leases.values_mut() {
-            if lease.state.is_live() && lease.expires_at <= now {
-                info!("lease {} expired; destroying its workload", lease.id);
-                lease.state = LeaseState::Ended(LeaseEnd::Expiry);
-                lease.ended_at = Some(now);
+            for lease in leases.values_mut() {
+                if lease.state.is_live() && lease.expires_at <= now {
+                    info!("lease {} expired; destroying its workload", lease.id);
+                    lease.state = LeaseState::Ended(LeaseEnd::Expiry);
+                    lease.ended_at = Some(now);
+                }
             }
+
+            let retention = state.config.ended_retention_s;
+            leases.retain(|id, lease| {
+                if lease.state.is_live() {
+                    return true;
+                }
+                // Never forget a lease whose workload may still be running: the
+                // record is the only thing that will make us try again.
+                let keep =
+                    !lease.destroyed || lease.ended_at.unwrap_or(0).saturating_add(retention) > now;
+                if !keep {
+                    info!("lease {} ended over {} s ago; forgetting it", id, retention);
+                }
+                keep
+            });
+
+            persist_leases(&leases, &state.config.lease_state_path);
+
+            leases
+                .values()
+                .filter(|l| !l.state.is_live() && !l.destroyed)
+                .map(|l| l.id)
+                .collect()
+        };
+
+        for id in pending {
+            destroy_workload(state, id).await;
         }
-
-        let retention = state.config.ended_retention_s;
-        leases.retain(|id, lease| {
-            if lease.state.is_live() {
-                return true;
-            }
-            // Never forget a lease whose workload may still be running: the
-            // record is the only thing that will make us try again.
-            let keep =
-                !lease.destroyed || lease.ended_at.unwrap_or(0).saturating_add(retention) > now;
-            if !keep {
-                info!("lease {} ended over {} s ago; forgetting it", id, retention);
-            }
-            keep
-        });
-
-        persist_leases(&leases, &state.config.lease_state_path);
-
-        leases
-            .values()
-            .filter(|l| !l.state.is_live() && !l.destroyed)
-            .map(|l| l.id)
-            .collect()
-    };
-
-    for id in pending {
-        destroy_workload(state, id).await;
     }
 }
 
 /// End one live lease, and destroy its workload now.
 ///
 /// `false` when the lease was already ended — the caller refuses rather than
-/// destroying a workload twice. Racing a sweep is the same case: whichever
-/// ends it first wins, and the other sees a lease that is no longer live.
+/// ending a lease twice. Racing a sweep is the same case: whichever marks it
+/// first wins, and the other sees a lease that is no longer live. The two may
+/// still both reach `destroy_workload` for that id, so `ComputeBackend` must
+/// tolerate being asked to stop and delete a workload twice; the second pass
+/// finds it absent and records it destroyed.
 pub(crate) async fn end_lease(state: &AppState, id: u32, end: LeaseEnd, now: u64) -> bool {
     {
         let mut leases = state.leases.lock().await;

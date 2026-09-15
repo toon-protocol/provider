@@ -16,6 +16,7 @@ use common::harness::{
     RequestSpec, INTERVAL, NOW, PUBLIC_IP,
 };
 use common::{BackendCall, FakeBackend, FakeClock};
+use std::sync::Arc;
 use toon_provider::Clock;
 
 /// A lease that exists, and the tenant that owns it.
@@ -123,6 +124,24 @@ async fn extending_an_expired_lease_is_refused() {
     h.service.sweep_expired_leases(h.clock.now()).await;
 
     let (status, body) = extend(&h, &lease.workload_id).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{}", body);
+    assert_eq!(error_of(&body), "expired");
+}
+
+#[tokio::test]
+async fn an_expiry_the_sweep_has_not_reached_yet_still_refuses_an_extension() {
+    // The sweep runs every 30 s, and there is no grace period: a lease is
+    // over the instant its expiry passes, not when the sweep notices.
+    let h = harness();
+    let lease = spawn_lease(&h, 1).await;
+
+    h.clock.set(lease.expires_at);
+    let (status, body) = extend(&h, &lease.workload_id).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{}", body);
+    assert_eq!(error_of(&body), "expired");
+
+    // And so does a termination: the lease is already over.
+    let (status, body) = terminate_signed_by(&h, &lease.tenant, &lease.workload_id).await;
     assert_eq!(status, StatusCode::CONFLICT, "{}", body);
     assert_eq!(error_of(&body), "expired");
 }
@@ -348,9 +367,9 @@ async fn terminating_an_ended_lease_again_is_refused() {
 
 // ── expiry (spec §6.7) ──────────────────────────────────────────────────
 
-#[tokio::test]
+#[test]
 #[allow(clippy::assertions_on_constants, reason = "the constant IS the claim")]
-async fn the_sweep_runs_at_least_every_thirty_seconds() {
+fn the_sweep_runs_at_least_every_thirty_seconds() {
     assert!(
         toon_provider::SWEEP_INTERVAL_SECS <= 30,
         "the spec requires a sweep at least every 30 s"
@@ -437,19 +456,17 @@ async fn an_ended_lease_is_forgotten_once_its_retention_runs_out() {
 
 // ── across a restart (spec §6.7) ────────────────────────────────────────
 
-/// A new provider process over the same lease table, with the workload still
-/// running on a fresh backend — what a restart looks like from here.
-fn restarted(h: &Harness, at: u64) -> (Harness, std::sync::Arc<FakeBackend>) {
-    let backend = FakeBackend::new();
-    backend.seed_running(1000);
-    let restarted = common::harness::restart(
+/// A new provider process over the same lease table and a fresh backend —
+/// what a restart looks like from here. The caller seeds the backend with
+/// whatever survived the restart.
+fn restarted(h: &Harness, at: u64, backend: Arc<FakeBackend>) -> Harness {
+    common::harness::restart(
         vec![listing("basic", 1, 2)],
         h.provider_key.clone(),
         h.state_path.clone(),
-        backend.clone(),
+        backend,
         FakeClock::at(at),
-    );
-    (restarted, backend)
+    )
 }
 
 #[tokio::test]
@@ -458,7 +475,9 @@ async fn a_restart_keeps_a_running_lease_with_its_expiry_tenant_and_access() {
     let lease = spawn_lease(&h, 1).await;
     extend(&h, &lease.workload_id).await;
 
-    let (h2, _backend) = restarted(&h, NOW + 10);
+    let backend = FakeBackend::new();
+    backend.seed_running(1000);
+    let h2 = restarted(&h, NOW + 10, backend);
     h2.service.restore_leases().await;
 
     let (status, body) = status_signed_by(&h2, &lease.tenant, &lease.workload_id).await;
@@ -492,13 +511,7 @@ async fn a_restart_keeps_an_ended_lease_ended() {
 
     // Nothing is seeded on the new backend: the workload really is gone.
     let backend = FakeBackend::new();
-    let h2 = common::harness::restart(
-        vec![listing("basic", 1, 2)],
-        h.provider_key.clone(),
-        h.state_path.clone(),
-        backend.clone(),
-        FakeClock::at(NOW + 10),
-    );
+    let h2 = restarted(&h, NOW + 10, backend.clone());
     h2.service.restore_leases().await;
 
     let (status, body) = status_signed_by(&h2, &lease.tenant, &lease.workload_id).await;

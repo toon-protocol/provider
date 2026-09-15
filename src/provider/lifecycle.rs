@@ -19,8 +19,8 @@ use super::cleanup::end_lease;
 use super::persistence::{persist_leases, LeaseEnd, LeaseRecord, LeaseState};
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
-    ErrorCode, ErrorResponse, ExtendRequest, ExtendResponse, LeaseRequestEnvelope, StatusResponse,
-    TerminateResponse, WorkloadContent,
+    ErrorCode, ErrorResponse, ExtendRequest, ExtendResponse, StatusResponse, TerminateResponse,
+    WorkloadContent,
 };
 use crate::provider_http::AppState;
 
@@ -35,12 +35,12 @@ fn unknown_workload() -> ErrorResponse {
     )
 }
 
-/// The lease a `workload_id` names: the live one if there is one, otherwise
-/// the most recently ended record still retained.
+/// The backend id of the lease a tenant's `workload_id` names: the live one
+/// if there is one, otherwise the most recently ended record still retained.
 ///
 /// A tenant may spawn the same id again once its lease is over, so both can
 /// exist at once; the live lease is the one every route means.
-fn find(leases: &HashMap<u32, LeaseRecord>, workload_id: &str) -> Option<u32> {
+fn lease_id_for(leases: &HashMap<u32, LeaseRecord>, workload_id: &str) -> Option<u32> {
     let mut candidates: Vec<&LeaseRecord> = leases
         .values()
         .filter(|l| l.workload_id == workload_id)
@@ -49,19 +49,27 @@ fn find(leases: &HashMap<u32, LeaseRecord>, workload_id: &str) -> Option<u32> {
     candidates.last().map(|l| l.id)
 }
 
-/// A lease that has ended can buy nothing and end nothing. `expired` is the
+/// A lease that is over can buy nothing and end nothing. `expired` is the
 /// spec's code for all three endings (§6.3 names no other): the lease is
 /// over, and the message says how.
-fn already_ended(end: LeaseEnd) -> ErrorResponse {
-    let how = match end {
-        LeaseEnd::Expiry => "expired",
-        LeaseEnd::Termination => "was terminated",
-        LeaseEnd::Eviction => "was evicted",
+///
+/// `Ok` only while the lease still applies. A lease whose `expires_at` has
+/// passed is over the instant it passes, whether or not the sweep has
+/// reached it yet: there is no grace period (ADR 0003), and the ≤30 s
+/// between the two must not be a window in which a payment buys time on a
+/// lease that is already dead.
+fn still_running(lease: &LeaseRecord, now: u64) -> Result<(), ErrorResponse> {
+    let how = match lease.state {
+        LeaseState::Ended(LeaseEnd::Expiry) => "expired",
+        LeaseState::Ended(LeaseEnd::Termination) => "was terminated",
+        LeaseState::Ended(LeaseEnd::Eviction) => "was evicted",
+        _ if lease.expires_at <= now => "expired",
+        _ => return Ok(()),
     };
-    ErrorResponse::new(
+    Err(ErrorResponse::new(
         ErrorCode::Expired,
         format!("this lease {}; spawn a new one", how),
-    )
+    ))
 }
 
 /// Serve one extension on `<addr>.<listing>.v<version>.extend`.
@@ -79,12 +87,11 @@ pub async fn extend(
     let request: ExtendRequest = serde_json::from_slice(body)
         .map_err(|e| invalid(format!("body is not {{ \"workload_id\": \"…\" }}: {}", e)))?;
 
+    let now = state.clock.now();
     let mut leases = state.leases.lock().await;
-    let id = find(&leases, &request.workload_id).ok_or_else(unknown_workload)?;
+    let id = lease_id_for(&leases, &request.workload_id).ok_or_else(unknown_workload)?;
     let lease = leases.get_mut(&id).ok_or_else(unknown_workload)?;
-    if let LeaseState::Ended(end) = lease.state {
-        return Err(already_ended(end));
-    }
+    still_running(lease, now)?;
     if lease.listing != listing_name || lease.listing_version != version {
         return Err(ErrorResponse::new(
             ErrorCode::WrongListingVersion,
@@ -125,7 +132,7 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
     let (tenant, workload_id) = authenticate(state, body, Op::Status).await?;
 
     let leases = state.leases.lock().await;
-    let id = find(&leases, &workload_id).ok_or_else(unknown_workload)?;
+    let id = lease_id_for(&leases, &workload_id).ok_or_else(unknown_workload)?;
     let lease = leases.get(&id).ok_or_else(unknown_workload)?;
     check_tenant(lease, &tenant)?;
 
@@ -150,12 +157,10 @@ pub async fn terminate(state: &AppState, body: &[u8]) -> Result<TerminateRespons
 
     let id = {
         let leases = state.leases.lock().await;
-        let id = find(&leases, &workload_id).ok_or_else(unknown_workload)?;
+        let id = lease_id_for(&leases, &workload_id).ok_or_else(unknown_workload)?;
         let lease = leases.get(&id).ok_or_else(unknown_workload)?;
         check_tenant(lease, &tenant)?;
-        if let LeaseState::Ended(end) = lease.state {
-            return Err(already_ended(end));
-        }
+        still_running(lease, now)?;
         id
     };
 
@@ -183,18 +188,13 @@ async fn authenticate(
     op: Op,
 ) -> Result<(PublicKey, String), ErrorResponse> {
     let now = state.clock.now();
-    let envelope: LeaseRequestEnvelope = serde_json::from_slice(body)
-        .map_err(|e| invalid(format!("body is not {{ \"request\": <event> }}: {}", e)))?;
-    let request = lease_request::validate(&envelope.request, &state.keys.public_key(), op, now)?;
-    if !state
-        .accepted_requests
-        .accept(request.id, request.expiration, now)
-    {
-        return Err(ErrorResponse::new(
-            ErrorCode::StaleRequest,
-            "this Lease Request was already accepted; sign a new one",
-        ));
-    }
+    let request = lease_request::accept(
+        body,
+        &state.keys.public_key(),
+        op,
+        now,
+        &state.accepted_requests,
+    )?;
     let content: WorkloadContent = serde_json::from_str(&request.content)
         .map_err(|e| invalid(format!("{} content: {}", op.as_str(), e)))?;
     Ok((request.tenant, content.workload_id))

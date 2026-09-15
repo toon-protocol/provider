@@ -131,8 +131,9 @@ lease (ADR 0005) and a sponsor can pay for a lease it does not own. It adds
 exactly one Lease Interval to the lease's expiry — extensions stack, and the
 time is added to the expiry, not to `now` — and answers
 `{ "workload_id", "expires_at" }`. It is refused with `unknown_workload` when
-no lease of that id is held, `expired` when the lease has ended (by expiry,
-termination or eviction), and `wrong_listing_version` when the lease was
+no lease of that id is held, `expired` when the lease has ended — by expiry,
+termination or eviction, and including an expiry the sweep has not reached
+yet, because there is no grace period — and `wrong_listing_version` when the lease was
 spawned on another listing version: a lease keeps the price it started at
 (ADR 0009), so its extensions are bought on its own route.
 
@@ -152,7 +153,10 @@ Status answers:
 ```
 
 `state` is the §6.7 lease state: `"provisioning"`, `"running"`, or
-`{ "ended": "expiry" | "termination" | "eviction" }`. `access` is absent once
+`{ "ended": "expiry" | "termination" | "eviction" }`. It is the lease record
+as it stands, so between an expiry and the sweep that reaps it a lease still
+reads `"running"` with an `expires_at` in the past — extend and terminate
+refuse it as `expired` all the same. `access` is absent once
 the lease has ended — the workload is gone, and there is nothing left to
 reach. The same encoding is what the lease table holds on disk.
 

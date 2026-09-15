@@ -18,8 +18,7 @@ use super::persistence::{persist_leases, LeaseRecord, LeaseState};
 use crate::compute::{container_name, ContainerConfig, PortMapping};
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
-    Access, ErrorCode, ErrorResponse, LeaseRequestEnvelope, PortAccess, PortRequest, Role,
-    SpawnContent, SpawnResponse,
+    Access, ErrorCode, ErrorResponse, PortAccess, PortRequest, Role, SpawnContent, SpawnResponse,
 };
 use crate::provider_http::AppState;
 
@@ -42,19 +41,13 @@ pub async fn spawn(
     let now = state.clock.now();
 
     // ── 1. the Lease Request ────────────────────────────────────────────
-    let envelope: LeaseRequestEnvelope = serde_json::from_slice(body)
-        .map_err(|e| invalid(format!("body is not {{ \"request\": <event> }}: {}", e)))?;
-    let request =
-        lease_request::validate(&envelope.request, &state.keys.public_key(), Op::Spawn, now)?;
-    if !state
-        .accepted_requests
-        .accept(request.id, request.expiration, now)
-    {
-        return Err(ErrorResponse::new(
-            ErrorCode::StaleRequest,
-            "this Lease Request was already accepted; sign a new one",
-        ));
-    }
+    let request = lease_request::accept(
+        body,
+        &state.keys.public_key(),
+        Op::Spawn,
+        now,
+        &state.accepted_requests,
+    )?;
     let content: SpawnContent = serde_json::from_str(&request.content)
         .map_err(|e| invalid(format!("spawn content: {}", e)))?;
     check_shape(&content)?;
@@ -177,7 +170,22 @@ pub async fn spawn(
     let mut leases = state.leases.lock().await;
     match started {
         Ok(()) => {
-            let expires_at = mark_running(&mut leases, id, now + listing.lease_interval_s);
+            let Some(expires_at) = mark_running(&mut leases, id) else {
+                // The lease ended while it was being provisioned — its tenant
+                // terminated it, or the sweep reaped it. Whoever ended it
+                // destroyed a workload that did not exist yet, so this one is
+                // ours to clean up. Nothing is refunded (ADR 0003).
+                warn!("lease {} ended while it was being provisioned", id);
+                persist_leases(&leases, &state.config.lease_state_path);
+                drop(leases);
+                if let Err(cleanup) = state.backend.delete_container(id).await {
+                    warn!("could not clean up {}: {}", config.name, cleanup);
+                }
+                return Err(ErrorResponse::new(
+                    ErrorCode::Expired,
+                    "this lease was ended while its workload was being started",
+                ));
+            };
             persist_leases(&leases, &state.config.lease_state_path);
             Ok(SpawnResponse {
                 workload_id: content.workload_id,
@@ -234,16 +242,19 @@ async fn free_workload_id(state: &AppState, leases: &HashMap<u32, LeaseRecord>) 
     None
 }
 
-fn mark_running(leases: &mut HashMap<u32, LeaseRecord>, id: u32, expires_at: u64) -> u64 {
-    match leases.get_mut(&id) {
-        Some(lease) => {
-            lease.state = LeaseState::Running;
-            lease.expires_at
-        }
-        // Ended between insert and start (an eviction that fast is not a
-        // path this milestone has, but the table must not grow a ghost).
-        None => expires_at,
+/// Promote a lease whose workload has started, and answer its expiry.
+///
+/// `None` when the lease is no longer the Provisioning one this spawn
+/// inserted: a Termination or a sweep may end a lease between the insert and
+/// the start, and an ended lease must never be brought back to Running — its
+/// workload has already been destroyed, or is about to be.
+fn mark_running(leases: &mut HashMap<u32, LeaseRecord>, id: u32) -> Option<u64> {
+    let lease = leases.get_mut(&id)?;
+    if lease.state != LeaseState::Provisioning {
+        return None;
     }
+    lease.state = LeaseState::Running;
+    Some(lease.expires_at)
 }
 
 /// The shape checks that need no listing: the workload id, the SSH key and

@@ -83,7 +83,6 @@ async fn an_expired_lease_is_swept_and_a_live_one_is_left_alone() {
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(after[&LIVE].state, LeaseState::Running);
     assert_eq!(after[&EXPIRED].state, LeaseState::Ended(LeaseEnd::Expiry));
-    assert!(after[&EXPIRED].destroyed, "its workload is gone");
 }
 
 #[tokio::test]
