@@ -217,3 +217,90 @@ fn resources_round_trip_with_an_optional_gpu() {
     };
     assert!(serde_json::to_value(&without).unwrap().get("gpu").is_none());
 }
+
+#[test]
+fn a_lease_state_is_one_word_until_it_ends() {
+    // What `status` answers and what the lease table holds on disk are the
+    // same JSON, so this encoding is the one both a tenant and a restart read.
+    assert_eq!(
+        serde_json::to_value(LeaseState::Provisioning).unwrap(),
+        json!("provisioning")
+    );
+    assert_eq!(
+        serde_json::to_value(LeaseState::Running).unwrap(),
+        json!("running")
+    );
+    for (state, encoded) in [
+        (
+            LeaseState::Ended(LeaseEnd::Expiry),
+            json!({"ended": "expiry"}),
+        ),
+        (
+            LeaseState::Ended(LeaseEnd::Termination),
+            json!({"ended": "termination"}),
+        ),
+        (
+            LeaseState::Ended(LeaseEnd::Eviction),
+            json!({"ended": "eviction"}),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(state).unwrap(), encoded);
+        assert_eq!(
+            serde_json::from_value::<LeaseState>(encoded).unwrap(),
+            state
+        );
+    }
+}
+
+#[test]
+fn an_ended_lease_holds_nothing() {
+    assert!(LeaseState::Provisioning.is_live());
+    assert!(LeaseState::Running.is_live());
+    assert!(!LeaseState::Ended(LeaseEnd::Expiry).is_live());
+}
+
+#[test]
+fn the_status_and_terminate_answers_round_trip() {
+    let running = StatusResponse {
+        workload_id: "ab".repeat(32),
+        role: Role::Standalone,
+        state: LeaseState::Running,
+        expires_at: 1_700_003_600,
+        access: Some(Access {
+            host: "203.0.113.7".to_string(),
+            ssh_port: 40000,
+            ports: vec![PortAccess {
+                container_port: 443,
+                host_port: 41000,
+            }],
+        }),
+    };
+    let value = serde_json::to_value(&running).unwrap();
+    assert_eq!(value["state"], json!("running"));
+    assert_eq!(value["access"]["ssh_port"], 40000);
+    assert_eq!(
+        serde_json::from_value::<StatusResponse>(value).unwrap(),
+        running
+    );
+
+    // An ended lease has no access details at all, rather than empty ones.
+    let ended = StatusResponse {
+        state: LeaseState::Ended(LeaseEnd::Expiry),
+        access: None,
+        ..running
+    };
+    let value = serde_json::to_value(&ended).unwrap();
+    assert!(value.get("access").is_none());
+    assert_eq!(value["state"], json!({ "ended": "expiry" }));
+
+    let terminated = TerminateResponse {
+        workload_id: "ab".repeat(32),
+        state: LeaseState::Ended(LeaseEnd::Termination),
+    };
+    let value = serde_json::to_value(&terminated).unwrap();
+    assert_eq!(value["state"], json!({ "ended": "termination" }));
+    assert_eq!(
+        serde_json::from_value::<TerminateResponse>(value).unwrap(),
+        terminated
+    );
+}

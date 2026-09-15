@@ -6,15 +6,22 @@
 // request listener, a standby watchdog and the expiry sweep. Two are left: the
 // sweep in `cleanup`, and the HTTP app in `provider_http`. Directory
 // publication lands in a later ticket.
+//
+// The routes themselves are one module each: `spawn` starts a lease,
+// `lifecycle` extends, reports and ends one, and `cleanup` is where every
+// ending — Expiry or Termination — actually destroys the workload.
 
 mod cleanup;
 mod config;
+mod lifecycle;
 mod persistence;
 pub mod routes;
 mod spawn;
 mod standby;
 
+pub use cleanup::SWEEP_INTERVAL_SECS;
 pub use config::{load_config, BackendKind, Listing, ProviderConfig, MAX_PORTS_PER_WORKLOAD};
+pub use lifecycle::{extend, status, terminate};
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
 pub use spawn::{spawn, VOLUME_MOUNT_PATH};
@@ -83,6 +90,14 @@ impl ProviderService {
         let mut restored = HashMap::new();
         let mut dropped = 0usize;
         for (id, lease) in persisted {
+            // An ended lease is a record, not a workload: it is kept until
+            // its retention runs out (`cleanup`), and asking the backend
+            // about a container that was deleted on purpose would drop the
+            // very thing `status` still has to report.
+            if !lease.state.is_live() {
+                restored.insert(id, lease);
+                continue;
+            }
             match self.state.backend.get_container_status(id).await {
                 Ok(ContainerStatus::Absent) => {
                     info!("workload {} no longer exists on the backend; dropping", id);
@@ -102,7 +117,10 @@ impl ProviderService {
             restored.insert(id, lease);
         }
 
-        let expired = restored.values().filter(|l| l.expires_at <= now).count();
+        let expired = restored
+            .values()
+            .filter(|l| l.state.is_live() && l.expires_at <= now)
+            .count();
         info!(
             "restored {} lease(s) from {} ({} dropped as missing, {} already expired and due \
              for the next sweep)",

@@ -124,6 +124,14 @@ pub struct ProviderConfig {
     #[serde(default = "default_workload_port_start")]
     pub workload_port_start: u16,
 
+    /// How long an ended lease is kept after it ends, so `status` can still
+    /// report `Ended(expiry | termination | eviction)` rather than
+    /// `unknown_workload`. The sweep prunes it after that. One day by
+    /// default: long enough for a tenant to come back and ask what happened,
+    /// short enough that the table does not grow without bound.
+    #[serde(default = "default_ended_retention_s")]
+    pub ended_retention_s: u64,
+
     /// Where the lease table is mirrored to disk. It is the only record that a
     /// lease exists — the backend knows a workload is running but not whose it
     /// is or when it expires — so held purely in memory, a restart would strand
@@ -292,6 +300,10 @@ fn default_workload_port_start() -> u16 {
     41000
 }
 
+fn default_ended_retention_s() -> u64 {
+    86_400
+}
+
 fn default_lease_state_path() -> String {
     "./toon-provider-leases.json".to_string()
 }
@@ -313,6 +325,7 @@ impl Default for ProviderConfig {
             workload_id_range_end: default_id_range_end(),
             ssh_port_start: None,
             workload_port_start: default_workload_port_start(),
+            ended_retention_s: default_ended_retention_s(),
             lease_state_path: default_lease_state_path(),
         }
     }

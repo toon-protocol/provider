@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use common::{BackendCall, FakeBackend};
 use toon_provider::nostr::wire::Role;
-use toon_provider::{LeaseRecord, LeaseState, ProviderConfig, ProviderService};
+use toon_provider::{LeaseEnd, LeaseRecord, LeaseState, ProviderConfig, ProviderService};
 
 const LIVE: u32 = 1000;
 const EXPIRED: u32 = 1001;
@@ -26,6 +26,8 @@ fn lease(id: u32, expires_at: u64) -> LeaseRecord {
         state: LeaseState::Running,
         created_at: NOW - 600,
         expires_at,
+        ended_at: None,
+        destroyed: false,
         ssh_port: 40000,
         ports: vec![],
     }
@@ -74,12 +76,14 @@ async fn an_expired_lease_is_swept_and_a_live_one_is_left_alone() {
         "only the expired lease's workload is destroyed"
     );
 
-    // The rewritten table is what the next restart reads, so the ended lease
-    // must be gone from it and the live one still there.
+    // The rewritten table is what the next restart reads: the live lease is
+    // still live, and the ended one is retained as ended so `status` can say
+    // what became of it.
     let after: std::collections::HashMap<u32, LeaseRecord> =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert!(after.contains_key(&LIVE));
-    assert!(!after.contains_key(&EXPIRED));
+    assert_eq!(after[&LIVE].state, LeaseState::Running);
+    assert_eq!(after[&EXPIRED].state, LeaseState::Ended(LeaseEnd::Expiry));
+    assert!(after[&EXPIRED].destroyed, "its workload is gone");
 }
 
 #[tokio::test]

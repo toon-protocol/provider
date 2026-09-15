@@ -8,9 +8,13 @@
 // not from who paid.
 //
 // Paths are `provider::routes`'s: the connector forwards each ILP prefix to
-// one of them. Spawn is served; extend, availability, status and terminate
-// are listed in the route table and answer "not implemented" until their
-// tickets land.
+// one of them. Spawn, extend, status and terminate are served; availability
+// is listed in the route table and answers "not implemented" until its ticket
+// lands.
+//
+// The free routes (`status`, `terminate`) arrive with nothing paid and are
+// served exactly like the paid ones: this app never looks at what a packet
+// was worth.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -33,7 +37,7 @@ use crate::nostr::wire::{ErrorCode, ErrorResponse};
 use crate::provider::routes::{
     AVAILABILITY_PATH, EXTEND_PATTERN, SPAWN_PATTERN, STATUS_PATH, TERMINATE_PATH,
 };
-use crate::provider::{spawn, LeaseRecord, ProviderConfig};
+use crate::provider::{extend, spawn, status, terminate, LeaseRecord, ProviderConfig};
 
 /// Everything a handler may touch. Arc-cloned from `ProviderService`, so the
 /// HTTP app and the expiry sweep see one lease table and one clock.
@@ -77,10 +81,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route(SPAWN_PATTERN, post(spawn_route))
-        .route(EXTEND_PATTERN, post(not_implemented))
+        .route(EXTEND_PATTERN, post(extend_route))
         .route(AVAILABILITY_PATH, post(not_implemented))
-        .route(STATUS_PATH, post(not_implemented))
-        .route(TERMINATE_PATH, post(not_implemented))
+        .route(STATUS_PATH, post(status_route))
+        .route(TERMINATE_PATH, post(terminate_route))
         .with_state(state)
 }
 
@@ -117,6 +121,37 @@ async fn spawn_route(
         ));
     };
     match spawn(&state, &listing, version, &body).await {
+        Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
+        Err(e) => refuse(e),
+    }
+}
+
+async fn extend_route(
+    State(state): State<AppState>,
+    Path((listing, version)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let Some(version) = parse_version(&version) else {
+        return refuse(ErrorResponse::new(
+            ErrorCode::WrongListingVersion,
+            format!("{:?} is not a listing version (`v<n>`)", version),
+        ));
+    };
+    match extend(&state, &listing, version, &body).await {
+        Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
+        Err(e) => refuse(e),
+    }
+}
+
+async fn status_route(State(state): State<AppState>, body: Bytes) -> Response {
+    match status(&state, &body).await {
+        Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
+        Err(e) => refuse(e),
+    }
+}
+
+async fn terminate_route(State(state): State<AppState>, body: Bytes) -> Response {
+    match terminate(&state, &body).await {
         Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
         Err(e) => refuse(e),
     }

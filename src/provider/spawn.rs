@@ -155,6 +155,8 @@ pub async fn spawn(
                 state: LeaseState::Provisioning,
                 created_at: now,
                 expires_at: now + listing.lease_interval_s,
+                ended_at: None,
+                destroyed: false,
                 ssh_port,
                 ports: ports.clone(),
             },
@@ -209,17 +211,22 @@ pub async fn spawn(
     }
 }
 
-/// The lowest workload id in range that neither the backend nor the lease
-/// table holds. Both are asked: the backend knows what runs, and the table
-/// knows what is still leased — a workload that vanished from the daemon
-/// keeps its id until its lease ends, or a re-spawn could land on a lease
-/// the sweep is about to reap.
+/// The lowest workload id in range that neither the backend nor a LIVE lease
+/// holds. Both are asked: the backend knows what runs, and the table knows
+/// what is still leased — a workload that vanished from the daemon keeps its
+/// id until its lease ends, or a re-spawn could land on a lease the sweep is
+/// about to reap.
+///
+/// A retained ENDED record does not hold its id: retention keeps what
+/// `status` answers, and it must never cost a tenant a slot. Taking the id
+/// back drops that record early, which is the same answer a tenant gets once
+/// retention runs out.
 async fn free_workload_id(state: &AppState, leases: &HashMap<u32, LeaseRecord>) -> Option<u32> {
     let end = state.config.workload_id_range_end;
     let mut from = state.config.workload_id_range_start;
     while from <= end {
         let id = state.backend.find_available_id(from, end).await.ok()?;
-        if !leases.contains_key(&id) {
+        if leases.get(&id).is_none_or(|l| !l.state.is_live()) {
             return Some(id);
         }
         from = id.checked_add(1)?;

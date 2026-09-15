@@ -35,6 +35,9 @@ pub struct FakeBackend {
     /// When set, the next create fails with this message, as a daemon that
     /// cannot pull the image or is out of disk would.
     fail_next_create: Mutex<Option<String>>,
+    /// When set, the next delete fails with this message and leaves the
+    /// container where it is, as a busy or wedged daemon would.
+    fail_next_delete: Mutex<Option<String>>,
 }
 
 impl FakeBackend {
@@ -76,6 +79,10 @@ impl FakeBackend {
 
     pub fn fail_next_create(&self, why: &str) {
         *self.fail_next_create.lock().unwrap() = Some(why.to_string());
+    }
+
+    pub fn fail_next_delete(&self, why: &str) {
+        *self.fail_next_delete.lock().unwrap() = Some(why.to_string());
     }
 
     fn record(&self, call: BackendCall) {
@@ -128,6 +135,9 @@ impl ComputeBackend for FakeBackend {
 
     async fn delete_container(&self, id: u32) -> Result<()> {
         self.record(BackendCall::Delete(id));
+        if let Some(why) = self.fail_next_delete.lock().unwrap().take() {
+            anyhow::bail!("{}", why);
+        }
         self.containers.lock().unwrap().remove(&id);
         Ok(())
     }

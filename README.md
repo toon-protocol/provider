@@ -14,12 +14,13 @@ tenant paying through hops is served identically to one paying directly.
 
 ## Status
 
-Milestone 1 is in progress. Today the app serves a paid **spawn** (a
-tenant-signed Lease Request in, a running workload and its access details
-out), sweeps expired leases, and prints the connector route table it expects.
-Extension, status, termination, availability, the directory events and the
-image policy are being added ticket by ticket; their routes answer
-`invalid_request` "not implemented" until then.
+Milestone 1 is in progress. Today the app serves the whole lease lifecycle —
+a paid **spawn** (a tenant-signed Lease Request in, a running workload and its
+access details out), a paid **extension**, and the free **status** and
+**termination** routes — sweeps expired leases, and prints the connector route
+table it expects. Availability, the directory events and the image policy are
+being added ticket by ticket; their routes answer `invalid_request` "not
+implemented" until then.
 
 ## Spec, decisions and vocabulary
 
@@ -73,6 +74,8 @@ parts:
   every `handler_url` in the route table.
 - `nostr_private_key`: the provider's identity. A Lease Request is addressed
   to its public key.
+- `ended_retention_s`: how long an ended lease is still answerable by
+  `status` before the sweep forgets it. Default 86400 (one day).
 
 ## Routes and the connector
 
@@ -111,6 +114,57 @@ The image is pulled as `reference@digest`, so the daemon verifies the bytes
 and picks the manifest for its own architecture. Anything else in the
 content — a runtime flag, a host mount, a device, a capability — is refused
 as `invalid_request`; privileges come only from the listing (ADR 0004).
+
+## Extending, checking and ending a lease
+
+**`POST /listings/<listing>/v<n>/extend`** (paid) takes `{ "workload_id": "…" }`
+and no signature: an extension only adds time, so any payer may buy one for any
+lease (ADR 0005) and a sponsor can pay for a lease it does not own. It adds
+exactly one Lease Interval to the lease's expiry — extensions stack, and the
+time is added to the expiry, not to `now` — and answers
+`{ "workload_id", "expires_at" }`. It is refused with `unknown_workload` when
+no lease of that id is held, `expired` when the lease has ended (by expiry,
+termination or eviction), and `wrong_listing_version` when the lease was
+spawned on another listing version: a lease keeps the price it started at
+(ADR 0009), so its extensions are bought on its own route.
+
+**`POST /status`** (free) and **`POST /terminate`** (free) both take
+`{ "request": <Lease Request> }` with `op` = `status` or `terminate` and the
+content `{ "workload_id": "…" }`. The request is validated exactly as a
+spawn's is, replay included, and **the signer must be the lease's tenant** —
+anyone else is refused `not_tenant`.
+
+Status answers:
+
+```json
+{ "workload_id": "…", "role": "standalone", "state": "running",
+  "expires_at": 1757350000,
+  "access": { "host": "203.0.113.7", "ssh_port": 40000,
+              "ports": [ { "container_port": 443, "host_port": 41000 } ] } }
+```
+
+`state` is the §6.7 lease state: `"provisioning"`, `"running"`, or
+`{ "ended": "expiry" | "termination" | "eviction" }`. `access` is absent once
+the lease has ended — the workload is gone, and there is nothing left to
+reach. The same encoding is what the lease table holds on disk.
+
+Terminate stops and deletes the workload immediately and answers
+`{ "workload_id": "…", "state": { "ended": "termination" } }`. Nothing is
+refunded, here or anywhere (ADR 0003). Terminating a lease that has already
+ended is refused `expired`.
+
+**Expiry.** A sweep runs every `SWEEP_INTERVAL_SECS` (30 s) and ends every
+lease whose `expires_at` has passed, with no grace period: `expires_at` is the
+first instant the lease no longer applies. An ended lease stops counting
+against capacity and stops holding its workload id at once, but its record is
+**kept for `ended_retention_s`** (one day by default) so `status` can still
+tell its tenant how it ended rather than that its id is unknown; after that
+the record is pruned and `status` answers `unknown_workload`. A lease whose
+workload the backend refused to delete is marked ended anyway and retried by
+every later sweep until the backend confirms the container is gone, so a
+failed delete never leaves a workload running for free. All of this survives a
+restart: running leases keep their expiry, tenant, listing version and access
+details, and ended leases restore as ended.
 
 **SSH.** The tenant's key is handed to the workload as the environment
 variable `SSH_PUBLIC_KEY`, and `access.ssh_port` forwards to the workload's

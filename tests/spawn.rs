@@ -13,13 +13,13 @@ use tower::ServiceExt;
 
 use common::harness::{
     error_of, harness, harness_with, listing, post, restart, spawn, spawn_content, workload_id,
-    Harness, RequestSpec, DIGEST, INTERVAL, NOW, PUBLIC_IP, SSH_KEY,
+    RequestSpec, DIGEST, INTERVAL, NOW, PUBLIC_IP, SSH_KEY,
 };
 use common::{BackendCall, FakeBackend, FakeClock};
 use toon_provider::compute::PortMapping;
-use toon_provider::Clock;
 use toon_provider::nostr::kinds::K_LEASE_REQUEST;
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, SpawnContent};
+use toon_provider::Clock;
 
 // ── success ─────────────────────────────────────────────────────────────
 

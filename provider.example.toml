@@ -46,6 +46,11 @@ ssh_port_start = 40000
 # both are checked at load.
 workload_port_start = 42000
 
+# How long an ended lease is still answerable by `status` (as
+# Ended(expiry|termination|eviction)) before the sweep forgets it. It stops
+# counting against capacity the moment it ends; this is bookkeeping only.
+ended_retention_s = 86400
+
 # Where the lease table is mirrored. It is the only record that a lease
 # exists, so a restart without it strands every paid workload.
 lease_state_path = "/var/lib/toon-provider/leases.json"

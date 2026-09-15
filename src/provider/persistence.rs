@@ -9,39 +9,11 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
 
+// `LeaseEnd` and `LeaseState` live in `nostr::wire`: `status` answers them,
+// so their JSON is a wire shape, and this table is the same JSON on disk.
+pub use crate::nostr::wire::{LeaseEnd, LeaseState};
+
 use crate::nostr::wire::{Access, PortAccess, Role};
-
-/// Why a lease ended (spec §6.7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LeaseEnd {
-    /// No payment bought another Lease Interval.
-    Expiry,
-    /// The tenant asked for it to end.
-    Termination,
-    /// The provider decided it should end.
-    Eviction,
-}
-
-/// `Provisioning → Running → Ended(…)` for a standalone or primary lease.
-/// A standby's `Reserved` state is a later milestone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LeaseState {
-    /// Accepted and paid; the workload is being started. Holds the workload
-    /// id and counts against capacity already, so a racing spawn cannot take
-    /// either.
-    Provisioning,
-    Running,
-    Ended(LeaseEnd),
-}
-
-impl LeaseState {
-    /// Whether the lease still holds its workload id and its capacity slot.
-    pub fn is_live(self) -> bool {
-        !matches!(self, LeaseState::Ended(_))
-    }
-}
 
 /// One lease: a tenant's prepaid right to one workload on this provider, until
 /// it expires.
@@ -76,6 +48,18 @@ pub struct LeaseRecord {
     /// The first instant the lease no longer applies. The expiry sweep reaps
     /// anything at or past it.
     pub expires_at: u64,
+
+    /// When the lease ended, for a lease that has. An ended record is kept
+    /// so `status` can still say HOW it ended, and pruned once
+    /// `ended_retention_s` has passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
+
+    /// Whether the backend has confirmed the workload is gone. An ended
+    /// lease whose workload outlived it is retried by every sweep until this
+    /// is true, so a failed delete never strands a running container.
+    #[serde(default)]
+    pub destroyed: bool,
 
     /// The SSH forward and the published ports, as handed to the tenant.
     pub ssh_port: u16,
@@ -171,6 +155,8 @@ mod tests {
             state: LeaseState::Running,
             created_at: 1000,
             expires_at,
+            ended_at: None,
+            destroyed: false,
             ssh_port: 40000 + id as u16,
             ports: vec![PortAccess {
                 container_port: 443,
@@ -236,12 +222,5 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert!(loaded.contains_key(&2001));
         let _ = std::fs::remove_file(&p);
-    }
-
-    #[test]
-    fn an_ended_lease_holds_nothing() {
-        assert!(LeaseState::Provisioning.is_live());
-        assert!(LeaseState::Running.is_live());
-        assert!(!LeaseState::Ended(LeaseEnd::Expiry).is_live());
     }
 }
