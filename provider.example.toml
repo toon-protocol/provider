@@ -18,8 +18,36 @@ public_ip = "203.0.113.7"
 # Request is addressed to. Hex or nsec1….
 nostr_private_key = "nsec1..."
 
-# The relays this provider publishes its Profile, Listings and Liveness to.
+# The Relay Set: every relay this provider publishes its Profile, Listings and
+# Liveness to, and the list the Profile itself carries.
 relay_set = ["wss://relay.toon.network"]
+
+# ── The Provider Directory (spec §4) ─────────────────────────────────────────
+# What the Provider Profile says about how to reach and pay this provider. The
+# URL is a LOCATION HINT; the sealing key is what a tenant actually seals its
+# spawn to, and it refuses if the URL reports a different one (ADR 0011). Copy
+# the key verbatim from `GET <connector_url>/identity` so the comparison is
+# byte-for-byte.
+connector_url = "https://c.acme.example/ilp"
+connector_seal_key = "0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188"
+
+# shared-kernel | dedicated-host. Published in the Profile and as every
+# Listing's `l isolation:<value>` tag, which is how a relay filters on it.
+isolation = "shared-kernel"
+
+# How often Liveness is republished. Each one expires five cadences out
+# (ADR 0007), so four may be lost before this provider reads as down.
+liveness_cadence_s = 60
+
+# Optional region, published as every Listing's `g` tag.
+# geohash = "u4pruy"
+
+# Where directory events are handed over to be PAID FOR and written to the
+# Relay Set: the directory publisher sidecar (tools/publisher/README.md). A
+# relay write on the TOON Network is a paid packet, so something has to hold a
+# payment channel, and that is not the provider app. Unset means this provider
+# publishes nothing — legal, it simply does not appear in the directory.
+publish_url = "http://directory-publisher:8081/publish"
 
 # Capabilities this provider grants: privileges beyond an ordinary workload.
 capabilities = ["docker"]
@@ -49,6 +77,19 @@ workload_port_start = 42000
 # Where the lease table is mirrored. It is the only record that a lease
 # exists, so a restart without it strands every paid workload.
 lease_state_path = "/var/lib/toon-provider/leases.json"
+
+# What this provider's connector settles in, published in the Profile so a
+# tenant knows what it can pay with. `token` is a mint (Solana) or a contract
+# address (EVM); v1 prices everything in USDC at 6 decimals.
+[[settlement]]
+chain = "solana"
+token = "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H"
+decimals = 6
+
+[[settlement]]
+chain = "evm:31337"
+token = "0x5FbDB2315678afecb367f032d93F642f64180aa3"
+decimals = 6
 
 # What this provider sells: one [[listings]] per tier and version. A price or
 # resource change is a NEW VERSION (bump `version`, keep the old entry until

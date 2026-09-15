@@ -1,0 +1,219 @@
+// The Directory port: the second of the provider's two I/O ports (the first
+// is `ComputeBackend`). Everything the provider says about itself in public —
+// its Provider Profile, its Listings, its Liveness and, from a later ticket,
+// an Eviction Notice — leaves through `publish`, and everything it needs to
+// read back about another provider's Liveness arrives through `query_liveness`.
+//
+// Why a port at all: a relay write on the TOON Network is PAID (ADR 0007), so
+// publishing is a payment, a network round trip and a per-relay outcome, none
+// of which belongs in the lease lifecycle. Tests drive a fake and assert on
+// what was published; the real implementation is the only place that knows
+// how money reaches a relay.
+//
+// Reads are free — a NIP-01 REQ over a relay's websocket costs nothing — so
+// `query_liveness` speaks to the Relay Set directly and needs no payer.
+
+use std::collections::BTreeMap;
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use async_trait::async_trait;
+use nostr_sdk::{Client, Event, Filter, Kind, PublicKey};
+use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
+
+use crate::nostr::kinds::K_LIVENESS;
+
+/// Which relays of the Relay Set took an event, and why the rest did not.
+///
+/// A publication is not all-or-nothing: a provider with four relays that
+/// reaches three is still discoverable, so this reports rather than fails.
+/// The caller logs the failures and carries on (a provider that crashed
+/// because one relay was down would take its paid workloads with it).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishReport {
+    /// Relay URLs that stored the event.
+    #[serde(default)]
+    pub accepted: Vec<String>,
+    /// Relay URL -> why it did not, in the Relay Set's order.
+    #[serde(default)]
+    pub failed: BTreeMap<String, String>,
+}
+
+impl PublishReport {
+    /// True when no relay in the Relay Set took the event.
+    pub fn is_empty(&self) -> bool {
+        self.accepted.is_empty()
+    }
+
+    /// One line for the log: what went out and what did not.
+    pub fn summary(&self) -> String {
+        if self.failed.is_empty() {
+            return format!("{} relay(s) accepted", self.accepted.len());
+        }
+        let failures: Vec<String> = self
+            .failed
+            .iter()
+            .map(|(relay, why)| format!("{relay}: {why}"))
+            .collect();
+        format!(
+            "{} relay(s) accepted, {} refused ({})",
+            self.accepted.len(),
+            self.failed.len(),
+            failures.join("; ")
+        )
+    }
+}
+
+/// The provider's window onto the Provider Directory.
+#[async_trait]
+pub trait Directory: Send + Sync {
+    /// Write one signed event to every relay in the Relay Set, paying for
+    /// each write. Errors only when the publication could not be attempted at
+    /// all; a relay-by-relay outcome is the report.
+    async fn publish(&self, event: Event) -> Result<PublishReport>;
+
+    /// The newest unexpired Liveness a relay in the Relay Set holds from
+    /// `provider`, or `None` when it holds none — which is what "not live"
+    /// means (spec §4.3). Reads are free.
+    async fn query_liveness(&self, provider: PublicKey) -> Result<Option<Event>>;
+}
+
+/// The Directory of a provider that publishes nothing: no `publish_url` is
+/// configured, so there is nobody to pay the relay writes.
+///
+/// It is not an error. A provider whose tenants already know its address is
+/// reachable without ever appearing in the directory, and an unconfigured
+/// sandbox should not fail to start.
+pub struct NullDirectory;
+
+#[async_trait]
+impl Directory for NullDirectory {
+    async fn publish(&self, event: Event) -> Result<PublishReport> {
+        info!(
+            "no publish_url configured; kind {} event {} was not published",
+            event.kind.as_u16(),
+            event.id
+        );
+        Ok(PublishReport::default())
+    }
+
+    async fn query_liveness(&self, _provider: PublicKey) -> Result<Option<Event>> {
+        Ok(None)
+    }
+}
+
+/// What `ConnectorDirectory` hands the directory publisher.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublishRequest {
+    pub event: Event,
+    /// The Relay Set, by read URL. The publisher maps each to that relay's
+    /// PAID write route and pays it.
+    pub relays: Vec<String>,
+}
+
+/// Publishes through the provider's own TOON connector, on the PAID relay
+/// route (ADR 0007) — never on the free ephemeral lane, whose rate limit is
+/// keyed by remote address and therefore shared by every provider behind one
+/// connector.
+///
+/// The paying is delegated to a sidecar, the **directory publisher**
+/// (`tools/publisher`), reached at `publish_url`. That split is deliberate
+/// and is the whole of this milestone's decision: paying a TOON route means
+/// opening a payment channel on Solana or EVM, signing a balance proof per
+/// packet and sealing an ILP prepare to the far connector's key. There is one
+/// proven implementation of all of that, `@toon-protocol/client`, and it is
+/// not a Rust crate. Re-deriving it here would put the marketplace's money on
+/// a second, unproven payer. So the provider states WHAT to publish and the
+/// publisher decides HOW it is paid for; this type is the boundary, and it is
+/// the only thing that has to change if a Rust payer ever exists.
+///
+/// Reads stay in-process: `query_liveness` is a free NIP-01 REQ.
+pub struct ConnectorDirectory {
+    publish_url: String,
+    relay_set: Vec<String>,
+    http: reqwest::Client,
+}
+
+/// How long a paid publication may take: a channel-backed packet through a
+/// hub and on to a relay, not a local call.
+const PUBLISH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a free relay read may take before the provider gives up on it.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl ConnectorDirectory {
+    pub fn new(publish_url: impl Into<String>, relay_set: Vec<String>) -> Result<Self> {
+        Ok(Self {
+            publish_url: publish_url.into(),
+            relay_set,
+            http: reqwest::Client::builder()
+                .timeout(PUBLISH_TIMEOUT)
+                .build()
+                .context("building the HTTP client for the directory publisher")?,
+        })
+    }
+}
+
+#[async_trait]
+impl Directory for ConnectorDirectory {
+    async fn publish(&self, event: Event) -> Result<PublishReport> {
+        let request = PublishRequest {
+            event,
+            relays: self.relay_set.clone(),
+        };
+
+        let response = self
+            .http
+            .post(&self.publish_url)
+            .json(&request)
+            .send()
+            .await
+            .with_context(|| format!("reaching the directory publisher at {}", self.publish_url))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("reading the directory publisher's answer")?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "the directory publisher answered {}: {}",
+                status,
+                body.trim()
+            ));
+        }
+
+        serde_json::from_str(&body)
+            .with_context(|| format!("the directory publisher answered {body:?}"))
+    }
+
+    async fn query_liveness(&self, provider: PublicKey) -> Result<Option<Event>> {
+        if self.relay_set.is_empty() {
+            return Ok(None);
+        }
+
+        let client = Client::default();
+        for relay in &self.relay_set {
+            if let Err(e) = client.add_relay(relay).await {
+                warn!("relay {} is not a usable relay URL: {}", relay, e);
+            }
+        }
+        client.connect().await;
+
+        // A relay drops an expired event at serve time (NIP-40), so "not
+        // live" and "nothing came back" are the same answer and no expiry
+        // check is needed here.
+        let filter = Filter::new()
+            .kind(Kind::Custom(K_LIVENESS))
+            .author(provider)
+            .limit(1);
+        let events = client.fetch_events(filter, QUERY_TIMEOUT).await;
+        client.disconnect().await;
+
+        let events = events.context("reading Liveness from the Relay Set")?;
+        // Newest wins: two relays may hold different publications of a
+        // replaceable event while the older one is still propagating.
+        Ok(events.into_iter().max_by_key(|e| e.created_at))
+    }
+}

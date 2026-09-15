@@ -16,10 +16,11 @@ tenant paying through hops is served identically to one paying directly.
 
 Milestone 1 is in progress. Today the app serves a paid **spawn** (a
 tenant-signed Lease Request in, a running workload and its access details
-out), sweeps expired leases, and prints the connector route table it expects.
-Extension, status, termination, availability, the directory events and the
-image policy are being added ticket by ticket; their routes answer
-`invalid_request` "not implemented" until then.
+out), sweeps expired leases, publishes its Provider Profile, Listings and
+Liveness to its Relay Set, and prints the connector route table it expects.
+Extension, status, termination, availability and the image policy are being
+added ticket by ticket; their routes answer `invalid_request` "not
+implemented" until then.
 
 ## Spec, decisions and vocabulary
 
@@ -72,7 +73,37 @@ parts:
 - `handler_base_url`: where the *connector* reaches this app; the origin of
   every `handler_url` in the route table.
 - `nostr_private_key`: the provider's identity. A Lease Request is addressed
-  to its public key.
+  to its public key, and it signs everything this provider publishes.
+- `relay_set`, `connector_url`, `connector_seal_key`, `[[settlement]]`,
+  `isolation`, `liveness_cadence_s`, `geohash`, `publish_url`: the Provider
+  Directory — see below.
+
+## The Provider Directory
+
+The provider publishes three kinds of event to every relay in its Relay Set
+(spec §4), all signed with `nostr_private_key` and all carrying
+`["L","toon.network"]`:
+
+| Event | Class | Carries |
+|---|---|---|
+| **Provider Profile** | replaceable | `ilp_address`, `connector_url`, `connector_seal_key`, `relays`, `settlement[]`, `isolation`, `hidden`, `host`, `liveness_cadence_s` |
+| **Listing**, one per tier | addressable, `d` = listing name | content `{version, resources, arch, lease_interval_s, price, capabilities}`; tags `a` (the Profile), `L`, `l isolation:…`, `l arch:…`, `l gpu:…`, one `t` per capability, optional `g` |
+| **Liveness** | replaceable | `{ "available": { "<listing>": n } }` with `n` = capacity − live leases, and `["expiration", now + 5 × cadence]` (ADR 0007) |
+
+Everything a relay should filter on is a single-letter tag; numbers stay in
+content, because NIP-01 filters never match inside content (ADR 0002).
+
+The Profile and the Listings go out at startup and change only when the config
+does — which is a restart. Liveness goes out every `liveness_cadence_s`.
+
+**Publishing costs money.** A relay write on the TOON Network is a paid packet
+on the paid relay route, never the free ephemeral lane (ADR 0007). The
+provider app states *what* to publish; `publish_url` names the process that
+decides *how* it is paid for — the directory publisher in
+[`tools/publisher`](tools/publisher/README.md), which holds the payment
+channel so the provider's Nostr key never has to share a process with money.
+Leave `publish_url` unset and the provider publishes nothing, which is legal:
+it simply does not appear in the directory.
 
 ## Routes and the connector
 

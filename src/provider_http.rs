@@ -28,6 +28,7 @@ use tracing::info;
 
 use crate::clock::Clock;
 use crate::compute::ComputeBackend;
+use crate::directory::{ConnectorDirectory, Directory, NullDirectory};
 use crate::nostr::lease_request::AcceptedRequests;
 use crate::nostr::wire::{ErrorCode, ErrorResponse};
 use crate::provider::routes::{
@@ -45,6 +46,10 @@ pub struct AppState {
     /// The provider's Nostr identity: what a Lease Request must be addressed
     /// to, and what signs everything the provider publishes.
     pub keys: Keys,
+    /// Where the Provider Profile, Listings, Liveness and — from a later
+    /// ticket — Eviction Notices go. The second of the provider's two I/O
+    /// ports; a test swaps it for a fake and reads back what was published.
+    pub directory: Arc<dyn Directory>,
     pub leases: Arc<Mutex<HashMap<u32, LeaseRecord>>>,
     pub accepted_requests: Arc<AcceptedRequests>,
 }
@@ -60,14 +65,39 @@ impl AppState {
         config.validate()?;
         let keys = Keys::parse(&config.nostr_private_key)
             .context("nostr_private_key must be a hex or nsec1 secret key")?;
+        let directory = directory_from_config(&config)?;
         Ok(Self {
             config: Arc::new(config),
             backend,
             clock,
             keys,
+            directory,
             leases: Arc::new(Mutex::new(HashMap::new())),
             accepted_requests: Arc::new(AcceptedRequests::new()),
         })
+    }
+
+    /// Swap the Directory this state publishes through. Separate from `new`
+    /// so the constructor's shape stays the one every caller already writes,
+    /// and so a test can hand in a fake without a config that names a live
+    /// publisher.
+    pub fn with_directory(mut self, directory: Arc<dyn Directory>) -> Self {
+        self.directory = directory;
+        self
+    }
+}
+
+/// The Directory a config describes: the real one when it names a directory
+/// publisher, and one that publishes nothing when it does not. A provider
+/// with no `publish_url` still serves every route — it is simply not in the
+/// directory.
+fn directory_from_config(config: &ProviderConfig) -> Result<Arc<dyn Directory>> {
+    match &config.publish_url {
+        Some(url) => Ok(Arc::new(ConnectorDirectory::new(
+            url.clone(),
+            config.relay_set.clone(),
+        )?)),
+        None => Ok(Arc::new(NullDirectory)),
     }
 }
 

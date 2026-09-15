@@ -1,0 +1,15 @@
+{
+  "name": "toon-provider-directory-publisher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pays for a TOON provider's relay writes, so the provider app never holds a payment channel",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "publish.mjs",
+  "scripts": {
+    "start": "node publish.mjs"
+  },
+  "dependencies": {
+    "@toon-protocol/client": "^3.0.0"
+  }
+}

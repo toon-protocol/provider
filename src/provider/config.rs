@@ -7,6 +7,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::nostr::directory_events::Settlement;
 use crate::nostr::wire::Resources;
 
 /// Which `ComputeBackend` the provider runs workloads on.
@@ -80,10 +81,50 @@ pub struct ProviderConfig {
     /// publishes and is the identity a Lease Request is addressed to.
     pub nostr_private_key: String,
 
-    /// The relays this provider publishes its profile, listings and liveness
-    /// to. Nothing is published yet; the directory lands in a later ticket.
+    /// The Relay Set: every relay this provider publishes its Profile,
+    /// Listings and Liveness to, and the list the Profile itself carries.
     #[serde(default)]
     pub relay_set: Vec<String>,
+
+    /// The provider connector's self-description URL, published in the
+    /// Profile. A LOCATION HINT ONLY — `connector_seal_key` is what a tenant
+    /// seals to (ADR 0011).
+    #[serde(default)]
+    pub connector_url: String,
+
+    /// The provider connector's sealing public key, hex. A tenant seals its
+    /// spawn to this and refuses if the URL reports another (ADR 0011).
+    #[serde(default)]
+    pub connector_seal_key: String,
+
+    /// The settlement legs the provider's connector accepts, published in
+    /// the Profile so a tenant knows what it can pay with.
+    #[serde(default)]
+    pub settlement: Vec<Settlement>,
+
+    /// `shared-kernel` | `dedicated-host`. Published in the Profile and as
+    /// every Listing's `l isolation:<value>` tag, which is how a relay
+    /// filters on it.
+    #[serde(default = "default_isolation")]
+    pub isolation: String,
+
+    /// How often Liveness is republished, in seconds. Each one expires five
+    /// cadences out (ADR 0007), so a provider may lose four publications
+    /// before it reads as down.
+    #[serde(default = "default_liveness_cadence_s")]
+    pub liveness_cadence_s: u64,
+
+    /// Optional region, published as every Listing's `g` tag.
+    #[serde(default)]
+    pub geohash: Option<String>,
+
+    /// Where `ConnectorDirectory` hands an event to be PAID FOR and written
+    /// to the Relay Set — the directory publisher that speaks TOON on this
+    /// provider's behalf (`tools/publisher`). Unset means this provider
+    /// publishes nothing, which is legal: a provider serving only tenants
+    /// who already know its address needs no directory.
+    #[serde(default)]
+    pub publish_url: Option<String>,
 
     /// Capabilities this provider is willing to grant — privileges beyond an
     /// ordinary workload, e.g. `docker`, `nesting`.
@@ -196,6 +237,37 @@ impl ProviderConfig {
         {
             bail!("ilp_address {:?} is not an ILP address", self.ilp_address);
         }
+        if !matches!(self.isolation.as_str(), "shared-kernel" | "dedicated-host") {
+            bail!(
+                "isolation {:?} is neither shared-kernel nor dedicated-host",
+                self.isolation
+            );
+        }
+        if self.liveness_cadence_s == 0 {
+            bail!("liveness_cadence_s must be positive: it is a publishing interval");
+        }
+        // Empty means "not published yet"; anything else is pinned by a
+        // tenant and sealed to (ADR 0011), so a typo must fail at load rather
+        // than as an unopenable seal. The length is NOT fixed here: a
+        // connector's self-description reports an uncompressed secp256k1 key
+        // (65 bytes, `0x`-prefixed) and this value is copied from it verbatim,
+        // so that a tenant's comparison is byte-for-byte.
+        if !self.connector_seal_key.is_empty() {
+            let digits = self
+                .connector_seal_key
+                .strip_prefix("0x")
+                .unwrap_or(&self.connector_seal_key);
+            if digits.len() < 64
+                || !digits.len().is_multiple_of(2)
+                || !digits.chars().all(|c| c.is_ascii_hexdigit())
+            {
+                bail!(
+                    "connector_seal_key {:?} is not a public key in hex (at least 32 bytes, \
+                     optionally 0x-prefixed) — copy it from the connector's /ilp identity",
+                    self.connector_seal_key
+                );
+            }
+        }
         for listing in &self.listings {
             if listing.name.is_empty() || !listing.name.chars().all(is_ilp_segment_char) {
                 bail!(
@@ -268,6 +340,14 @@ fn is_ilp_segment_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '~' | '-')
 }
 
+fn default_isolation() -> String {
+    "shared-kernel".to_string()
+}
+
+fn default_liveness_cadence_s() -> u64 {
+    60
+}
+
 fn default_ilp_address() -> String {
     "g.toon.provider".to_string()
 }
@@ -305,6 +385,13 @@ impl Default for ProviderConfig {
             public_ip: "127.0.0.1".to_string(),
             nostr_private_key: String::new(),
             relay_set: Vec::new(),
+            connector_url: String::new(),
+            connector_seal_key: String::new(),
+            settlement: Vec::new(),
+            isolation: default_isolation(),
+            liveness_cadence_s: default_liveness_cadence_s(),
+            geohash: None,
+            publish_url: None,
             capabilities: Vec::new(),
             listings: Vec::new(),
             http_bind_addr: default_http_bind_addr(),

@@ -3,13 +3,14 @@
 // leases.
 //
 // Paygress ran five loops here — offer publication, heartbeat, a Nostr DM
-// request listener, a standby watchdog and the expiry sweep. Two are left: the
-// sweep in `cleanup`, and the HTTP app in `provider_http`. Directory
-// publication lands in a later ticket.
+// request listener, a standby watchdog and the expiry sweep. Three are left:
+// the sweep in `cleanup`, the directory publication in `publish`, and the HTTP
+// app in `provider_http`.
 
 mod cleanup;
 mod config;
 mod persistence;
+mod publish;
 pub mod routes;
 mod spawn;
 mod standby;
@@ -28,6 +29,7 @@ use tracing::{info, warn};
 
 use crate::clock::{system_clock, Clock};
 use crate::compute::{ComputeBackend, ContainerStatus};
+use crate::directory::Directory;
 use crate::docker::DockerBackend;
 use crate::provider_http::AppState;
 
@@ -59,6 +61,19 @@ impl ProviderService {
     ) -> Result<Self> {
         Ok(Self {
             state: AppState::new(config, backend, clock)?,
+        })
+    }
+
+    /// …and a caller-supplied Directory, so what the provider publishes can
+    /// be read back from a fake instead of paid for on a relay.
+    pub fn with_backend_clock_and_directory(
+        config: ProviderConfig,
+        backend: Arc<dyn ComputeBackend>,
+        clock: Arc<dyn Clock>,
+        directory: Arc<dyn Directory>,
+    ) -> Result<Self> {
+        Ok(Self {
+            state: AppState::new(config, backend, clock)?.with_directory(directory),
         })
     }
 
@@ -139,6 +154,13 @@ impl ProviderService {
             }
             result = self.expiry_sweep_loop() => {
                 tracing::error!("expiry sweep exited: {:?}", result);
+                result
+            }
+            // After the restore above, so the first Liveness counts the
+            // leases that survived the restart rather than announcing an
+            // empty provider.
+            result = self.directory_loop() => {
+                tracing::error!("directory publication exited: {:?}", result);
                 result
             }
         }

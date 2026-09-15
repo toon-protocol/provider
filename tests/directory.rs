@@ -1,0 +1,486 @@
+//! The Provider Directory, driven through the `Directory` port: the provider
+//! is asked to publish and the fake reads back what it was handed. Assertions
+//! are on the events — kind, tags, content and signature — never on the
+//! provider's internal state.
+//!
+//! The one lease this file spawns goes in through the HTTP router with the
+//! faked `ComputeBackend`, exactly as a paying tenant's would, because that is
+//! the only honest way to make `available` drop by one.
+
+mod common;
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use nostr_sdk::{EventBuilder, Keys, Kind, PublicKey, Tag, TagKind, Timestamp};
+use serde_json::{json, Value};
+use tower::ServiceExt;
+
+use common::{FakeBackend, FakeClock, FakeDirectory};
+use toon_provider::nostr::directory_events::{
+    ListingContent, LivenessContent, ProfileContent, Settlement, LIVENESS_EXPIRY_CADENCES,
+};
+use toon_provider::nostr::kinds::{K_LEASE_REQUEST, K_LISTING, K_LIVENESS, K_PROFILE, TOON_LABEL};
+use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, Resources, SpawnContent};
+use toon_provider::{router, Clock, Listing, ProviderConfig, ProviderService};
+
+const NOW: u64 = 1_700_000_000;
+const INTERVAL: u64 = 3600;
+const CADENCE: u64 = 30;
+const PUBLIC_IP: &str = "203.0.113.7";
+// An uncompressed secp256k1 public key, the shape a connector's /ilp
+// identity reports, copied verbatim so a tenant's comparison is byte-for-byte.
+const SEAL_KEY: &str = "0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188";
+const SSH_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@example";
+const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+struct Harness {
+    app: axum::Router,
+    service: ProviderService,
+    directory: Arc<FakeDirectory>,
+    clock: Arc<FakeClock>,
+    provider: PublicKey,
+}
+
+fn listing(name: &str, version: u32, capacity: u32) -> Listing {
+    Listing {
+        name: name.to_string(),
+        version,
+        resources: Resources {
+            cpu_millicores: 500,
+            memory_mb: 256,
+            storage_gb: 4,
+            gpu: None,
+        },
+        arch: "amd64".to_string(),
+        lease_interval_s: INTERVAL,
+        price: 1000,
+        capabilities: vec!["docker".to_string()],
+        capacity,
+    }
+}
+
+fn settlement() -> Vec<Settlement> {
+    vec![
+        Settlement {
+            chain: "solana".to_string(),
+            token: "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H".to_string(),
+            decimals: 6,
+        },
+        Settlement {
+            chain: "evm:31337".to_string(),
+            token: "0x5FbDB2315678afecb367f032d93F642f64180aa3".to_string(),
+            decimals: 6,
+        },
+    ]
+}
+
+fn config(listings: Vec<Listing>, provider_key: &str, state_path: String) -> ProviderConfig {
+    ProviderConfig {
+        public_ip: PUBLIC_IP.to_string(),
+        nostr_private_key: provider_key.to_string(),
+        ilp_address: "g.acme".to_string(),
+        relay_set: vec![
+            "ws://relay-one:7100".to_string(),
+            "ws://relay-two:7100".to_string(),
+        ],
+        connector_url: "https://c.acme.example/ilp".to_string(),
+        connector_seal_key: SEAL_KEY.to_string(),
+        settlement: settlement(),
+        isolation: "shared-kernel".to_string(),
+        liveness_cadence_s: CADENCE,
+        geohash: Some("u4pruy".to_string()),
+        listings,
+        workload_id_range_start: 1000,
+        workload_id_range_end: 1003,
+        ssh_port_start: Some(40000),
+        workload_port_start: 41000,
+        lease_state_path: state_path,
+        ..ProviderConfig::default()
+    }
+}
+
+fn harness_with(listings: Vec<Listing>) -> Harness {
+    let keys = Keys::generate();
+    let provider_key = keys.secret_key().to_secret_hex();
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir
+        .keep()
+        .join("leases.json")
+        .to_string_lossy()
+        .into_owned();
+
+    let clock = FakeClock::at(NOW);
+    let directory = FakeDirectory::new();
+    let service = ProviderService::with_backend_clock_and_directory(
+        config(listings, &provider_key, state_path),
+        FakeBackend::new(),
+        clock.clone(),
+        directory.clone(),
+    )
+    .unwrap();
+
+    Harness {
+        app: router(service.app_state()),
+        service,
+        directory,
+        clock,
+        provider: keys.public_key(),
+    }
+}
+
+fn harness() -> Harness {
+    harness_with(vec![listing("basic", 1, 4)])
+}
+
+/// Every cell of a tag, as the relay sees it.
+fn tag_cells(event: &nostr_sdk::Event) -> Vec<Vec<String>> {
+    event.tags.iter().map(|t| t.clone().to_vec()).collect()
+}
+
+fn has_tag(event: &nostr_sdk::Event, cells: &[&str]) -> bool {
+    let wanted: Vec<String> = cells.iter().map(|c| c.to_string()).collect();
+    tag_cells(event).contains(&wanted)
+}
+
+// ── the Provider Profile ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn the_profile_carries_everything_a_tenant_needs_to_pay_this_provider() {
+    let h = harness();
+    h.service.publish_directory().await.unwrap();
+
+    let profiles = h.directory.of_kind(K_PROFILE);
+    assert_eq!(
+        profiles.len(),
+        1,
+        "one Provider Profile, not one per listing"
+    );
+    let profile = &profiles[0];
+
+    assert_eq!(profile.pubkey, h.provider);
+    profile
+        .verify()
+        .expect("the Profile is signed by the provider's Nostr key");
+    assert_eq!(profile.created_at.as_u64(), NOW);
+
+    let content: ProfileContent = serde_json::from_str(&profile.content).unwrap();
+    assert_eq!(content.ilp_address, "g.acme");
+    assert_eq!(content.connector_url, "https://c.acme.example/ilp");
+    assert_eq!(content.connector_seal_key, SEAL_KEY);
+    assert_eq!(
+        content.relays,
+        vec!["ws://relay-one:7100", "ws://relay-two:7100"]
+    );
+    assert_eq!(content.settlement, settlement());
+    assert_eq!(content.isolation, "shared-kernel");
+    assert!(!content.hidden, "Milestone 1 has no Hidden Provider");
+    assert_eq!(content.host.as_deref(), Some(PUBLIC_IP));
+    assert_eq!(content.liveness_cadence_s, CADENCE);
+
+    assert!(has_tag(profile, &["L", TOON_LABEL]));
+}
+
+// ── Listings ────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn one_listing_event_per_configured_listing() {
+    let h = harness_with(vec![listing("basic", 1, 4), listing("large", 1, 2)]);
+    h.service.publish_directory().await.unwrap();
+
+    let names: Vec<String> = h
+        .directory
+        .of_kind(K_LISTING)
+        .iter()
+        .map(|e| e.tags.identifier().unwrap().to_string())
+        .collect();
+    assert_eq!(names, vec!["basic", "large"]);
+}
+
+#[tokio::test]
+async fn a_listing_names_its_tier_its_profile_and_everything_a_relay_filters_on() {
+    let mut tier = listing("basic", 3, 4);
+    tier.resources.gpu = Some("rtx4090".to_string());
+    tier.capabilities = vec!["docker".to_string(), "nesting".to_string()];
+    let h = harness_with(vec![tier]);
+    h.service.publish_directory().await.unwrap();
+
+    let listings = h.directory.of_kind(K_LISTING);
+    assert_eq!(listings.len(), 1);
+    let event = &listings[0];
+
+    assert_eq!(event.pubkey, h.provider);
+    event
+        .verify()
+        .expect("the Listing is signed by the provider's Nostr key");
+
+    // The `d` tag is the listing NAME, stable across versions: a new version
+    // replaces the event rather than accumulating (ADR 0009).
+    assert_eq!(event.tags.identifier(), Some("basic"));
+    assert!(has_tag(
+        event,
+        &["a", &format!("{}:{}:", K_PROFILE, h.provider.to_hex())]
+    ));
+    assert!(has_tag(event, &["L", TOON_LABEL]));
+    assert!(has_tag(
+        event,
+        &["l", "isolation:shared-kernel", TOON_LABEL]
+    ));
+    assert!(has_tag(event, &["l", "arch:amd64", TOON_LABEL]));
+    assert!(has_tag(event, &["l", "gpu:rtx4090", TOON_LABEL]));
+    assert!(has_tag(event, &["t", "docker"]));
+    assert!(has_tag(event, &["t", "nesting"]));
+    assert!(has_tag(event, &["g", "u4pruy"]));
+
+    // Numbers stay in content; a relay cannot filter on them anyway.
+    let content: ListingContent = serde_json::from_str(&event.content).unwrap();
+    assert_eq!(content.version, 3);
+    assert_eq!(content.arch, "amd64");
+    assert_eq!(content.lease_interval_s, INTERVAL);
+    assert_eq!(content.price, 1000);
+    assert_eq!(content.capabilities, vec!["docker", "nesting"]);
+    assert_eq!(content.resources.cpu_millicores, 500);
+    assert_eq!(content.resources.memory_mb, 256);
+    assert_eq!(content.resources.storage_gb, 4);
+    assert_eq!(content.resources.gpu.as_deref(), Some("rtx4090"));
+    assert_eq!(
+        content.standby_price, None,
+        "no listing sells a Warm Standby in this milestone"
+    );
+}
+
+#[tokio::test]
+async fn a_tier_with_no_gpu_publishes_no_gpu_label() {
+    let h = harness();
+    h.service.publish_directory().await.unwrap();
+
+    let listings = h.directory.of_kind(K_LISTING);
+    let cells = tag_cells(&listings[0]);
+    assert!(
+        !cells
+            .iter()
+            .any(|t| t.get(1).is_some_and(|v| v.starts_with("gpu:"))),
+        "a tier with no GPU must not claim one: {cells:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_provider_with_no_geohash_publishes_no_region_tag() {
+    let keys = Keys::generate();
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = config(
+        vec![listing("basic", 1, 4)],
+        &keys.secret_key().to_secret_hex(),
+        dir.keep()
+            .join("leases.json")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    cfg.geohash = None;
+    let directory = FakeDirectory::new();
+    let service = ProviderService::with_backend_clock_and_directory(
+        cfg,
+        FakeBackend::new(),
+        FakeClock::at(NOW),
+        directory.clone(),
+    )
+    .unwrap();
+    service.publish_directory().await.unwrap();
+
+    let cells = tag_cells(&directory.of_kind(K_LISTING)[0]);
+    assert!(
+        !cells.iter().any(|t| t[0] == "g"),
+        "region is optional and must be absent when unset: {cells:?}"
+    );
+}
+
+// ── Liveness ────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn liveness_expires_five_cadences_out_and_counts_free_capacity() {
+    let h = harness();
+    h.service.publish_liveness(NOW).await.unwrap();
+
+    let events = h.directory.of_kind(K_LIVENESS);
+    assert_eq!(events.len(), 1);
+    let event = &events[0];
+
+    assert_eq!(event.pubkey, h.provider);
+    event
+        .verify()
+        .expect("Liveness is signed by the provider's Nostr key");
+    assert_eq!(event.created_at.as_u64(), NOW);
+    assert!(has_tag(event, &["L", TOON_LABEL]));
+    assert!(has_tag(
+        event,
+        &[
+            "expiration",
+            &(NOW + LIVENESS_EXPIRY_CADENCES * CADENCE).to_string()
+        ]
+    ));
+
+    let content: LivenessContent = serde_json::from_str(&event.content).unwrap();
+    assert_eq!(
+        content.available,
+        BTreeMap::from([("basic".to_string(), 4)]),
+        "nothing is leased, so the whole capacity could start now"
+    );
+}
+
+#[tokio::test]
+async fn a_running_lease_drops_availability_by_one() {
+    let h = harness();
+
+    let (status, answer) = spawn_a_lease(&h).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    h.service.publish_liveness(NOW).await.unwrap();
+    let content: LivenessContent =
+        serde_json::from_str(&h.directory.of_kind(K_LIVENESS)[0].content).unwrap();
+    assert_eq!(
+        content.available,
+        BTreeMap::from([("basic".to_string(), 3)])
+    );
+}
+
+#[tokio::test]
+async fn availability_returns_when_the_lease_expires() {
+    let h = harness();
+    spawn_a_lease(&h).await;
+
+    h.clock.advance(INTERVAL + 1);
+    h.service.sweep_expired_leases(h.clock.now()).await;
+    h.service.publish_liveness(h.clock.now()).await.unwrap();
+
+    let liveness = h.directory.of_kind(K_LIVENESS);
+    let content: LivenessContent = serde_json::from_str(&liveness.last().unwrap().content).unwrap();
+    assert_eq!(
+        content.available,
+        BTreeMap::from([("basic".to_string(), 4)])
+    );
+}
+
+#[tokio::test]
+async fn every_version_of_a_tier_shares_one_availability_figure() {
+    // Capacity is a slice of hardware, not a per-version allowance.
+    let h = harness_with(vec![listing("basic", 1, 4), listing("basic", 2, 4)]);
+    h.service.publish_liveness(NOW).await.unwrap();
+
+    let content: LivenessContent =
+        serde_json::from_str(&h.directory.of_kind(K_LIVENESS)[0].content).unwrap();
+    assert_eq!(
+        content.available,
+        BTreeMap::from([("basic".to_string(), 4)])
+    );
+}
+
+#[tokio::test]
+async fn a_relay_that_refuses_a_write_does_not_stop_the_provider() {
+    let h = harness();
+    h.directory
+        .fail_next_publish("relay refused: out of credit");
+
+    // The Profile publication fails; the Listing still goes out, and nothing
+    // propagates up to the caller — paid leases are running underneath. The
+    // answer is `false`, which is what the publication loop retries on.
+    let complete = h.service.publish_directory().await.unwrap();
+
+    assert!(
+        !complete,
+        "an incomplete publication must ask to be retried"
+    );
+    assert!(h.directory.of_kind(K_PROFILE).is_empty());
+    assert_eq!(h.directory.of_kind(K_LISTING).len(), 1);
+}
+
+#[tokio::test]
+async fn a_publication_every_relay_took_is_not_retried() {
+    let h = harness();
+    assert!(h.service.publish_directory().await.unwrap());
+}
+
+// ── what must never be published ────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_lease_request_is_never_published() {
+    let h = harness();
+    spawn_a_lease(&h).await;
+    h.service.publish_directory().await.unwrap();
+    h.service.publish_liveness(NOW).await.unwrap();
+
+    assert!(
+        h.directory.of_kind(K_LEASE_REQUEST).is_empty(),
+        "a Lease Request travels in a request body and is never published"
+    );
+    for event in h.directory.published() {
+        assert!(
+            has_tag(&event, &["L", TOON_LABEL]),
+            "every directory event carries the toon.network label: {:?}",
+            event.kind
+        );
+    }
+}
+
+// ── driving one real lease in ───────────────────────────────────────────────
+
+async fn spawn_a_lease(h: &Harness) -> (StatusCode, Value) {
+    let content = SpawnContent {
+        workload_id: "ab".repeat(32),
+        image: ImageRef {
+            reference: "docker.io/library/alpine".to_string(),
+            digest: DIGEST.to_string(),
+            registry_entry: None,
+        },
+        env: BTreeMap::new(),
+        ports: vec![PortRequest {
+            container_port: 443,
+            protocol: Protocol::Tcp,
+        }],
+        volume_gb: Some(2),
+        ssh_public_key: SSH_KEY.to_string(),
+        entrypoint: None,
+        args: None,
+        standby_set: None,
+        template: None,
+    };
+
+    let tenant = Keys::generate();
+    let request = EventBuilder::new(
+        Kind::Custom(K_LEASE_REQUEST),
+        serde_json::to_value(&content).unwrap().to_string(),
+    )
+    .tags([
+        Tag::public_key(h.provider),
+        Tag::custom(TagKind::custom("op"), ["spawn"]),
+        Tag::expiration(Timestamp::from(h.clock.now() + 60)),
+    ])
+    .custom_created_at(Timestamp::from(h.clock.now()))
+    .sign_with_keys(&tenant)
+    .unwrap();
+
+    let body = json!({ "request": request });
+    let response = h
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/listings/basic/v1/spawn")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}

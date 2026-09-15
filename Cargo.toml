@@ -32,6 +32,12 @@ nostr-sdk = "0.43"
 # HTTP app, behind the provider's own TOON connector.
 axum = "0.7"
 
+# The provider hands a signed directory event to its directory publisher over
+# plain HTTP (`Directory` -> `ConnectorDirectory`). `rustls-tls` rather than
+# the system OpenSSL: nostr-sdk already brings rustls in for its relay
+# sockets, so this adds no second TLS stack.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

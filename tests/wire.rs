@@ -4,6 +4,9 @@
 use std::collections::BTreeMap;
 
 use serde_json::json;
+use toon_provider::nostr::directory_events::{
+    ListingContent, LivenessContent, ProfileContent, Settlement,
+};
 use toon_provider::nostr::kinds::K_LEASE_REQUEST;
 use toon_provider::nostr::wire::*;
 
@@ -216,4 +219,123 @@ fn resources_round_trip_with_an_optional_gpu() {
         ..with_gpu
     };
     assert!(serde_json::to_value(&without).unwrap().get("gpu").is_none());
+}
+
+// ── the Provider Directory event contents (spec §4) ─────────────────────────
+
+#[test]
+fn a_profile_round_trips_and_spells_every_field_the_spec_names() {
+    let profile = ProfileContent {
+        ilp_address: "g.acme".to_string(),
+        connector_url: "https://c.acme.example/ilp".to_string(),
+        connector_seal_key: format!("0x04{}", "ab".repeat(64)),
+        relays: vec!["wss://relay.acme.example".to_string()],
+        settlement: vec![Settlement {
+            chain: "solana".to_string(),
+            token: "H8HSreUF2s8r8hem4qMttE3bWYCpFuh71jbuos5bA77H".to_string(),
+            decimals: 6,
+        }],
+        isolation: "shared-kernel".to_string(),
+        hidden: false,
+        host: Some("203.0.113.7".to_string()),
+        liveness_cadence_s: 60,
+    };
+
+    let value = serde_json::to_value(&profile).unwrap();
+    assert_eq!(value["settlement"][0]["chain"], "solana");
+    assert_eq!(value["hidden"], false);
+    assert_eq!(
+        serde_json::from_value::<ProfileContent>(value).unwrap(),
+        profile
+    );
+}
+
+#[test]
+fn a_hidden_provider_profile_omits_its_host() {
+    // Spec §4.1: `host` MUST be absent when `hidden` is true. The shape allows
+    // it now; §10 is a follow-up milestone.
+    let hidden = ProfileContent {
+        ilp_address: "g.acme".to_string(),
+        connector_url: "https://c.acme.example/ilp".to_string(),
+        connector_seal_key: format!("0x04{}", "ab".repeat(64)),
+        relays: vec![],
+        settlement: vec![],
+        isolation: "dedicated-host".to_string(),
+        hidden: true,
+        host: None,
+        liveness_cadence_s: 60,
+    };
+    let value = serde_json::to_value(&hidden).unwrap();
+    assert!(value.get("host").is_none());
+    assert_eq!(
+        serde_json::from_value::<ProfileContent>(value).unwrap(),
+        hidden
+    );
+}
+
+#[test]
+fn a_listing_round_trips_and_omits_a_standby_price_it_does_not_sell() {
+    let listing = ListingContent {
+        version: 2,
+        resources: Resources {
+            cpu_millicores: 500,
+            memory_mb: 256,
+            storage_gb: 4,
+            gpu: None,
+        },
+        arch: "arm64".to_string(),
+        lease_interval_s: 3600,
+        price: 1000,
+        standby_price: None,
+        capabilities: vec!["docker".to_string()],
+    };
+
+    let value = serde_json::to_value(&listing).unwrap();
+    assert!(value.get("standby_price").is_none());
+    assert_eq!(value["price"], 1000);
+    assert_eq!(
+        serde_json::from_value::<ListingContent>(value).unwrap(),
+        listing
+    );
+
+    let with_standby = ListingContent {
+        standby_price: Some(400),
+        ..listing
+    };
+    let value = serde_json::to_value(&with_standby).unwrap();
+    assert_eq!(value["standby_price"], 400);
+    assert_eq!(
+        serde_json::from_value::<ListingContent>(value).unwrap(),
+        with_standby
+    );
+}
+
+#[test]
+fn liveness_round_trips_its_per_listing_availability() {
+    let liveness = LivenessContent {
+        available: BTreeMap::from([("basic".to_string(), 3), ("large".to_string(), 0)]),
+    };
+    let value = serde_json::to_value(&liveness).unwrap();
+    assert_eq!(value["available"]["basic"], 3);
+    assert_eq!(value["available"]["large"], 0);
+    assert_eq!(
+        serde_json::from_value::<LivenessContent>(value).unwrap(),
+        liveness
+    );
+}
+
+#[test]
+fn an_unknown_field_in_a_directory_content_is_refused() {
+    // The same rule the request shapes follow: an unknown field is a shape
+    // this provider does not know, never something to drop silently.
+    let value = json!({
+        "version": 1,
+        "resources": { "cpu_millicores": 1, "memory_mb": 1, "storage_gb": 1 },
+        "arch": "amd64",
+        "lease_interval_s": 60,
+        "price": 1,
+        "capabilities": [],
+        "gpu_hours_included": 5
+    });
+    assert!(serde_json::from_value::<ListingContent>(value).is_err());
 }

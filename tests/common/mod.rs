@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use async_trait::async_trait;
 use toon_provider::compute::{ComputeBackend, ContainerConfig, ContainerStatus, NodeStatus};
-use toon_provider::Clock;
+use toon_provider::{Clock, Directory, PublishReport};
 
 /// One thing the provider asked the compute backend to do. Tests assert on this
 /// sequence rather than on the provider's internal state.
@@ -170,5 +170,72 @@ impl FakeClock {
 impl Clock for FakeClock {
     fn now(&self) -> u64 {
         self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// An in-memory `Directory`, so what the provider publishes can be read back
+/// without paying a relay. It records every event in publication order; tests
+/// assert on that sequence, never on the provider's internal state.
+#[derive(Default)]
+pub struct FakeDirectory {
+    published: Mutex<Vec<nostr_sdk::Event>>,
+    /// The Liveness `query_liveness` answers with, as a relay holding one
+    /// would.
+    liveness: Mutex<Option<nostr_sdk::Event>>,
+    /// When set, the next publish fails with this message — a relay that is
+    /// down, or a paid packet that was refused.
+    fail_next_publish: Mutex<Option<String>>,
+}
+
+impl FakeDirectory {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Everything published so far, in order.
+    pub fn published(&self) -> Vec<nostr_sdk::Event> {
+        self.published.lock().unwrap().clone()
+    }
+
+    /// Everything published so far of one kind.
+    pub fn of_kind(&self, kind: u16) -> Vec<nostr_sdk::Event> {
+        self.published()
+            .into_iter()
+            .filter(|e| e.kind.as_u16() == kind)
+            .collect()
+    }
+
+    pub fn seed_liveness(&self, event: nostr_sdk::Event) {
+        *self.liveness.lock().unwrap() = Some(event);
+    }
+
+    pub fn fail_next_publish(&self, why: &str) {
+        *self.fail_next_publish.lock().unwrap() = Some(why.to_string());
+    }
+}
+
+#[async_trait]
+impl Directory for FakeDirectory {
+    async fn publish(&self, event: nostr_sdk::Event) -> Result<PublishReport> {
+        if let Some(why) = self.fail_next_publish.lock().unwrap().take() {
+            anyhow::bail!("{}", why);
+        }
+        self.published.lock().unwrap().push(event);
+        Ok(PublishReport {
+            accepted: vec!["wss://relay.example".to_string()],
+            failed: Default::default(),
+        })
+    }
+
+    async fn query_liveness(
+        &self,
+        provider: nostr_sdk::PublicKey,
+    ) -> Result<Option<nostr_sdk::Event>> {
+        Ok(self
+            .liveness
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|e| e.pubkey == provider))
     }
 }
