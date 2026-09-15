@@ -230,10 +230,13 @@ async fn the_route_table_keeps_a_retired_version_until_its_last_lease_ends() {
     let expires_at = body["expires_at"].as_u64().unwrap();
 
     let h = after_the_change(&h).await;
-    let config = h.service.app_state().config;
 
-    // What `toon-provider routes` prints: the connector must carry both
-    // versions while v1 still has a lease to extend.
+    // What `toon-provider routes` prints for the changed config, read off
+    // the same lease table on disk the CLI reads.
+    let config = ProviderConfig {
+        listings: vec![v1(), v2()],
+        ..ProviderConfig::default()
+    };
     let prefixes = |leases: &[toon_provider::LeaseRecord]| -> Vec<String> {
         route_table(&config, leases)
             .into_iter()
@@ -270,6 +273,16 @@ async fn the_route_table_keeps_a_retired_version_until_its_last_lease_ends() {
 /// back rather than paid for on a relay (the pattern `tests/directory.rs`
 /// uses).
 async fn publishing_provider(listings: Vec<Listing>) -> (ProviderService, Arc<FakeDirectory>) {
+    publishing_provider_with(listings, FakeDirectory::new()).await
+}
+
+/// …over a Directory that has already recorded something, so a test can read
+/// back what one provider published before a restart and what the next one
+/// published after it, in order.
+async fn publishing_provider_with(
+    listings: Vec<Listing>,
+    directory: Arc<FakeDirectory>,
+) -> (ProviderService, Arc<FakeDirectory>) {
     let registry = stub_registry().await;
     let dir = tempfile::tempdir().unwrap();
     let config = ProviderConfig {
@@ -287,7 +300,6 @@ async fn publishing_provider(listings: Vec<Listing>) -> (ProviderService, Arc<Fa
         },
         ..ProviderConfig::default()
     };
-    let directory = FakeDirectory::new();
     let service = ProviderService::with_backend_clock_and_directory(
         config,
         FakeBackend::new(),
@@ -314,6 +326,36 @@ async fn the_directory_publishes_one_listing_per_name_at_the_newest_version() {
     assert_eq!(content.version, 2);
     assert_eq!(content.price, PRICE_V2);
     assert_eq!(content.lease_interval_s, INTERVAL_V2);
+}
+
+#[tokio::test]
+async fn the_republished_listing_keeps_its_d_and_carries_the_new_version() {
+    // Issue #8's acceptance criterion, as the relay sees it across the
+    // change: the same provider publishes before and after, and the second
+    // event is a REPLACEMENT of the first — same `d`, new `version`.
+    let (before, directory) = publishing_provider(vec![v1()]).await;
+    before.publish_directory().await.unwrap();
+    let first = directory.of_kind(K_LISTING);
+    assert_eq!(first.len(), 1);
+    let first: ListingContent = serde_json::from_str(&first[0].content).unwrap();
+    assert_eq!(first.version, 1);
+    assert_eq!(first.price, PRICE_V1);
+
+    // The operator adds v2, keeps v1, and restarts (ADR 0009).
+    let (after, directory) = publishing_provider_with(vec![v1(), v2()], directory).await;
+    after.publish_directory().await.unwrap();
+
+    let events = directory.of_kind(K_LISTING);
+    assert_eq!(events.len(), 2, "one publication before, one after");
+    let ds: Vec<Option<&str>> = events.iter().map(|e| e.tags.identifier()).collect();
+    assert_eq!(
+        ds,
+        vec![Some("basic"), Some("basic")],
+        "the `d` is the listing NAME and is stable across versions"
+    );
+    let second: ListingContent = serde_json::from_str(&events[1].content).unwrap();
+    assert_eq!(second.version, 2);
+    assert_eq!(second.price, PRICE_V2);
 }
 
 #[tokio::test]

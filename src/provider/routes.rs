@@ -5,6 +5,7 @@
 // this module is the one place that says which ILP prefix maps to which path,
 // so `toon-provider routes` and the axum router cannot disagree.
 
+use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use super::config::ProviderConfig;
@@ -59,15 +60,23 @@ pub struct RouteRow {
 ///
 /// `leases` is the lease table — the running provider's, or the persisted one
 /// (`persistence::persisted_leases`) when the `routes` CLI reads it off disk.
+///
+/// The rows come out in the order the `[[listings]]` entries are written,
+/// which is the order the operator reads their own config in; the free rows
+/// come last.
 pub fn route_table(config: &ProviderConfig, leases: &[LeaseRecord]) -> Vec<RouteRow> {
     let base = config.handler_base_url.trim_end_matches('/');
     let addr = &config.ilp_address;
     let mut rows = Vec::with_capacity(config.listings.len() * 2 + 3);
+    // Which versions are live is a question about a NAME, so it is answered
+    // once per name rather than once per `[[listings]]` entry.
+    let mut live: BTreeMap<&str, Vec<u32>> = BTreeMap::new();
     for listing in &config.listings {
-        if !config
-            .live_versions(&listing.name, leases)
-            .contains(&listing.version)
-        {
+        live.entry(listing.name.as_str())
+            .or_insert_with(|| config.live_versions(&listing.name, leases));
+    }
+    for listing in &config.listings {
+        if !live[listing.name.as_str()].contains(&listing.version) {
             continue;
         }
         rows.push(RouteRow {

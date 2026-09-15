@@ -155,19 +155,19 @@ fn the_three_free_rows_are_provider_wide_at_price_zero() {
 
 #[test]
 fn exactly_two_rows_per_live_version_plus_three() {
-    let rows = rows(&render_routes(&config(), &[live_lease(1000, "basic", 1)]));
-    assert_eq!(rows.len(), 3 * 2 + 3);
-    let mut prefixes: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    let with_v1_lease = rows(&render_routes(&config(), &[live_lease(1000, "basic", 1)]));
+    assert_eq!(with_v1_lease.len(), 3 * 2 + 3);
+    let mut prefixes: Vec<&str> = with_v1_lease.iter().map(|r| r.0.as_str()).collect();
     prefixes.sort_unstable();
     prefixes.dedup();
-    assert_eq!(prefixes.len(), rows.len(), "every prefix is distinct");
+    assert_eq!(
+        prefixes.len(),
+        with_v1_lease.len(),
+        "every prefix is distinct"
+    );
 
     // Without the lease, basic v1's two rows are gone.
-    assert_eq!(rows_len_with_no_leases(), 2 * 2 + 3);
-}
-
-fn rows_len_with_no_leases() -> usize {
-    rows(&render_routes(&config(), &[])).len()
+    assert_eq!(rows(&render_routes(&config(), &[])).len(), 2 * 2 + 3);
 }
 
 #[test]

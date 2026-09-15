@@ -4,14 +4,14 @@
 // nginx module and CLI flags. A provider joining the TOON marketplace needs
 // nobody's approval and should need one file, so this is the only source.
 
-use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::persistence::LeaseRecord;
 use crate::nostr::directory_events::Settlement;
-use crate::nostr::wire::Resources;
+use crate::nostr::wire::{ErrorCode, ErrorResponse, Resources};
 
 /// Which `ComputeBackend` the provider runs workloads on.
 ///
@@ -277,16 +277,55 @@ impl ProviderConfig {
     /// The version of `name` that is ON SALE: the newest one configured.
     ///
     /// Every older version is RETIRED. A price or resource change is a new
-    /// version (ADR 0009) and spec §4.2 says the new Listing REPLACES the
-    /// previous one, so only the newest is purchasable. A retired version
-    /// keeps its routes only so the leases already on it can be extended at
-    /// the price they were sold at.
-    pub fn latest_version(&self, name: &str) -> Option<u32> {
+    /// version (ADR 0009) and spec §4.2 says "a new version replaces the
+    /// previous Listing event on the relay", so only the newest is
+    /// purchasable. A retired version keeps its routes only so the leases
+    /// already on it can be extended at the price they were sold at.
+    pub fn listing_on_sale(&self, name: &str) -> Option<&Listing> {
         self.listings
             .iter()
             .filter(|l| l.name == name)
-            .map(|l| l.version)
-            .max()
+            .max_by_key(|l| l.version)
+    }
+
+    /// The version `listing_on_sale` names, if this provider sells `name`.
+    pub fn latest_version(&self, name: &str) -> Option<u32> {
+        self.listing_on_sale(name).map(|l| l.version)
+    }
+
+    /// Step 2 of the spec's spawn validation (§6.2): the route's listing
+    /// version exists AND is the one on sale.
+    ///
+    /// `spawn` and `availability` both go through this, so the free answer
+    /// and the paid one cannot disagree (spec §9). A retired version is
+    /// refused whether or not a lease is still running on it — there is
+    /// nothing left to sell there, and `wrong_listing_version` is the one
+    /// code a tenant can act on (pay the newest version's route instead).
+    pub fn sellable_listing(&self, name: &str, version: u32) -> Result<&Listing, ErrorResponse> {
+        let on_sale = self.listing_on_sale(name).ok_or_else(|| {
+            ErrorResponse::new(
+                ErrorCode::WrongListingVersion,
+                format!("this provider sells no {} v{}", name, version),
+            )
+        })?;
+        if on_sale.version == version {
+            return Ok(on_sale);
+        }
+        Err(ErrorResponse::new(
+            ErrorCode::WrongListingVersion,
+            if self.listing(name, version).is_some() {
+                format!(
+                    "{} v{} is retired and sells no new lease; it is sold as v{} now. \
+                     Its route stays only to extend the leases already on it.",
+                    name, version, on_sale.version
+                )
+            } else {
+                format!(
+                    "this provider sells no {} v{}; it sells v{}",
+                    name, version, on_sale.version
+                )
+            },
+        ))
     }
 
     /// The versions of `name` whose routes the connector must still carry,
@@ -320,14 +359,14 @@ impl ProviderConfig {
     /// Listings on the relay, they would be a race to be the one that
     /// survives. The newest wins that race on purpose.
     pub fn listings_on_sale(&self) -> Vec<&Listing> {
-        let mut newest: BTreeMap<&str, &Listing> = BTreeMap::new();
+        let mut names: BTreeSet<&str> = BTreeSet::new();
         for listing in &self.listings {
-            let entry = newest.entry(listing.name.as_str()).or_insert(listing);
-            if listing.version > entry.version {
-                *entry = listing;
-            }
+            names.insert(listing.name.as_str());
         }
-        newest.into_values().collect()
+        names
+            .into_iter()
+            .filter_map(|name| self.listing_on_sale(name))
+            .collect()
     }
 
     /// How many leases of the named tier may run at once, across versions.
