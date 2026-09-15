@@ -23,9 +23,9 @@ lease on an operator's command with a signed Eviction Notice, publishes its
 Provider Profile, Listings, Liveness and Eviction Notices to its Relay Set,
 and prints the connector route table it expects. A listing's price or
 resources can be changed without repricing the leases already running (see
-[Changing a listing's price](#changing-a-listings-price)). The sandbox
-acceptance smoke is being
-added ticket by ticket.
+[Changing a listing's price](#changing-a-listings-price)). The milestone's
+acceptance test is `make smoke-m1` in the sandbox — see
+[Milestone 1 acceptance test](#milestone-1-acceptance-test).
 
 ## Spec, decisions and vocabulary
 
@@ -411,6 +411,73 @@ decides *how* it is paid for — the directory publisher in
 channel so the provider's Nostr key never has to share a process with money.
 Leave `publish_url` unset and the provider publishes nothing, which is legal:
 it simply does not appear in the directory.
+
+## Milestone 1 acceptance test
+
+**`make smoke-m1` in `infra/sandbox` is Milestone 1's acceptance test**
+(TOON_Network #1, "Testing Decisions → Acceptance"; spec Appendix A). It runs
+`scripts/smoke-milestone1.mjs` against `make up-payments` (or `make up`):
+the real sandbox connector in front of this app, the real relay, the real
+Solana mock-USDC channels — and the assertions are the connectors' own claim
+books and the relay's own store, never this app's internals.
+
+It proves, in order:
+
+1. **The directory.** The Provider Profile, one Listing per `[[listings]]`
+   entry and an unexpired Liveness are read back off the sandbox relay by
+   the provider's pubkey and `#L = toon.network`, and Liveness's
+   `available.<listing>` is `capacity − live leases` — the provider's own
+   count, checked before anything is spawned, again while the lease runs
+   (one less) and again after it expires (back to capacity).
+2. **Availability**, the free route, end to end: `{ "would_run": true }` for
+   the listing and the smoke's sshd image; 0 arrives at the provider and the
+   provider connector's book does not move.
+3. **Spawn**, paid: a tenant-signed Lease Request buys
+   `g.toon.provider.<listing>.v1.spawn`; the answer names the workload,
+   `expires_at = now + lease_interval_s` and the access block; the
+   workload is running on the host as a `toon-<id>` container by
+   `reference@digest`.
+4. **Extension**, paid, unsigned: `expires_at` grows by exactly one Lease
+   Interval; `ssh -i <tenant key>` opens the workload; the free,
+   tenant-signed **status** reports `running`, the new expiry and the same
+   workload id, role and access; the next Liveness counts the lease.
+5. **Expiry**: once `expires_at` passes and the sweep (≤ 30 s) has run, the
+   workload is gone from the host and status reports
+   `{ "ended": "expiry" }` with no access; the next Liveness has the
+   capacity back.
+6. **The money**, per leg, to the unit: the payer's channel book grew by
+   exactly spawn + extend at the route price — plus, through the hub, the
+   hub's fee on **every** packet, the free ones included, because the hub
+   charges its fee to forward and `100 − 100 = 0` is what arrives — the
+   provider connector's book by exactly spawn + extend at the listing
+   price, and the free routes added nothing at the provider.
+
+All of it runs **twice**, with the same tenant ceremony:
+
+- **via the hub** — the tenant's channel is against the sandbox hub
+  (`:3200`), packets are sealed to the provider connector and forwarded over
+  the `relay-provider` peering; the hub's client book and the provider
+  connector's peer-book watermark on the committed peering channel are
+  asserted;
+- **direct** — the tenant opens a channel against the provider connector's
+  own client edge (`:3240`) and pays the listing price with no hub and no
+  fee; the provider connector's client book is asserted.
+
+The two runs' answers (`availability`, `spawn`, `extend`, `status` running
+and ended — the same fields, the same role, state and `would_run`, with only
+the per-run workload id, expiry and port blanked) and lease lifecycles are
+then compared: the provider cannot tell how it was paid, which is the point
+of ADR 0005.
+
+It buys the sandbox-only `smoke` listing (`infra/sandbox/conf/provider.toml`:
+`basic`'s price and resources with a **30 s** Lease Interval, capacity 2),
+so spawn + one extension + the sweep is about 90 s per run and the whole
+test takes **three to four minutes**. `TOON_M1_LISTING=basic` runs the same
+test on the three-minute tier (budget about fifteen minutes). The
+ticket-level smokes — `make smoke-provider`, `make smoke-directory`,
+`make smoke-eviction` — still run on `basic`, end their leases through the
+provider (terminate, eviction), and can be run back to back with
+`make smoke-m1` in any order.
 
 ## Build, test and run
 
