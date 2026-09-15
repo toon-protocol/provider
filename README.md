@@ -20,7 +20,9 @@ access details out), a paid **extension**, and the free **status**,
 **termination** and **availability** routes — applies its **image policy** to
 every spawn and every availability answer, sweeps expired leases, publishes
 its Provider Profile, Listings and Liveness to its Relay Set, and prints the
-connector route table it expects. Eviction and listing versioning are being
+connector route table it expects. A listing's price or resources can be
+changed without repricing the leases already running (see
+[Changing a listing's price](#changing-a-listings-price)). Eviction is being
 added ticket by ticket.
 
 ## Spec, decisions and vocabulary
@@ -100,9 +102,82 @@ one HTTP path here:
 | `<addr>.terminate` | `POST /terminate` | 0 |
 
 `toon-provider routes --config provider.toml` prints these as connector
-`[[routes]]` rows, ready to paste into the connector's config. Every answer
+`[[routes]]` rows, ready to paste into the connector's config. It prints two
+rows per **live** listing version — the version on sale, plus every retired
+version that still has a running lease — so it reads the lease table at
+`lease_state_path` (read-only) to find out which those are. Every answer
 is JSON; a refusal is `{ "error": "<code>", "message": "…" }` with a 4xx
 status and the spec's code, and on a paid route it is still billed.
+
+## Changing a listing's price
+
+A connector route has one fixed price, so repricing a route would reprice
+every lease already running on it at its next Extension. A provider must not
+be able to do that to a tenant locked in by running state, so a price or
+resource change is a **new listing version** instead (ADR 0009, spec §4.2):
+new routes at the new price, and the old routes left in place until the
+leases on them end.
+
+Nothing about this is live. The connector has no runtime write for a route
+(spec §11 item 5), so every step below is a config edit followed by a
+restart.
+
+1. **Add a version.** In `provider.toml`, add a second `[[listings]]` entry
+   with the same `name`, a higher `version`, and the new `price`,
+   `lease_interval_s` or `resources`. **Keep the old entry.** Every version
+   of a name must declare the same `capacity`: it is one slice of hardware,
+   sold under two prices.
+
+   ```toml
+   [[listings]]           # the retired version — keep it while it has leases
+   name = "basic"
+   version = 1
+   price = 1000
+   # …
+
+   [[listings]]           # the version on sale from now on
+   name = "basic"
+   version = 2
+   price = 1500
+   # …
+   ```
+
+2. **Regenerate the route rows.** `toon-provider routes --config
+   provider.toml` now prints `…basic.v1.spawn`/`.extend` *and*
+   `…basic.v2.spawn`/`.extend`. Replace the provider's `[[routes]]` block in
+   the connector's config with the new output.
+
+3. **Restart the connector, then the provider.** The connector so the v2
+   routes exist to be paid; the provider so it serves them and republishes
+   the Listing.
+
+From that moment:
+
+- **v2 is the Listing.** The Listing event is addressable on `d = basic`, so
+  the republished event *replaces* the old one — same `d`, `version: 2`, new
+  price. There is never more than one Listing per name in the directory.
+- **v1 sells nothing.** A spawn (or an `availability` question) on
+  `…basic.v1.spawn` is refused `wrong_listing_version`, whether or not any
+  lease is still running on it. A paid refusal is still billed, which is why
+  the row stays: the connector needs a route for every prefix that can be
+  paid.
+- **v1 still extends.** A lease spawned on v1 extends on `…basic.v1.extend`,
+  for v1's `lease_interval_s` at v1's price — the deal it was sold under.
+  Extending it on `…basic.v2.extend` is refused `wrong_listing_version`, and
+  so is extending a v2 lease on v1's route.
+- **Capacity is shared.** `capacity` is per listing *name*, across versions,
+  and Liveness publishes one `available` figure per name.
+
+4. **Retire v1.** Keep running `toon-provider routes`. Once v1's last lease
+   has ended, the command stops printing its two rows. Delete the v1
+   `[[listings]]` entry, update the connector's `[[routes]]` block from the
+   new output, and restart both again.
+
+In the sandbox this is the same edit in `infra/sandbox/conf/provider.toml`
+plus the regenerated rows in `conf/connector-provider.toml` (and
+`conf/connector-relay.toml` if the relay leg changed), followed by `docker
+compose restart provider-connector relay-connector` and a rebuild of the
+`provider` service.
 
 ## Spawning
 
@@ -250,6 +325,11 @@ content, because NIP-01 filters never match inside content (ADR 0002).
 
 The Profile and the Listings go out at startup and change only when the config
 does — which is a restart. Liveness goes out every `liveness_cadence_s`.
+
+Exactly one Listing is published per listing *name*: the newest `version` in
+the config. A retired version is served but never advertised — two events
+under one `d` would not be two Listings on a relay, only a race to be the one
+that survives (see [Changing a listing's price](#changing-a-listings-price)).
 
 **Publishing costs money.** A relay write on the TOON Network is a paid packet
 on the paid relay route, never the free ephemeral lane (ADR 0007). The

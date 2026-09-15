@@ -99,6 +99,14 @@ decimals = 6
 # What this provider sells: one [[listings]] per tier and version. A price or
 # resource change is a NEW VERSION (bump `version`, keep the old entry until
 # its last lease ends) so running leases keep the price they started at.
+#
+# The NEWEST version of a name is the one on sale: it is the Listing this
+# provider publishes, and the only one a spawn is accepted on (any older
+# version answers `wrong_listing_version`). An older entry is RETIRED and is
+# kept only so the leases already on it can be extended at the price they
+# were sold under; `toon-provider routes` stops printing its rows once its
+# last lease has ended, and that is the signal to delete the entry. See
+# README, "Changing a listing's price".
 [[listings]]
 name = "basic"            # stable across versions; an ILP address segment
 version = 1
