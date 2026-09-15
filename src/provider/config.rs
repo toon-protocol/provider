@@ -4,9 +4,12 @@
 // nginx module and CLI flags. A provider joining the TOON marketplace needs
 // nobody's approval and should need one file, so this is the only source.
 
+use std::collections::BTreeMap;
+
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::persistence::LeaseRecord;
 use crate::nostr::directory_events::Settlement;
 use crate::nostr::wire::Resources;
 
@@ -258,6 +261,75 @@ impl ProviderConfig {
             .find(|l| l.name == name && l.version == version)
     }
 
+    /// Every version of `name` this config declares, oldest first. Empty
+    /// when this provider sells no such listing.
+    pub fn versions_of(&self, name: &str) -> Vec<u32> {
+        let mut versions: Vec<u32> = self
+            .listings
+            .iter()
+            .filter(|l| l.name == name)
+            .map(|l| l.version)
+            .collect();
+        versions.sort_unstable();
+        versions
+    }
+
+    /// The version of `name` that is ON SALE: the newest one configured.
+    ///
+    /// Every older version is RETIRED. A price or resource change is a new
+    /// version (ADR 0009) and spec §4.2 says the new Listing REPLACES the
+    /// previous one, so only the newest is purchasable. A retired version
+    /// keeps its routes only so the leases already on it can be extended at
+    /// the price they were sold at.
+    pub fn latest_version(&self, name: &str) -> Option<u32> {
+        self.listings
+            .iter()
+            .filter(|l| l.name == name)
+            .map(|l| l.version)
+            .max()
+    }
+
+    /// The versions of `name` whose routes the connector must still carry,
+    /// oldest first: the version on sale, plus every retired version that
+    /// still has a live lease on it.
+    ///
+    /// Liveness of the LEASE, not its expiry instant, is what counts: the
+    /// sweep is what turns an expired lease into an ended one (≤30 s,
+    /// `cleanup`), and dropping a route the moment a clock passed an expiry
+    /// would retire it ahead of the sweep that ends it.
+    pub fn live_versions(&self, name: &str, leases: &[LeaseRecord]) -> Vec<u32> {
+        let latest = self.latest_version(name);
+        self.versions_of(name)
+            .into_iter()
+            .filter(|version| {
+                Some(*version) == latest
+                    || leases.iter().any(|lease| {
+                        lease.state.is_live()
+                            && lease.listing == name
+                            && lease.listing_version == *version
+                    })
+            })
+            .collect()
+    }
+
+    /// The Listings this provider publishes: exactly one per listing NAME,
+    /// the version on sale, in name order.
+    ///
+    /// One per name because the Listing event is addressable on `d = <name>`
+    /// (spec §4.2): two versions published under one `d` would not be two
+    /// Listings on the relay, they would be a race to be the one that
+    /// survives. The newest wins that race on purpose.
+    pub fn listings_on_sale(&self) -> Vec<&Listing> {
+        let mut newest: BTreeMap<&str, &Listing> = BTreeMap::new();
+        for listing in &self.listings {
+            let entry = newest.entry(listing.name.as_str()).or_insert(listing);
+            if listing.version > entry.version {
+                *entry = listing;
+            }
+        }
+        newest.into_values().collect()
+    }
+
     /// How many leases of the named tier may run at once, across versions.
     /// Every version of a listing declares the same capacity; the first one
     /// found is authoritative and `validate` enforces the agreement.
@@ -492,6 +564,26 @@ pub fn load_config(path: &str) -> Result<ProviderConfig> {
 mod tests {
     use super::*;
 
+    use crate::nostr::wire::{LeaseEnd, LeaseState, Role};
+
+    fn lease_on(name: &str, version: u32, state: LeaseState) -> LeaseRecord {
+        LeaseRecord {
+            id: 1000,
+            workload_id: "aa".repeat(32),
+            tenant: "bb".repeat(32),
+            listing: name.to_string(),
+            listing_version: version,
+            role: Role::Standalone,
+            state,
+            created_at: 0,
+            expires_at: 3600,
+            ended_at: None,
+            destroyed: false,
+            ssh_port: 40000,
+            ports: vec![],
+        }
+    }
+
     fn listing(name: &str, version: u32) -> Listing {
         Listing {
             name: name.to_string(),
@@ -600,6 +692,56 @@ storage_gb = 1
             ..ProviderConfig::default()
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn several_versions_of_one_listing_are_legal_and_the_newest_is_on_sale() {
+        // A price change keeps the old entry and adds a new one (ADR 0009).
+        let cfg = ProviderConfig {
+            listings: vec![listing("basic", 2), listing("basic", 1), listing("gpu", 1)],
+            ..ProviderConfig::default()
+        };
+        assert!(cfg.validate().is_ok());
+        assert_eq!(cfg.versions_of("basic"), vec![1, 2]);
+        assert_eq!(cfg.latest_version("basic"), Some(2));
+        assert_eq!(cfg.latest_version("gpu"), Some(1));
+        assert_eq!(cfg.latest_version("nope"), None);
+        assert!(cfg.versions_of("nope").is_empty());
+
+        // One Listing event per name, the newest version, in name order —
+        // whatever order the entries were written in.
+        let on_sale: Vec<(&str, u32)> = cfg
+            .listings_on_sale()
+            .iter()
+            .map(|l| (l.name.as_str(), l.version))
+            .collect();
+        assert_eq!(on_sale, vec![("basic", 2), ("gpu", 1)]);
+    }
+
+    #[test]
+    fn a_retired_version_keeps_its_routes_only_while_a_lease_is_live_on_it() {
+        let cfg = ProviderConfig {
+            listings: vec![listing("basic", 1), listing("basic", 2)],
+            ..ProviderConfig::default()
+        };
+        assert_eq!(
+            cfg.live_versions("basic", &[]),
+            vec![2],
+            "with nothing running, only the version on sale"
+        );
+        assert_eq!(
+            cfg.live_versions("basic", &[lease_on("basic", 1, LeaseState::Running)]),
+            vec![1, 2],
+            "v1 still has a lease to extend"
+        );
+        assert_eq!(
+            cfg.live_versions(
+                "basic",
+                &[lease_on("basic", 1, LeaseState::Ended(LeaseEnd::Expiry))]
+            ),
+            vec![2],
+            "an ended lease holds no route open"
+        );
     }
 
     #[test]

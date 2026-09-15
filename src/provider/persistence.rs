@@ -116,6 +116,18 @@ pub(crate) fn persist_leases(leases: &HashMap<u32, LeaseRecord>, path: &str) {
     }
 }
 
+/// The persisted lease table, read from outside a running provider.
+///
+/// `toon-provider routes` needs it: which listing versions still have a live
+/// lease is what decides which retired versions keep their connector routes
+/// (ADR 0009), and the operator runs that command against a provider it is
+/// about to restart, not through it. Strictly read-only, and an absent or
+/// unreadable file is an empty table — the same degradation the provider's
+/// own loader makes.
+pub fn persisted_leases(path: &str) -> Vec<LeaseRecord> {
+    load_leases(path).into_values().collect()
+}
+
 /// A missing file is the normal first-run case; a corrupt one degrades to
 /// empty, because a provider that refuses to boot over unreadable bookkeeping
 /// is worse than one that boots having forgotten some leases.
