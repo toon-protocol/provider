@@ -162,6 +162,52 @@ pub struct SpawnResponse {
     pub access: Option<Access>,
 }
 
+/// Body of the free `<addr>.availability` route (spec §6.4; ticket M1-5 uses
+/// this shape rather than the spec draft's `image_digest`, so a mis-shaped
+/// spec-style body is refused as `invalid_request` like any other unknown
+/// field).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AvailabilityRequest {
+    pub listing: String,
+    pub version: u32,
+    pub image: ImageRef,
+}
+
+/// The answer to `availability`. Always HTTP 200: the answer IS the payload,
+/// including a refusal (`provider_http::availability_route` never maps this
+/// to a 4xx the way `refuse` does for paid/signed routes).
+///
+/// `Refused` is listed first: an untagged enum tries variants in order, and
+/// `Refused` requires fields `Runnable` lacks, so a runnable answer only
+/// ever matches `Runnable` while a refusal is never mistaken for one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AvailabilityResponse {
+    Refused {
+        would_run: bool,
+        error: ErrorCode,
+        message: String,
+    },
+    Runnable {
+        would_run: bool,
+    },
+}
+
+impl AvailabilityResponse {
+    pub fn would_run() -> Self {
+        Self::Runnable { would_run: true }
+    }
+
+    pub fn refused(error: ErrorCode, message: impl Into<String>) -> Self {
+        Self::Refused {
+            would_run: false,
+            error,
+            message: message.into(),
+        }
+    }
+}
+
 /// The answer to a successful extension.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
