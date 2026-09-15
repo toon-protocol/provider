@@ -234,15 +234,30 @@ impl ProviderConfig {
         if self.workload_id_range_end < self.workload_id_range_start {
             bail!("workload_id_range_end is below workload_id_range_start");
         }
-        if self
-            .workload_host_port(self.workload_id_range_end, MAX_PORTS_PER_WORKLOAD - 1)
-            .is_none()
-        {
+        let Some(last_port) =
+            self.workload_host_port(self.workload_id_range_end, MAX_PORTS_PER_WORKLOAD - 1)
+        else {
             bail!(
                 "workload_port_start {} leaves no room for {} ports per workload id up to {}",
                 self.workload_port_start,
                 MAX_PORTS_PER_WORKLOAD,
                 self.workload_id_range_end
+            );
+        };
+        // The SSH forwards and the port blocks are two ranges on one host;
+        // a forward inside a block would hand two workloads the same port.
+        let ssh = (
+            self.ssh_host_port(self.workload_id_range_start),
+            self.ssh_host_port(self.workload_id_range_end),
+        );
+        let blocks = (self.workload_port_start, last_port);
+        if ssh.0 <= blocks.1 && blocks.0 <= ssh.1 {
+            bail!(
+                "SSH forwards {}..={} overlap the workload port blocks {}..={}",
+                ssh.0,
+                ssh.1,
+                blocks.0,
+                blocks.1
             );
         }
         Ok(())
@@ -492,6 +507,35 @@ storage_gb = 1
         assert_eq!(cfg.workload_host_port(1001, 0), Some(41016));
         assert_eq!(cfg.workload_host_port(1000, 16), None, "past the block");
         assert_eq!(cfg.workload_host_port(999, 0), None, "below the range");
+    }
+
+    #[test]
+    fn the_shipped_example_config_loads() {
+        // README says "copy provider.example.toml and edit it", so the copy
+        // must at least pass validation before any editing.
+        let cfg = load_config(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/provider.example.toml"
+        ))
+        .expect("provider.example.toml loads");
+        assert_eq!(cfg.listings.len(), 1);
+    }
+
+    #[test]
+    fn ssh_forwards_may_not_overlap_the_port_blocks() {
+        let cfg = ProviderConfig {
+            workload_id_range_start: 1000,
+            workload_id_range_end: 1099,
+            ssh_port_start: Some(41000), // inside the blocks 41000..=42599
+            workload_port_start: 41000,
+            ..ProviderConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+        let apart = ProviderConfig {
+            ssh_port_start: Some(40000),
+            ..cfg
+        };
+        assert!(apart.validate().is_ok());
     }
 
     #[test]

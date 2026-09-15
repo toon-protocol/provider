@@ -18,8 +18,8 @@ use super::persistence::{persist_leases, LeaseRecord, LeaseState};
 use crate::compute::{container_name, ContainerConfig, PortMapping};
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
-    Access, ErrorCode, ErrorResponse, LeaseRequestEnvelope, PortAccess, Role, SpawnContent,
-    SpawnResponse,
+    Access, ErrorCode, ErrorResponse, LeaseRequestEnvelope, PortAccess, PortRequest, Role,
+    SpawnContent, SpawnResponse,
 };
 use crate::provider_http::AppState;
 
@@ -78,6 +78,7 @@ pub async fn spawn(
             )));
         }
     }
+    check_ports(&content.ports)?;
 
     // ── 3. the role ─────────────────────────────────────────────────────
     if content.standby_set.is_some() {
@@ -238,15 +239,10 @@ fn mark_running(leases: &mut HashMap<u32, LeaseRecord>, id: u32, expires_at: u64
     }
 }
 
-/// The shape checks that need no listing: the workload id, the SSH key, the
-/// ports and the entrypoint are well-formed or the request is invalid.
+/// The shape checks that need no listing: the workload id, the SSH key and
+/// the entrypoint are well-formed or the request is invalid.
 fn check_shape(content: &SpawnContent) -> Result<(), ErrorResponse> {
-    let wid = &content.workload_id;
-    if wid.len() != 64
-        || !wid
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-    {
+    if !is_lower_hex(&content.workload_id, 64) {
         return Err(invalid(
             "workload_id must be 32 random bytes as 64 lowercase hex characters",
         ));
@@ -256,17 +252,26 @@ fn check_shape(content: &SpawnContent) -> Result<(), ErrorResponse> {
             "ssh_public_key must be one OpenSSH public key line (`ssh-ed25519 AAAA… comment`)",
         ));
     }
-    if content.ports.len() > usize::from(MAX_PORTS_PER_WORKLOAD) {
+    if matches!(&content.entrypoint, Some(e) if e.is_empty()) {
+        return Err(invalid("entrypoint: an empty list names no executable"));
+    }
+    Ok(())
+}
+
+/// The ports fit what a lease may publish: at most a workload's block, no
+/// port 0, no `port/protocol` twice.
+fn check_ports(ports: &[PortRequest]) -> Result<(), ErrorResponse> {
+    if ports.len() > usize::from(MAX_PORTS_PER_WORKLOAD) {
         return Err(invalid(format!(
             "at most {} ports may be published per workload",
             MAX_PORTS_PER_WORKLOAD
         )));
     }
-    for (i, port) in content.ports.iter().enumerate() {
+    for (i, port) in ports.iter().enumerate() {
         if port.container_port == 0 {
             return Err(invalid("ports: container_port 0 is not a port"));
         }
-        if content.ports[..i]
+        if ports[..i]
             .iter()
             .any(|p| p.container_port == port.container_port && p.protocol == port.protocol)
         {
@@ -277,10 +282,15 @@ fn check_shape(content: &SpawnContent) -> Result<(), ErrorResponse> {
             )));
         }
     }
-    if matches!(&content.entrypoint, Some(e) if e.is_empty()) {
-        return Err(invalid("entrypoint: an empty list names no executable"));
-    }
     Ok(())
+}
+
+/// Exactly `len` lowercase hex characters: the shape of a workload id and
+/// of a digest's hex.
+fn is_lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len
+        && s.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
 }
 
 fn looks_like_ssh_public_key(key: &str) -> bool {
@@ -309,12 +319,7 @@ fn check_image(content: &SpawnContent) -> Result<(), ErrorResponse> {
             "image.registry_entry: Image Registry entries are not read in this milestone",
         ));
     }
-    let hex = image.digest.strip_prefix("sha256:").unwrap_or("");
-    if hex.len() != 64
-        || !hex
-            .chars()
-            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-    {
+    if !is_lower_hex(image.digest.strip_prefix("sha256:").unwrap_or(""), 64) {
         return Err(invalid("image.digest must be `sha256:<64 lowercase hex>`"));
     }
     if !looks_like_repository(&image.reference) {

@@ -19,6 +19,11 @@ use super::wire::{ErrorCode, ErrorResponse};
 /// longer, and a captured request should not stay replayable for long.
 pub const MAX_REQUEST_WINDOW_SECS: u64 = 300;
 
+/// How far into the future a `created_at` may sit before the request is
+/// refused: a request "created" later than now would stretch the window
+/// above past the 300 s it is meant to bound. Generous to clock drift.
+pub const MAX_CLOCK_SKEW_SECS: u64 = 60;
+
 /// The `op` tag: what the signed request asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
@@ -73,20 +78,20 @@ pub fn validate(
             ),
         ));
     }
-    match event.tags.public_keys().next() {
-        None => {
-            return Err(ErrorResponse::new(
-                ErrorCode::InvalidRequest,
-                "the Lease Request names no provider (`p` tag)",
-            ))
-        }
-        Some(p) if p != provider => {
-            return Err(ErrorResponse::new(
-                ErrorCode::InvalidRequest,
-                "the Lease Request is addressed to another provider",
-            ))
-        }
-        Some(_) => {}
+    // Every `p` tag, not the first: a request naming two providers is
+    // addressed to someone else as much as to us.
+    let mut addressees = event.tags.public_keys().peekable();
+    if addressees.peek().is_none() {
+        return Err(ErrorResponse::new(
+            ErrorCode::InvalidRequest,
+            "the Lease Request names no provider (`p` tag)",
+        ));
+    }
+    if addressees.any(|p| p != provider) {
+        return Err(ErrorResponse::new(
+            ErrorCode::InvalidRequest,
+            "the Lease Request is addressed to another provider",
+        ));
     }
     let found_op = event
         .tags
@@ -117,7 +122,17 @@ pub fn validate(
             format!("the Lease Request expired at {} (now {})", expiration, now),
         ));
     }
-    match expiration.checked_sub(event.created_at.as_u64()) {
+    let created_at = event.created_at.as_u64();
+    if created_at > now + MAX_CLOCK_SKEW_SECS {
+        return Err(ErrorResponse::new(
+            ErrorCode::StaleRequest,
+            format!(
+                "the Lease Request's created_at {} is in the future (now {})",
+                created_at, now
+            ),
+        ));
+    }
+    match expiration.checked_sub(created_at) {
         Some(window) if window <= MAX_REQUEST_WINDOW_SECS => {}
         _ => {
             return Err(ErrorResponse::new(

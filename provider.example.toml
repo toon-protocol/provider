@@ -36,14 +36,15 @@ handler_base_url = "http://127.0.0.1:8080"
 workload_id_range_start = 1000
 workload_id_range_end = 1999
 
-# First host port handed out for a workload's SSH forward (to container port
-# 22). Omit to derive one from the workload id.
+# First host port handed out for a workload's SSH forward (to the workload's
+# port 22). Omit to derive one from the workload id.
 ssh_port_start = 40000
 
 # First host port of the published-port blocks: workload id i (from
 # workload_id_range_start) owns 16 ports from workload_port_start + 16 * i.
-# Must not overlap the SSH forwards.
-workload_port_start = 60000
+# The blocks must fit below 65536 and must not overlap the SSH forwards;
+# both are checked at load.
+workload_port_start = 42000
 
 # Where the lease table is mirrored. It is the only record that a lease
 # exists, so a restart without it strands every paid workload.

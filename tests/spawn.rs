@@ -791,3 +791,67 @@ async fn a_workload_that_vanished_keeps_its_id_until_its_lease_ends() {
     assert_eq!(body["access"]["ssh_port"], 40001, "the second id, 1001");
     assert_eq!(h.backend.calls()[2], BackendCall::Create(1001));
 }
+
+#[tokio::test]
+async fn a_request_created_in_the_future_is_stale() {
+    // Otherwise a created_at far ahead of the clock would stretch the 300 s
+    // window past what it is meant to bound.
+    let h = harness();
+    let spec = RequestSpec {
+        created_at: NOW + 1000,
+        expiration: Some(NOW + 1300),
+        ..RequestSpec::spawn(&h, &spawn_content(1))
+    };
+    let (_, body) = spawn(&h, spec.sign()).await;
+    assert_eq!(error_of(&body), "stale_request");
+}
+
+#[tokio::test]
+async fn a_request_naming_a_second_provider_is_refused() {
+    let h = harness();
+    let mut event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
+    // Re-sign with an extra `p` for someone else.
+    let tenant = Keys::generate();
+    let content = event["content"].as_str().unwrap().to_string();
+    event = serde_json::to_value(
+        EventBuilder::new(Kind::Custom(K_LEASE_REQUEST), content)
+            .tags([
+                Tag::public_key(h.provider),
+                Tag::public_key(Keys::generate().public_key()),
+                Tag::custom(TagKind::custom("op"), ["spawn"]),
+                Tag::expiration(Timestamp::from(NOW + 60)),
+            ])
+            .custom_created_at(Timestamp::from(NOW))
+            .sign_with_keys(&tenant)
+            .unwrap(),
+    )
+    .unwrap();
+    let (_, body) = spawn(&h, event).await;
+    assert_eq!(error_of(&body), "invalid_request");
+    assert!(h.backend.calls().is_empty());
+}
+
+#[tokio::test]
+async fn ports_are_checked_against_the_listing_not_before_it() {
+    // §6.2 step 2: the listing version first, then whether the ports fit.
+    let h = harness();
+    let content = SpawnContent {
+        ports: (1..=17)
+            .map(|p| PortRequest {
+                container_port: p,
+                protocol: Protocol::Tcp,
+            })
+            .collect(),
+        ..spawn_content(1)
+    };
+    let event = RequestSpec::spawn(&h, &content).sign();
+    let (_, body) = post(
+        &h.app,
+        "/listings/basic/v9/spawn",
+        json!({ "request": event }),
+    )
+    .await;
+    assert_eq!(error_of(&body), "wrong_listing_version");
+    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+    assert_eq!(error_of(&body), "invalid_request");
+}

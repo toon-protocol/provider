@@ -9,14 +9,25 @@ use std::fmt::Write;
 
 use super::config::ProviderConfig;
 
+/// The axum route pattern every per-listing path is an instance of: the
+/// router registers these, and `spawn_path` / `extend_path` fill them in.
+pub const SPAWN_PATTERN: &str = "/listings/:listing/:version/spawn";
+pub const EXTEND_PATTERN: &str = "/listings/:listing/:version/extend";
+
+fn fill(pattern: &str, listing: &str, version: u32) -> String {
+    pattern
+        .replace(":listing", listing)
+        .replace(":version", &format!("v{}", version))
+}
+
 /// HTTP path the connector forwards `<addr>.<listing>.v<n>.spawn` to.
 pub fn spawn_path(listing: &str, version: u32) -> String {
-    format!("/listings/{}/v{}/spawn", listing, version)
+    fill(SPAWN_PATTERN, listing, version)
 }
 
 /// HTTP path the connector forwards `<addr>.<listing>.v<n>.extend` to.
 pub fn extend_path(listing: &str, version: u32) -> String {
-    format!("/listings/{}/v{}/extend", listing, version)
+    fill(EXTEND_PATTERN, listing, version)
 }
 
 pub const AVAILABILITY_PATH: &str = "/availability";
@@ -83,4 +94,15 @@ pub fn render_routes(config: &ProviderConfig) -> String {
         );
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rendered_paths_are_instances_of_the_router_patterns() {
+        assert_eq!(spawn_path("basic", 3), "/listings/basic/v3/spawn");
+        assert_eq!(extend_path("gpu", 1), "/listings/gpu/v1/extend");
+    }
 }

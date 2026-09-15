@@ -30,7 +30,9 @@ use crate::clock::Clock;
 use crate::compute::ComputeBackend;
 use crate::nostr::lease_request::AcceptedRequests;
 use crate::nostr::wire::{ErrorCode, ErrorResponse};
-use crate::provider::routes::{AVAILABILITY_PATH, STATUS_PATH, TERMINATE_PATH};
+use crate::provider::routes::{
+    AVAILABILITY_PATH, EXTEND_PATTERN, SPAWN_PATTERN, STATUS_PATH, TERMINATE_PATH,
+};
 use crate::provider::{spawn, LeaseRecord, ProviderConfig};
 
 /// Everything a handler may touch. Arc-cloned from `ProviderService`, so the
@@ -74,8 +76,8 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/listings/:listing/:version/spawn", post(spawn_route))
-        .route("/listings/:listing/:version/extend", post(not_implemented))
+        .route(SPAWN_PATTERN, post(spawn_route))
+        .route(EXTEND_PATTERN, post(not_implemented))
         .route(AVAILABILITY_PATH, post(not_implemented))
         .route(STATUS_PATH, post(not_implemented))
         .route(TERMINATE_PATH, post(not_implemented))
