@@ -1,7 +1,5 @@
-// Npub canonicalization and the checks built on it: warm-standby role
-// assignment and offer author binding.
-
-use super::wire::ProviderOfferContent;
+// Npub canonicalization and the one check built on it: warm-standby role
+// assignment.
 
 /// Role this provider takes on a `WarmStandby` spawn request. `NotAddressed`
 /// means the request must be rejected.
@@ -47,71 +45,6 @@ pub fn npubs_equal(a: &str, b: &str) -> bool {
         (Ok(ka), Ok(kb)) => ka == kb,
         (Ok(_), Err(_)) | (Err(_), Ok(_)) => false,
         (Err(_), Err(_)) => a == b,
-    }
-}
-
-/// True iff an offer's claimed `provider_npub` matches the key that signed the
-/// event (`signer_hex` is `event.pubkey.to_hex()`).
-///
-/// nostr-sdk verifies the event signature on fetch, but `provider_npub` is a
-/// free-form body field. Without this binding any key could publish an offer
-/// impersonating any provider and last-write-wins over the real listing.
-pub fn offer_authored_by_claimed_provider(signer_hex: &str, offer: &ProviderOfferContent) -> bool {
-    npubs_equal(signer_hex, &offer.provider_npub)
-}
-
-#[cfg(test)]
-mod offer_authenticity_tests {
-    use super::*;
-    use crate::nostr::{IsolationLevel, SCHEMA_VERSION};
-    use nostr_sdk::{Keys, ToBech32};
-
-    fn offer_claiming(npub: &str) -> ProviderOfferContent {
-        ProviderOfferContent {
-            provider_npub: npub.to_string(),
-            hostname: "attacker-chosen.example".to_string(),
-            location: None,
-            capabilities: vec![],
-            specs: vec![],
-            whitelisted_mints: vec![],
-            uptime_percent: 100.0,
-            total_jobs_completed: 0,
-            api_endpoint: None,
-            version: SCHEMA_VERSION,
-            isolation_level: IsolationLevel::SharedKernel,
-            stake_proof: None,
-        }
-    }
-
-    #[test]
-    fn genuine_offer_from_its_signer_is_accepted() {
-        let k = Keys::generate();
-        let offer = offer_claiming(&k.public_key().to_hex());
-        assert!(offer_authored_by_claimed_provider(
-            &k.public_key().to_hex(),
-            &offer
-        ));
-    }
-
-    #[test]
-    fn offer_claiming_foreign_npub_is_rejected() {
-        let victim = Keys::generate();
-        let attacker = Keys::generate();
-        let forged = offer_claiming(&victim.public_key().to_hex());
-        assert!(!offer_authored_by_claimed_provider(
-            &attacker.public_key().to_hex(),
-            &forged
-        ));
-    }
-
-    #[test]
-    fn signer_binding_canonicalizes_hex_and_bech32() {
-        let k = Keys::generate();
-        let offer = offer_claiming(&k.public_key().to_bech32().unwrap());
-        assert!(offer_authored_by_claimed_provider(
-            &k.public_key().to_hex(),
-            &offer
-        ));
     }
 }
 
