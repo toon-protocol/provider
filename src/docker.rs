@@ -110,9 +110,15 @@ impl ComputeBackend for DockerBackend {
             args.push(format!("{}-data:{}", container_name(config.id), path));
         }
 
-        // Image must be last: docker treats anything after it as the
-        // container's CMD.
+        if let Some(entrypoint) = &config.entrypoint {
+            args.push("--entrypoint".into());
+            args.push(entrypoint.clone());
+        }
+
+        // The image separates the flags from the command: docker treats
+        // everything after it as the container's argv.
         args.push(config.image.clone());
+        args.extend(config.args.iter().cloned());
 
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output = self.docker(&arg_refs).await?;
@@ -225,6 +231,8 @@ mod tests {
                 m.insert("FOO".to_string(), "bar".to_string());
                 m
             },
+            entrypoint: None,
+            args: vec!["sleep".to_string(), "300".to_string()],
             data_path: Some("/var/data".to_string()),
         };
 
@@ -252,10 +260,13 @@ mod tests {
             args.push(format!("{}={}", k, v));
         }
         args.push(cfg.image.clone());
+        args.extend(cfg.args.iter().cloned());
 
         assert!(args.contains(&"toon-42".to_string()));
         assert!(args.contains(&"17777:7777/tcp".to_string()));
         assert!(args.contains(&"FOO=bar".to_string()));
-        assert_eq!(args.last().map(|s| s.as_str()), Some("alpine:latest"));
+        // The image separates flags from the container's argv.
+        let image_at = args.iter().position(|a| a == "alpine:latest").unwrap();
+        assert_eq!(&args[image_at + 1..], &["sleep".to_string(), "300".to_string()]);
     }
 }

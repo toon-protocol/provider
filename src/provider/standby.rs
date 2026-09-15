@@ -124,6 +124,8 @@ mod tests {
                 host_port: None,
                 ports: vec![],
                 env: HashMap::new(),
+                entrypoint: None,
+                args: vec![],
                 data_path: None,
             },
             listing: "basic.v1".to_string(),

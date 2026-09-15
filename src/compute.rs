@@ -61,6 +61,10 @@ pub struct ContainerConfig {
     pub host_port: Option<u16>,
     pub ports: Vec<PortMapping>,
     pub env: HashMap<String, String>,
+    /// Overrides the image's entrypoint. `None` = whatever the image declares.
+    pub entrypoint: Option<String>,
+    /// Arguments passed to the entrypoint.
+    pub args: Vec<String>,
     /// In-container path for persistent state. `None` = stateless.
     pub data_path: Option<String>,
 }
