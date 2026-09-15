@@ -14,13 +14,15 @@
 use std::collections::HashMap;
 
 use nostr_sdk::PublicKey;
+use tracing::error;
 
 use super::cleanup::end_lease;
 use super::persistence::{persist_leases, LeaseEnd, LeaseRecord, LeaseState};
+use crate::nostr::directory_events::eviction_event;
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
-    ErrorCode, ErrorResponse, ExtendRequest, ExtendResponse, StatusResponse, TerminateResponse,
-    WorkloadContent,
+    ErrorCode, ErrorResponse, EvictResponse, EvictionReason, ExtendRequest, ExtendResponse,
+    StatusResponse, TerminateResponse, WorkloadContent,
 };
 use crate::provider_http::AppState;
 
@@ -177,6 +179,78 @@ pub async fn terminate(state: &AppState, body: &[u8]) -> Result<TerminateRespons
     Ok(TerminateResponse {
         workload_id,
         state: LeaseState::Ended(LeaseEnd::Termination),
+    })
+}
+
+/// Evict a lease: an operator decision, not a tenant one, so it carries no
+/// Lease Request and no signature — the caller is `provider_http`'s loopback
+/// operator endpoint, reached only by whoever already controls this host.
+///
+/// The workload is stopped and deleted NOW, exactly like a termination
+/// (`end_lease` marks it `Ended(Eviction)` regardless of whether the delete
+/// succeeds; a failed delete is retried by the next sweep, same as any other
+/// ending). Only once the lease is over is the Eviction Notice built and
+/// published: a notice for a lease that turned out to be unknown or already
+/// ended would be a public record of nothing.
+///
+/// Publishing is log-don't-raise, the same discipline `directory_loop` uses
+/// for the Profile, Listings and Liveness: a relay that refuses the notice —
+/// or a directory that cannot be reached at all — does not undo the
+/// eviction, which already happened. `notice_published` in the response says
+/// whether the notice reached every relay of the Relay Set; the per-relay
+/// detail is in the log, via `publish_one`.
+pub async fn evict(
+    state: &AppState,
+    workload_id: &str,
+    reason: EvictionReason,
+    message: &str,
+) -> Result<EvictResponse, ErrorResponse> {
+    let now = state.clock.now();
+
+    let id = {
+        let leases = state.leases.lock().await;
+        let id = lease_id_for(&leases, workload_id).ok_or_else(unknown_workload)?;
+        let lease = leases.get(&id).ok_or_else(unknown_workload)?;
+        if !lease.state.is_live() {
+            return Err(unknown_workload());
+        }
+        id
+    };
+
+    // Races a sweep the same way `terminate` does: whichever marks the lease
+    // first wins. `false` here means the lease ended in the meantime, by
+    // expiry — reported the same as `terminate` reports that race, `expired`,
+    // since the lease did exist and this call simply lost the race to end it.
+    if !end_lease(state, id, LeaseEnd::Eviction, now).await {
+        return Err(ErrorResponse::new(
+            ErrorCode::Expired,
+            "this lease ended while the eviction was in flight",
+        ));
+    }
+
+    // The lease is ALREADY EVICTED at this point — stopped, deleted, marked
+    // `Ended(Eviction)` and persisted — so nothing below may turn this into a
+    // refusal. `directory_loop` builds an event only from a config the
+    // provider should not have started with, and that is as true here as it
+    // is there: log it and answer `notice_published: false`, the same shape
+    // `publish_one` already reports a relay refusal in, rather than raise an
+    // `ErrorResponse` that would tell the caller the eviction was refused
+    // when it already happened.
+    let notice_published = match eviction_event(workload_id, reason, message, &state.keys, now) {
+        Ok(event) => state.publish_one("Eviction Notice", event).await,
+        Err(e) => {
+            error!(
+                "lease {} was evicted, but its Eviction Notice could not be built: {:#}",
+                id, e
+            );
+            false
+        }
+    };
+
+    Ok(EvictResponse {
+        workload_id: workload_id.to_string(),
+        state: LeaseState::Ended(LeaseEnd::Eviction),
+        notice_published,
     })
 }
 

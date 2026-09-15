@@ -31,7 +31,7 @@ pub use config::{
     load_config, BackendKind, ImagePolicyConfig, Listing, ProviderConfig, MAX_PORTS_PER_WORKLOAD,
 };
 pub use image_policy::{ImagePolicy, OciRegistry};
-pub use lifecycle::{extend, status, terminate};
+pub use lifecycle::{evict, extend, status, terminate};
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
 pub use spawn::{spawn, VOLUME_MOUNT_PATH};
@@ -171,12 +171,22 @@ impl ProviderService {
 
         self.restore_leases().await;
 
-        let state = self.app_state();
         let bind_addr = self.state.config.http_bind_addr.clone();
+        let operator_bind_addr = self.state.config.operator_bind_addr.clone();
 
         tokio::select! {
-            result = crate::provider_http::serve(state, &bind_addr) => {
+            result = crate::provider_http::serve(self.app_state(), &bind_addr) => {
                 tracing::error!("HTTP app exited: {:?}", result);
+                result
+            }
+            // A second, unrelated listener (`provider_http::operator_router`,
+            // never `router`) for the loopback-only operator surface: a
+            // process reachable only from this host, carrying no signature
+            // and no payment, that stops a lease and publishes its Eviction
+            // Notice. `ProviderConfig::validate` refuses `operator_bind_addr`
+            // to be anything but loopback.
+            result = crate::provider_http::serve_operator(self.app_state(), &operator_bind_addr) => {
+                tracing::error!("operator endpoint exited: {:?}", result);
                 result
             }
             result = self.expiry_sweep_loop() => {

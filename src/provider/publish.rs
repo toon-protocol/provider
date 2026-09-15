@@ -34,7 +34,11 @@ impl AppState {
     /// raised: a provider whose Profile did not land is not purchasable — a
     /// Listing without its Profile is refused by tenants (ADR 0002) — but its
     /// running leases still are.
-    async fn publish_one(&self, what: &str, event: nostr_sdk::Event) -> bool {
+    ///
+    /// `pub(crate)` rather than private: `evict` (`lifecycle.rs`) publishes an
+    /// Eviction Notice with the same discipline — log the outcome, never fail
+    /// the caller over a relay that refused.
+    pub(crate) async fn publish_one(&self, what: &str, event: nostr_sdk::Event) -> bool {
         match self.directory.publish(event).await {
             Ok(report) => {
                 info!("{what} published: {}", report.summary());
