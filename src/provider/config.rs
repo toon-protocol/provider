@@ -58,6 +58,37 @@ pub struct Listing {
     pub capacity: u32,
 }
 
+/// `[image_policy]`: what this provider refuses to run, checked identically
+/// by `availability` and by a paid spawn (spec §9: "the provider MAY refuse
+/// any image by its own policy... it SHOULD answer that refusal on
+/// `availability` first").
+///
+/// Both lists are optional and empty/unset is permissive: a provider that
+/// configures nothing runs anything its listing's arch and capacity allow.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImagePolicyConfig {
+    /// Exact `sha256:<hex>` digests this provider never runs — either the
+    /// digest a spawn names directly, or the concrete per-arch manifest an
+    /// index resolves to.
+    #[serde(default)]
+    pub deny_digests: Vec<String>,
+    /// Cheap prefix/glob-style denial on `image.reference` (the repository
+    /// name), checked before any registry fetch. A trailing `*` matches any
+    /// suffix; otherwise the whole reference must match exactly.
+    #[serde(default)]
+    pub deny_references: Vec<String>,
+    /// Total image size (config blob + all layers of the selected manifest)
+    /// above which a spawn is refused. Unset means no cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_image_bytes: Option<u64>,
+    /// Test/ops escape hatch: fetch every manifest from this base URL
+    /// (`scheme://host[:port]`) instead of the registry named in the
+    /// reference. Tests point it at a `wiremock` server; it has no other use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_url_override: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
@@ -165,12 +196,25 @@ pub struct ProviderConfig {
     #[serde(default = "default_workload_port_start")]
     pub workload_port_start: u16,
 
+    /// How long an ended lease is kept after it ends, so `status` can still
+    /// report `Ended(expiry | termination | eviction)` rather than
+    /// `unknown_workload`. The sweep prunes it after that. One day by
+    /// default: long enough for a tenant to come back and ask what happened,
+    /// short enough that the table does not grow without bound.
+    #[serde(default = "default_ended_retention_s")]
+    pub ended_retention_s: u64,
+
     /// Where the lease table is mirrored to disk. It is the only record that a
     /// lease exists — the backend knows a workload is running but not whose it
     /// is or when it expires — so held purely in memory, a restart would strand
     /// every paid workload.
     #[serde(default = "default_lease_state_path")]
     pub lease_state_path: String,
+
+    /// What this provider refuses to run. Applied identically by
+    /// `availability` and by a paid spawn's validation step 5.
+    #[serde(default)]
+    pub image_policy: ImagePolicyConfig,
 }
 
 impl ProviderConfig {
@@ -394,6 +438,10 @@ fn default_workload_port_start() -> u16 {
     41000
 }
 
+fn default_ended_retention_s() -> u64 {
+    86_400
+}
+
 fn default_lease_state_path() -> String {
     "./toon-provider-leases.json".to_string()
 }
@@ -422,7 +470,9 @@ impl Default for ProviderConfig {
             workload_id_range_end: default_id_range_end(),
             ssh_port_start: None,
             workload_port_start: default_workload_port_start(),
+            ended_retention_s: default_ended_retention_s(),
             lease_state_path: default_lease_state_path(),
+            image_policy: ImagePolicyConfig::default(),
         }
     }
 }

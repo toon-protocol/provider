@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use tracing::{error, info, warn};
 
+use super::persistence::count_live;
 use super::ProviderService;
 use crate::nostr::directory_events::{listing_event, liveness_event, profile_event};
 use crate::provider_http::AppState;
@@ -53,15 +54,16 @@ impl AppState {
     /// slice of hardware and every version of a tier sells the same slice —
     /// which is exactly what `ProviderConfig::capacity_of` answers and what
     /// `validate` enforces the agreement of.
+    ///
+    /// It counts with `persistence::count_live`, the same counter `spawn` and
+    /// `availability` refuse on, so what the Liveness announces and what a
+    /// spawn will actually accept cannot drift apart.
     pub async fn available(&self) -> BTreeMap<String, u32> {
         let leases = self.leases.lock().await;
 
         let mut available = BTreeMap::new();
         for listing in &self.config.listings {
-            let live = leases
-                .values()
-                .filter(|l| l.state.is_live() && l.listing == listing.name)
-                .count();
+            let live = count_live(&leases, &listing.name);
             let live = u32::try_from(live).unwrap_or(u32::MAX);
             available.insert(
                 listing.name.clone(),

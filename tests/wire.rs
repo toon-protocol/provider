@@ -221,6 +221,158 @@ fn resources_round_trip_with_an_optional_gpu() {
     assert!(serde_json::to_value(&without).unwrap().get("gpu").is_none());
 }
 
+#[test]
+fn a_lease_state_is_one_word_until_it_ends() {
+    // What `status` answers and what the lease table holds on disk are the
+    // same JSON, so this encoding is the one both a tenant and a restart read.
+    assert_eq!(
+        serde_json::to_value(LeaseState::Provisioning).unwrap(),
+        json!("provisioning")
+    );
+    assert_eq!(
+        serde_json::to_value(LeaseState::Running).unwrap(),
+        json!("running")
+    );
+    for (state, encoded) in [
+        (
+            LeaseState::Ended(LeaseEnd::Expiry),
+            json!({"ended": "expiry"}),
+        ),
+        (
+            LeaseState::Ended(LeaseEnd::Termination),
+            json!({"ended": "termination"}),
+        ),
+        (
+            LeaseState::Ended(LeaseEnd::Eviction),
+            json!({"ended": "eviction"}),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(state).unwrap(), encoded);
+        assert_eq!(
+            serde_json::from_value::<LeaseState>(encoded).unwrap(),
+            state
+        );
+    }
+}
+
+#[test]
+fn an_ended_lease_holds_nothing() {
+    assert!(LeaseState::Provisioning.is_live());
+    assert!(LeaseState::Running.is_live());
+    assert!(!LeaseState::Ended(LeaseEnd::Expiry).is_live());
+}
+
+#[test]
+fn the_status_and_terminate_answers_round_trip() {
+    let running = StatusResponse {
+        workload_id: "ab".repeat(32),
+        role: Role::Standalone,
+        state: LeaseState::Running,
+        expires_at: 1_700_003_600,
+        access: Some(Access {
+            host: "203.0.113.7".to_string(),
+            ssh_port: 40000,
+            ports: vec![PortAccess {
+                container_port: 443,
+                host_port: 41000,
+            }],
+        }),
+    };
+    let value = serde_json::to_value(&running).unwrap();
+    assert_eq!(value["state"], json!("running"));
+    assert_eq!(value["access"]["ssh_port"], 40000);
+    assert_eq!(
+        serde_json::from_value::<StatusResponse>(value).unwrap(),
+        running
+    );
+
+    // An ended lease has no access details at all, rather than empty ones.
+    let ended = StatusResponse {
+        state: LeaseState::Ended(LeaseEnd::Expiry),
+        access: None,
+        ..running
+    };
+    let value = serde_json::to_value(&ended).unwrap();
+    assert!(value.get("access").is_none());
+    assert_eq!(value["state"], json!({ "ended": "expiry" }));
+
+    let terminated = TerminateResponse {
+        workload_id: "ab".repeat(32),
+        state: LeaseState::Ended(LeaseEnd::Termination),
+    };
+    let value = serde_json::to_value(&terminated).unwrap();
+    assert_eq!(value["state"], json!({ "ended": "termination" }));
+    assert_eq!(
+        serde_json::from_value::<TerminateResponse>(value).unwrap(),
+        terminated
+    );
+}
+
+#[test]
+fn availability_request_round_trips_the_tickets_shape() {
+    let request = AvailabilityRequest {
+        listing: "basic".to_string(),
+        version: 1,
+        image: ImageRef {
+            reference: "docker.io/library/alpine".to_string(),
+            digest: format!("sha256:{}", "cd".repeat(32)),
+            registry_entry: None,
+        },
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["listing"], "basic");
+    assert_eq!(value["version"], 1);
+    assert_eq!(
+        value["image"]["digest"],
+        format!("sha256:{}", "cd".repeat(32))
+    );
+    let back: AvailabilityRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(back, request);
+}
+
+#[test]
+fn an_unknown_availability_field_is_refused_at_parse() {
+    // Including the spec draft's own `image_digest` shape: this route's
+    // ticket fixes `{ listing, version, image: { reference, digest } }`, not
+    // the spec draft's flatter shape.
+    let mut value = serde_json::to_value(AvailabilityRequest {
+        listing: "basic".to_string(),
+        version: 1,
+        image: ImageRef {
+            reference: "docker.io/library/alpine".to_string(),
+            digest: format!("sha256:{}", "cd".repeat(32)),
+            registry_entry: None,
+        },
+    })
+    .unwrap();
+    value["image_digest"] = json!(format!("sha256:{}", "cd".repeat(32)));
+    assert!(serde_json::from_value::<AvailabilityRequest>(value).is_err());
+}
+
+#[test]
+fn a_runnable_availability_answer_writes_and_reads_just_would_run() {
+    let value = serde_json::to_value(AvailabilityResponse::would_run()).unwrap();
+    assert_eq!(value, json!({ "would_run": true }));
+    let back: AvailabilityResponse = serde_json::from_value(value).unwrap();
+    assert_eq!(back, AvailabilityResponse::would_run());
+}
+
+#[test]
+fn a_refused_availability_answer_round_trips_its_error_and_message() {
+    let refused = AvailabilityResponse::refused(ErrorCode::NoMatchingArch, "no arm64 manifest");
+    let value = serde_json::to_value(&refused).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "would_run": false,
+            "error": "no_matching_arch",
+            "message": "no arm64 manifest"
+        })
+    );
+    let back: AvailabilityResponse = serde_json::from_value(value).unwrap();
+    assert_eq!(back, refused);
+}
+
 // ── the Provider Directory event contents (spec §4) ─────────────────────────
 
 #[test]

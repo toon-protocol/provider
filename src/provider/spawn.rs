@@ -14,12 +14,12 @@ use std::collections::HashMap;
 use tracing::{error, info, warn};
 
 use super::config::{Listing, MAX_PORTS_PER_WORKLOAD};
-use super::persistence::{persist_leases, LeaseRecord, LeaseState};
+use super::image_policy;
+use super::persistence::{count_live, persist_leases, LeaseRecord, LeaseState};
 use crate::compute::{container_name, ContainerConfig, PortMapping};
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
-    Access, ErrorCode, ErrorResponse, LeaseRequestEnvelope, PortAccess, PortRequest, Role,
-    SpawnContent, SpawnResponse,
+    Access, ErrorCode, ErrorResponse, PortAccess, PortRequest, Role, SpawnContent, SpawnResponse,
 };
 use crate::provider_http::AppState;
 
@@ -42,19 +42,13 @@ pub async fn spawn(
     let now = state.clock.now();
 
     // ── 1. the Lease Request ────────────────────────────────────────────
-    let envelope: LeaseRequestEnvelope = serde_json::from_slice(body)
-        .map_err(|e| invalid(format!("body is not {{ \"request\": <event> }}: {}", e)))?;
-    let request =
-        lease_request::validate(&envelope.request, &state.keys.public_key(), Op::Spawn, now)?;
-    if !state
-        .accepted_requests
-        .accept(request.id, request.expiration, now)
-    {
-        return Err(ErrorResponse::new(
-            ErrorCode::StaleRequest,
-            "this Lease Request was already accepted; sign a new one",
-        ));
-    }
+    let request = lease_request::accept(
+        body,
+        &state.keys.public_key(),
+        Op::Spawn,
+        now,
+        &state.accepted_requests,
+    )?;
     let content: SpawnContent = serde_json::from_str(&request.content)
         .map_err(|e| invalid(format!("spawn content: {}", e)))?;
     check_shape(&content)?;
@@ -108,10 +102,23 @@ pub async fn spawn(
             ));
         }
         check_image(&content)?;
-        let running = leases
-            .values()
-            .filter(|l| l.state.is_live() && l.listing == listing.name)
-            .count();
+        // Step 5 continued: the provider's own image policy — a deny list
+        // and a size cap, resolved against the upstream registry. The same
+        // check `availability` applies, so a positive `availability` answer
+        // and a paid spawn's outcome never disagree (spec §9). This holds
+        // the lease-table lock across a network fetch; deliberately so, to
+        // keep the same atomicity `workload_id_taken`/capacity/insert
+        // already relied on, at the cost of serialising spawns behind an
+        // uncached image lookup (a repeat digest is served from
+        // `OciRegistry`'s in-memory cache without another fetch).
+        image_policy::check(
+            &state.image_registry,
+            &state.image_policy,
+            &listing,
+            &content.image,
+        )
+        .await?;
+        let running = count_live(&leases, &listing.name);
         if running >= state.config.capacity_of(&listing.name) as usize {
             return Err(ErrorResponse::new(
                 ErrorCode::NoCapacity,
@@ -155,6 +162,8 @@ pub async fn spawn(
                 state: LeaseState::Provisioning,
                 created_at: now,
                 expires_at: now + listing.lease_interval_s,
+                ended_at: None,
+                destroyed: false,
                 ssh_port,
                 ports: ports.clone(),
             },
@@ -175,7 +184,22 @@ pub async fn spawn(
     let mut leases = state.leases.lock().await;
     match started {
         Ok(()) => {
-            let expires_at = mark_running(&mut leases, id, now + listing.lease_interval_s);
+            let Some(expires_at) = mark_running(&mut leases, id) else {
+                // The lease ended while it was being provisioned — its tenant
+                // terminated it, or the sweep reaped it. Whoever ended it
+                // destroyed a workload that did not exist yet, so this one is
+                // ours to clean up. Nothing is refunded (ADR 0003).
+                warn!("lease {} ended while it was being provisioned", id);
+                persist_leases(&leases, &state.config.lease_state_path);
+                drop(leases);
+                if let Err(cleanup) = state.backend.delete_container(id).await {
+                    warn!("could not clean up {}: {}", config.name, cleanup);
+                }
+                return Err(ErrorResponse::new(
+                    ErrorCode::Expired,
+                    "this lease was ended while its workload was being started",
+                ));
+            };
             persist_leases(&leases, &state.config.lease_state_path);
             Ok(SpawnResponse {
                 workload_id: content.workload_id,
@@ -209,17 +233,22 @@ pub async fn spawn(
     }
 }
 
-/// The lowest workload id in range that neither the backend nor the lease
-/// table holds. Both are asked: the backend knows what runs, and the table
-/// knows what is still leased — a workload that vanished from the daemon
-/// keeps its id until its lease ends, or a re-spawn could land on a lease
-/// the sweep is about to reap.
+/// The lowest workload id in range that neither the backend nor a LIVE lease
+/// holds. Both are asked: the backend knows what runs, and the table knows
+/// what is still leased — a workload that vanished from the daemon keeps its
+/// id until its lease ends, or a re-spawn could land on a lease the sweep is
+/// about to reap.
+///
+/// A retained ENDED record does not hold its id: retention keeps what
+/// `status` answers, and it must never cost a tenant a slot. Taking the id
+/// back drops that record early, which is the same answer a tenant gets once
+/// retention runs out.
 async fn free_workload_id(state: &AppState, leases: &HashMap<u32, LeaseRecord>) -> Option<u32> {
     let end = state.config.workload_id_range_end;
     let mut from = state.config.workload_id_range_start;
     while from <= end {
         let id = state.backend.find_available_id(from, end).await.ok()?;
-        if !leases.contains_key(&id) {
+        if leases.get(&id).is_none_or(|l| !l.state.is_live()) {
             return Some(id);
         }
         from = id.checked_add(1)?;
@@ -227,16 +256,19 @@ async fn free_workload_id(state: &AppState, leases: &HashMap<u32, LeaseRecord>) 
     None
 }
 
-fn mark_running(leases: &mut HashMap<u32, LeaseRecord>, id: u32, expires_at: u64) -> u64 {
-    match leases.get_mut(&id) {
-        Some(lease) => {
-            lease.state = LeaseState::Running;
-            lease.expires_at
-        }
-        // Ended between insert and start (an eviction that fast is not a
-        // path this milestone has, but the table must not grow a ghost).
-        None => expires_at,
+/// Promote a lease whose workload has started, and answer its expiry.
+///
+/// `None` when the lease is no longer the Provisioning one this spawn
+/// inserted: a Termination or a sweep may end a lease between the insert and
+/// the start, and an ended lease must never be brought back to Running — its
+/// workload has already been destroyed, or is about to be.
+fn mark_running(leases: &mut HashMap<u32, LeaseRecord>, id: u32) -> Option<u64> {
+    let lease = leases.get_mut(&id)?;
+    if lease.state != LeaseState::Provisioning {
+        return None;
     }
+    lease.state = LeaseState::Running;
+    Some(lease.expires_at)
 }
 
 /// The shape checks that need no listing: the workload id, the SSH key and
@@ -311,7 +343,7 @@ fn looks_like_ssh_public_key(key: &str) -> bool {
 
 /// Milestone 1 image checks: the shape of `reference@digest`, and no Image
 /// Registry entry. Policy (`refused_image`) and arch selection
-/// (`no_matching_arch`) are the availability ticket's.
+/// (`no_matching_arch`) are `image_policy`'s, applied straight after this.
 fn check_image(content: &SpawnContent) -> Result<(), ErrorResponse> {
     let image = &content.image;
     if image.registry_entry.is_some() {

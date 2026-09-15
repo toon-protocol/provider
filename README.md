@@ -14,13 +14,14 @@ tenant paying through hops is served identically to one paying directly.
 
 ## Status
 
-Milestone 1 is in progress. Today the app serves a paid **spawn** (a
-tenant-signed Lease Request in, a running workload and its access details
-out), sweeps expired leases, publishes its Provider Profile, Listings and
-Liveness to its Relay Set, and prints the connector route table it expects.
-Extension, status, termination, availability and the image policy are being
-added ticket by ticket; their routes answer `invalid_request` "not
-implemented" until then.
+Milestone 1 is in progress. Today the app serves the whole lease lifecycle —
+a paid **spawn** (a tenant-signed Lease Request in, a running workload and its
+access details out), a paid **extension**, and the free **status**,
+**termination** and **availability** routes — applies its **image policy** to
+every spawn and every availability answer, sweeps expired leases, publishes
+its Provider Profile, Listings and Liveness to its Relay Set, and prints the
+connector route table it expects. Eviction and listing versioning are being
+added ticket by ticket.
 
 ## Spec, decisions and vocabulary
 
@@ -74,36 +75,16 @@ parts:
   every `handler_url` in the route table.
 - `nostr_private_key`: the provider's identity. A Lease Request is addressed
   to its public key, and it signs everything this provider publishes.
+- `ended_retention_s`: how long an ended lease is still answerable by
+  `status` before the sweep forgets it. Default 86400 (one day).
+- `[image_policy]`: what this provider refuses to run — `deny_digests`
+  (exact `sha256:…` digests), `deny_references` (cheap prefix denial on
+  `image.reference`, a trailing `*` matches a suffix), `max_image_bytes`
+  (total size cap). All optional; the default is permissive. See
+  [Availability and image policy](#availability-and-image-policy).
 - `relay_set`, `connector_url`, `connector_seal_key`, `[[settlement]]`,
   `isolation`, `liveness_cadence_s`, `geohash`, `publish_url`: the Provider
-  Directory — see below.
-
-## The Provider Directory
-
-The provider publishes three kinds of event to every relay in its Relay Set
-(spec §4), all signed with `nostr_private_key` and all carrying
-`["L","toon.network"]`:
-
-| Event | Class | Carries |
-|---|---|---|
-| **Provider Profile** | replaceable | `ilp_address`, `connector_url`, `connector_seal_key`, `relays`, `settlement[]`, `isolation`, `hidden`, `host`, `liveness_cadence_s` |
-| **Listing**, one per tier | addressable, `d` = listing name | content `{version, resources, arch, lease_interval_s, price, capabilities}`; tags `a` (the Profile), `L`, `l isolation:…`, `l arch:…`, `l gpu:…`, one `t` per capability, optional `g` |
-| **Liveness** | replaceable | `{ "available": { "<listing>": n } }` with `n` = capacity − live leases, and `["expiration", now + 5 × cadence]` (ADR 0007) |
-
-Everything a relay should filter on is a single-letter tag; numbers stay in
-content, because NIP-01 filters never match inside content (ADR 0002).
-
-The Profile and the Listings go out at startup and change only when the config
-does — which is a restart. Liveness goes out every `liveness_cadence_s`.
-
-**Publishing costs money.** A relay write on the TOON Network is a paid packet
-on the paid relay route, never the free ephemeral lane (ADR 0007). The
-provider app states *what* to publish; `publish_url` names the process that
-decides *how* it is paid for — the directory publisher in
-[`tools/publisher`](tools/publisher/README.md), which holds the payment
-channel so the provider's Nostr key never has to share a process with money.
-Leave `publish_url` unset and the provider publishes nothing, which is legal:
-it simply does not appear in the directory.
+  Directory — see [The Provider Directory](#the-provider-directory).
 
 ## Routes and the connector
 
@@ -150,6 +131,134 @@ image can bridge it with the spawn's own `entrypoint` and `args` (e.g.
 `["/bin/sh"]` + `["-c", "PUBLIC_KEY=\"$SSH_PUBLIC_KEY\" exec /init"]` for
 `linuxserver/openssh-server`). No password is ever issued. A volume, when
 asked for, is mounted at `/data`.
+
+## Extending, checking and ending a lease
+
+**`POST /listings/<listing>/v<n>/extend`** (paid) takes `{ "workload_id": "…" }`
+and no signature: an extension only adds time, so any payer may buy one for any
+lease (ADR 0005) and a sponsor can pay for a lease it does not own. It adds
+exactly one Lease Interval to the lease's expiry — extensions stack, and the
+time is added to the expiry, not to `now` — and answers
+`{ "workload_id", "expires_at" }`. It is refused with `unknown_workload` when
+no lease of that id is held, `expired` when the lease has ended — by expiry,
+termination or eviction, and including an expiry the sweep has not reached
+yet, because there is no grace period — and `wrong_listing_version` when the lease was
+spawned on another listing version: a lease keeps the price it started at
+(ADR 0009), so its extensions are bought on its own route.
+
+**`POST /status`** (free) and **`POST /terminate`** (free) both take
+`{ "request": <Lease Request> }` with `op` = `status` or `terminate` and the
+content `{ "workload_id": "…" }`. The request is validated exactly as a
+spawn's is, replay included, and **the signer must be the lease's tenant** —
+anyone else is refused `not_tenant`.
+
+Status answers:
+
+```json
+{ "workload_id": "…", "role": "standalone", "state": "running",
+  "expires_at": 1757350000,
+  "access": { "host": "203.0.113.7", "ssh_port": 40000,
+              "ports": [ { "container_port": 443, "host_port": 41000 } ] } }
+```
+
+`state` is the §6.7 lease state: `"provisioning"`, `"running"`, or
+`{ "ended": "expiry" | "termination" | "eviction" }`. It is the lease record
+as it stands, so between an expiry and the sweep that reaps it a lease still
+reads `"running"` with an `expires_at` in the past — extend and terminate
+refuse it as `expired` all the same. `access` is absent once
+the lease has ended — the workload is gone, and there is nothing left to
+reach. The same encoding is what the lease table holds on disk.
+
+Terminate stops and deletes the workload immediately and answers
+`{ "workload_id": "…", "state": { "ended": "termination" } }`. Nothing is
+refunded, here or anywhere (ADR 0003). Terminating a lease that has already
+ended is refused `expired`.
+
+**Expiry.** A sweep runs every `SWEEP_INTERVAL_SECS` (30 s) and ends every
+lease whose `expires_at` has passed, with no grace period: `expires_at` is the
+first instant the lease no longer applies. An ended lease stops counting
+against capacity and stops holding its workload id at once, but its record is
+**kept for `ended_retention_s`** (one day by default) so `status` can still
+tell its tenant how it ended rather than that its id is unknown; after that
+the record is pruned and `status` answers `unknown_workload`. A lease whose
+workload the backend refused to delete is marked ended anyway and retried by
+every later sweep until the backend confirms the container is gone, so a
+failed delete never leaves a workload running for free. All of this survives a
+restart: running leases keep their expiry, tenant, listing version and access
+details, and ended leases restore as ended.
+
+## Availability and image policy
+
+`POST /availability` (free, unsigned) answers whether a spawn would run,
+without starting anything — advice, not a reservation: a spawn that later
+fails is still billed (ADR 0003). Body:
+
+```json
+{ "listing": "basic", "version": 1,
+  "image": { "reference": "docker.io/library/alpine", "digest": "sha256:…" } }
+```
+
+This is the ticket's shape, not the spec draft's flatter `image_digest`; an
+unknown field (including `image_digest`) is `invalid_request`. The route
+always answers HTTP 200 — the answer *is* the payload:
+
+```json
+{ "would_run": true }
+{ "would_run": false, "error": "wrong_listing_version", "message": "…" }
+```
+
+It applies, in order: the listing version exists (`wrong_listing_version`),
+the image policy below (`refused_image` / `no_matching_arch`), and capacity
+(`no_capacity`). A paid spawn applies the identical image-policy check at the
+same point in its own validation order (§6.2 step 5, between
+`workload_id_taken` and `no_capacity`), so a positive `availability` answer
+and a spawn's outcome never disagree, and `availability` never calls the
+compute backend.
+
+**Image policy** (`[image_policy]` in the config) is a deny list of exact
+digests, a cheap deny list of reference prefixes, and a maximum image size.
+Size and architecture come from the upstream OCI registry: the provider
+fetches the manifest or index named by `image.digest` over plain HTTP(S)
+(`docker.io` references resolve against `registry-1.docker.io`, with an
+anonymous token from the challenge in `Www-Authenticate` when the registry
+answers 401 — the generic bearer flow every OCI-distribution registry
+supports; other registries are tried anonymously first). Given an index, the
+manifest matching the listing's `arch` is selected (`no_matching_arch` if
+none matches); given a manifest, size is the config blob plus every layer's
+declared size. The fetched bytes are always verified against the requested
+digest before anything is read out of them; a mismatch, or a registry that
+cannot be reached at all, is `refused_image` — there is no distinct "registry
+down" code, since a tenant's availability check or spawn has no use for
+anything but a refusal right now. Verified manifests are cached in memory,
+keyed by digest, for the life of the process (issue #1's "verified blobs
+cached across leases" — a manifest is the only blob this milestone fetches).
+
+## The Provider Directory
+
+The provider publishes three kinds of event to every relay in its Relay Set
+(spec §4), all signed with `nostr_private_key` and all carrying
+`["L","toon.network"]`:
+
+| Event | Class | Carries |
+|---|---|---|
+| **Provider Profile** | replaceable | `ilp_address`, `connector_url`, `connector_seal_key`, `relays`, `settlement[]`, `isolation`, `hidden`, `host`, `liveness_cadence_s` |
+| **Listing**, one per tier | addressable, `d` = listing name | content `{version, resources, arch, lease_interval_s, price, capabilities}`; tags `a` (the Profile), `L`, `l isolation:…`, `l arch:…`, `l gpu:…`, one `t` per capability, optional `g` |
+| **Liveness** | replaceable | `{ "available": { "<listing>": n } }` with `n` = capacity − live leases, and `["expiration", now + 5 × cadence]` (ADR 0007) |
+
+Everything a relay should filter on is a single-letter tag; numbers stay in
+content, because NIP-01 filters never match inside content (ADR 0002).
+
+The Profile and the Listings go out at startup and change only when the config
+does — which is a restart. Liveness goes out every `liveness_cadence_s`.
+
+**Publishing costs money.** A relay write on the TOON Network is a paid packet
+on the paid relay route, never the free ephemeral lane (ADR 0007). The
+provider app states *what* to publish; `publish_url` names the process that
+decides *how* it is paid for — the directory publisher in
+[`tools/publisher`](tools/publisher/README.md), which holds the payment
+channel so the provider's Nostr key never has to share a process with money.
+Leave `publish_url` unset and the provider publishes nothing, which is legal:
+it simply does not appear in the directory.
 
 ## Build, test and run
 

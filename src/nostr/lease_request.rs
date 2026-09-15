@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use nostr_sdk::{Event, EventId, PublicKey, TagKind};
 
 use super::kinds::K_LEASE_REQUEST;
-use super::wire::{ErrorCode, ErrorResponse};
+use super::wire::{ErrorCode, ErrorResponse, LeaseRequestEnvelope};
 
 /// A request whose `expiration` is more than this far past its `created_at`
 /// is refused as stale: a tenant has no reason to sign something valid for
@@ -53,9 +53,37 @@ pub struct ValidLeaseRequest {
     pub content: String,
 }
 
+/// Accept the Lease Request in a request body: parse the envelope, validate
+/// the event, and book its id against replay — the whole of step 1 of the
+/// spec's validation order (§6.2), which every signed route runs identically.
+pub fn accept(
+    body: &[u8],
+    provider: &PublicKey,
+    op: Op,
+    now: u64,
+    seen: &AcceptedRequests,
+) -> Result<ValidLeaseRequest, ErrorResponse> {
+    let envelope: LeaseRequestEnvelope = serde_json::from_slice(body).map_err(|e| {
+        ErrorResponse::new(
+            ErrorCode::InvalidRequest,
+            format!("body is not {{ \"request\": <event> }}: {}", e),
+        )
+    })?;
+    let request = validate(&envelope.request, provider, op, now)?;
+    // Booked as soon as the request is known to be authentic, so a captured
+    // refusal cannot be replayed onto a route that would accept it.
+    if !seen.accept(request.id, request.expiration, now) {
+        return Err(ErrorResponse::new(
+            ErrorCode::StaleRequest,
+            "this Lease Request was already accepted; sign a new one",
+        ));
+    }
+    Ok(request)
+}
+
 /// Validate a Lease Request against this provider, in the spec's order: the
 /// signature, the kind, the `p` tag, the `op` tag, then freshness. Replay is
-/// `AcceptedRequests`, checked by the caller once everything here passed.
+/// `AcceptedRequests`, booked by `accept` once everything here passed.
 pub fn validate(
     event: &Event,
     provider: &PublicKey,

@@ -5,7 +5,11 @@
 //!
 //! The one lease this file spawns goes in through the HTTP router with the
 //! faked `ComputeBackend`, exactly as a paying tenant's would, because that is
-//! the only honest way to make `available` drop by one.
+//! the only honest way to make `available` drop by one. That spawn is checked
+//! against the image policy like any other, so the harness points the
+//! provider's `image_policy.registry_url_override` at a `wiremock` stub of a
+//! registry (`common::stub_registry`) and names the digest that stub answers
+//! with (`common::valid_digest`).
 
 mod common;
 
@@ -18,13 +22,15 @@ use nostr_sdk::{EventBuilder, Keys, Kind, PublicKey, Tag, TagKind, Timestamp};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use common::{FakeBackend, FakeClock, FakeDirectory};
+use common::{stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory};
 use toon_provider::nostr::directory_events::{
     ListingContent, LivenessContent, ProfileContent, Settlement, LIVENESS_EXPIRY_CADENCES,
 };
 use toon_provider::nostr::kinds::{K_LEASE_REQUEST, K_LISTING, K_LIVENESS, K_PROFILE, TOON_LABEL};
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, Resources, SpawnContent};
+use toon_provider::provider::ImagePolicyConfig;
 use toon_provider::{router, Clock, Directory, Listing, ProviderConfig, ProviderService};
+use wiremock::MockServer;
 
 const NOW: u64 = 1_700_000_000;
 const INTERVAL: u64 = 3600;
@@ -35,7 +41,6 @@ const PUBLIC_IP: &str = "203.0.113.7";
 const SEAL_KEY: &str = "0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188";
 const SSH_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@example";
-const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 struct Harness {
     app: axum::Router,
@@ -43,6 +48,9 @@ struct Harness {
     directory: Arc<FakeDirectory>,
     clock: Arc<FakeClock>,
     provider: PublicKey,
+    /// Kept alive only so the stubbed registry keeps answering for as long as
+    /// this harness's app might still resolve an image; never read otherwise.
+    _registry: MockServer,
 }
 
 fn listing(name: &str, version: u32, capacity: u32) -> Listing {
@@ -103,7 +111,7 @@ fn config(listings: Vec<Listing>, provider_key: &str, state_path: String) -> Pro
     }
 }
 
-fn harness_with(listings: Vec<Listing>) -> Harness {
+async fn harness_with(listings: Vec<Listing>) -> Harness {
     let keys = Keys::generate();
     let provider_key = keys.secret_key().to_secret_hex();
     let dir = tempfile::tempdir().unwrap();
@@ -113,10 +121,17 @@ fn harness_with(listings: Vec<Listing>) -> Harness {
         .to_string_lossy()
         .into_owned();
 
+    let registry = stub_registry().await;
+    let mut cfg = config(listings, &provider_key, state_path);
+    cfg.image_policy = ImagePolicyConfig {
+        registry_url_override: Some(registry.uri()),
+        ..ImagePolicyConfig::default()
+    };
+
     let clock = FakeClock::at(NOW);
     let directory = FakeDirectory::new();
     let service = ProviderService::with_backend_clock_and_directory(
-        config(listings, &provider_key, state_path),
+        cfg,
         FakeBackend::new(),
         clock.clone(),
         directory.clone(),
@@ -129,11 +144,12 @@ fn harness_with(listings: Vec<Listing>) -> Harness {
         directory,
         clock,
         provider: keys.public_key(),
+        _registry: registry,
     }
 }
 
-fn harness() -> Harness {
-    harness_with(vec![listing("basic", 1, 4)])
+async fn harness() -> Harness {
+    harness_with(vec![listing("basic", 1, 4)]).await
 }
 
 /// Every cell of a tag, as the relay sees it.
@@ -150,7 +166,7 @@ fn has_tag(event: &nostr_sdk::Event, cells: &[&str]) -> bool {
 
 #[tokio::test]
 async fn the_profile_carries_everything_a_tenant_needs_to_pay_this_provider() {
-    let h = harness();
+    let h = harness().await;
     h.service.publish_directory().await.unwrap();
 
     let profiles = h.directory.of_kind(K_PROFILE);
@@ -188,7 +204,7 @@ async fn the_profile_carries_everything_a_tenant_needs_to_pay_this_provider() {
 
 #[tokio::test]
 async fn one_listing_event_per_configured_listing() {
-    let h = harness_with(vec![listing("basic", 1, 4), listing("large", 1, 2)]);
+    let h = harness_with(vec![listing("basic", 1, 4), listing("large", 1, 2)]).await;
     h.service.publish_directory().await.unwrap();
 
     let names: Vec<String> = h
@@ -205,7 +221,7 @@ async fn a_listing_names_its_tier_its_profile_and_everything_a_relay_filters_on(
     let mut tier = listing("basic", 3, 4);
     tier.resources.gpu = Some("rtx4090".to_string());
     tier.capabilities = vec!["docker".to_string(), "nesting".to_string()];
-    let h = harness_with(vec![tier]);
+    let h = harness_with(vec![tier]).await;
     h.service.publish_directory().await.unwrap();
 
     let listings = h.directory.of_kind(K_LISTING);
@@ -254,7 +270,7 @@ async fn a_listing_names_its_tier_its_profile_and_everything_a_relay_filters_on(
 
 #[tokio::test]
 async fn a_tier_with_no_gpu_publishes_no_gpu_label() {
-    let h = harness();
+    let h = harness().await;
     h.service.publish_directory().await.unwrap();
 
     let listings = h.directory.of_kind(K_LISTING);
@@ -301,7 +317,7 @@ async fn a_provider_with_no_geohash_publishes_no_region_tag() {
 
 #[tokio::test]
 async fn liveness_expires_five_cadences_out_and_counts_free_capacity() {
-    let h = harness();
+    let h = harness().await;
     h.service.publish_liveness(NOW).await.unwrap();
 
     let events = h.directory.of_kind(K_LIVENESS);
@@ -332,7 +348,7 @@ async fn liveness_expires_five_cadences_out_and_counts_free_capacity() {
 
 #[tokio::test]
 async fn a_running_lease_drops_availability_by_one() {
-    let h = harness();
+    let h = harness().await;
 
     let (status, answer) = spawn_a_lease(&h).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
@@ -348,7 +364,7 @@ async fn a_running_lease_drops_availability_by_one() {
 
 #[tokio::test]
 async fn availability_returns_when_the_lease_expires() {
-    let h = harness();
+    let h = harness().await;
     spawn_a_lease(&h).await;
 
     h.clock.advance(INTERVAL + 1);
@@ -366,7 +382,7 @@ async fn availability_returns_when_the_lease_expires() {
 #[tokio::test]
 async fn every_version_of_a_tier_shares_one_availability_figure() {
     // Capacity is a slice of hardware, not a per-version allowance.
-    let h = harness_with(vec![listing("basic", 1, 4), listing("basic", 2, 4)]);
+    let h = harness_with(vec![listing("basic", 1, 4), listing("basic", 2, 4)]).await;
     h.service.publish_liveness(NOW).await.unwrap();
 
     let content: LivenessContent =
@@ -379,7 +395,7 @@ async fn every_version_of_a_tier_shares_one_availability_figure() {
 
 #[tokio::test]
 async fn a_relay_that_refuses_a_write_does_not_stop_the_provider() {
-    let h = harness();
+    let h = harness().await;
     h.directory
         .fail_next_publish("relay refused: out of credit");
 
@@ -400,7 +416,7 @@ async fn a_relay_that_refuses_a_write_does_not_stop_the_provider() {
 async fn a_relay_set_reached_only_in_part_asks_to_be_retried() {
     // Spec §4: a provider publishes to EVERY relay in its Relay Set. Three of
     // four is not finished.
-    let h = harness();
+    let h = harness().await;
     h.directory.relay_always_refuses("wss://relay-two.example");
 
     assert!(!h.service.publish_directory().await.unwrap());
@@ -409,7 +425,7 @@ async fn a_relay_set_reached_only_in_part_asks_to_be_retried() {
 
 #[tokio::test]
 async fn a_publication_every_relay_took_is_not_retried() {
-    let h = harness();
+    let h = harness().await;
     assert!(h.service.publish_directory().await.unwrap());
 }
 
@@ -444,7 +460,7 @@ async fn query_liveness_answers_for_the_provider_that_published_it_and_nobody_el
     // The port's other half: a provider is LIVE ON A RELAY while that relay
     // holds an unexpired Liveness from it (spec §4.3). Milestone 3's Takeover
     // is the caller; this pins the contract now.
-    let h = harness();
+    let h = harness().await;
     h.service.publish_liveness(NOW).await.unwrap();
     let published = h.directory.of_kind(K_LIVENESS).remove(0);
     h.directory.seed_liveness(published.clone());
@@ -465,7 +481,7 @@ async fn query_liveness_answers_for_the_provider_that_published_it_and_nobody_el
 
 #[tokio::test]
 async fn a_lease_request_is_never_published() {
-    let h = harness();
+    let h = harness().await;
     spawn_a_lease(&h).await;
     h.service.publish_directory().await.unwrap();
     h.service.publish_liveness(NOW).await.unwrap();
@@ -490,7 +506,7 @@ async fn spawn_a_lease(h: &Harness) -> (StatusCode, Value) {
         workload_id: "ab".repeat(32),
         image: ImageRef {
             reference: "docker.io/library/alpine".to_string(),
-            digest: DIGEST.to_string(),
+            digest: valid_digest(),
             registry_entry: None,
         },
         env: BTreeMap::new(),

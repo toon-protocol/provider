@@ -8,9 +8,12 @@
 // not from who paid.
 //
 // Paths are `provider::routes`'s: the connector forwards each ILP prefix to
-// one of them. Spawn is served; extend, availability, status and terminate
-// are listed in the route table and answer "not implemented" until their
-// tickets land.
+// one of them. Spawn, extend, availability, status and terminate are all
+// served.
+//
+// The free routes (`availability`, `status`, `terminate`) arrive with nothing
+// paid and are served exactly like the paid ones: this app never looks at what
+// a packet was worth.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,7 +37,10 @@ use crate::nostr::wire::{ErrorCode, ErrorResponse};
 use crate::provider::routes::{
     AVAILABILITY_PATH, EXTEND_PATTERN, SPAWN_PATTERN, STATUS_PATH, TERMINATE_PATH,
 };
-use crate::provider::{spawn, LeaseRecord, ProviderConfig};
+use crate::provider::{
+    availability, extend, spawn, status, terminate, ImagePolicy, LeaseRecord, OciRegistry,
+    ProviderConfig,
+};
 
 /// Everything a handler may touch. Arc-cloned from `ProviderService`, so the
 /// HTTP app and the expiry sweep see one lease table and one clock.
@@ -52,6 +58,12 @@ pub struct AppState {
     pub directory: Arc<dyn Directory>,
     pub leases: Arc<Mutex<HashMap<u32, LeaseRecord>>>,
     pub accepted_requests: Arc<AcceptedRequests>,
+    /// What this provider refuses to run, and the client that resolves an
+    /// image reference/digest against the upstream registry. Shared by
+    /// `availability` and a paid spawn's validation step 5, so the two never
+    /// disagree.
+    pub image_policy: Arc<ImagePolicy>,
+    pub image_registry: Arc<OciRegistry>,
 }
 
 impl AppState {
@@ -66,6 +78,10 @@ impl AppState {
         let keys = Keys::parse(&config.nostr_private_key)
             .context("nostr_private_key must be a hex or nsec1 secret key")?;
         let directory = directory_from_config(&config)?;
+        let image_policy = Arc::new(ImagePolicy::from_config(&config.image_policy));
+        let image_registry = Arc::new(OciRegistry::new(
+            config.image_policy.registry_url_override.clone(),
+        ));
         Ok(Self {
             config: Arc::new(config),
             backend,
@@ -74,6 +90,8 @@ impl AppState {
             directory,
             leases: Arc::new(Mutex::new(HashMap::new())),
             accepted_requests: Arc::new(AcceptedRequests::new()),
+            image_policy,
+            image_registry,
         })
     }
 
@@ -107,10 +125,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route(SPAWN_PATTERN, post(spawn_route))
-        .route(EXTEND_PATTERN, post(not_implemented))
-        .route(AVAILABILITY_PATH, post(not_implemented))
-        .route(STATUS_PATH, post(not_implemented))
-        .route(TERMINATE_PATH, post(not_implemented))
+        .route(EXTEND_PATTERN, post(extend_route))
+        .route(AVAILABILITY_PATH, post(availability_route))
+        .route(STATUS_PATH, post(status_route))
+        .route(TERMINATE_PATH, post(terminate_route))
         .with_state(state)
 }
 
@@ -152,11 +170,42 @@ async fn spawn_route(
     }
 }
 
-async fn not_implemented() -> Response {
-    refuse(ErrorResponse::new(
-        ErrorCode::InvalidRequest,
-        "not implemented in this milestone",
-    ))
+async fn extend_route(
+    State(state): State<AppState>,
+    Path((listing, version)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let Some(version) = parse_version(&version) else {
+        return refuse(ErrorResponse::new(
+            ErrorCode::WrongListingVersion,
+            format!("{:?} is not a listing version (`v<n>`)", version),
+        ));
+    };
+    match extend(&state, &listing, version, &body).await {
+        Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
+        Err(e) => refuse(e),
+    }
+}
+
+async fn status_route(State(state): State<AppState>, body: Bytes) -> Response {
+    match status(&state, &body).await {
+        Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
+        Err(e) => refuse(e),
+    }
+}
+
+async fn terminate_route(State(state): State<AppState>, body: Bytes) -> Response {
+    match terminate(&state, &body).await {
+        Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
+        Err(e) => refuse(e),
+    }
+}
+
+/// `POST /availability`: free, unsigned, and answers 200 either way — the
+/// refusal reason IS the payload here, not an HTTP status the way `spawn`'s
+/// refusals are (`refuse`). It never touches `ComputeBackend`.
+async fn availability_route(State(state): State<AppState>, body: Bytes) -> Response {
+    (StatusCode::OK, Json(availability(&state, &body).await)).into_response()
 }
 
 /// `v<n>` as the route table writes it.

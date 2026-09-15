@@ -2,14 +2,19 @@
 //! so this is pulled in with `mod common;` rather than imported from the lib.
 #![allow(dead_code)]
 
+pub mod harness;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use sha2::{Digest, Sha256};
 use toon_provider::compute::{ComputeBackend, ContainerConfig, ContainerStatus, NodeStatus};
 use toon_provider::{Clock, Directory, PublishReport};
+use wiremock::matchers::{method, path_regex};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// One thing the provider asked the compute backend to do. Tests assert on this
 /// sequence rather than on the provider's internal state.
@@ -33,6 +38,9 @@ pub struct FakeBackend {
     /// When set, the next create fails with this message, as a daemon that
     /// cannot pull the image or is out of disk would.
     fail_next_create: Mutex<Option<String>>,
+    /// When set, the next delete fails with this message and leaves the
+    /// container where it is, as a busy or wedged daemon would.
+    fail_next_delete: Mutex<Option<String>>,
 }
 
 impl FakeBackend {
@@ -74,6 +82,10 @@ impl FakeBackend {
 
     pub fn fail_next_create(&self, why: &str) {
         *self.fail_next_create.lock().unwrap() = Some(why.to_string());
+    }
+
+    pub fn fail_next_delete(&self, why: &str) {
+        *self.fail_next_delete.lock().unwrap() = Some(why.to_string());
     }
 
     fn record(&self, call: BackendCall) {
@@ -126,6 +138,9 @@ impl ComputeBackend for FakeBackend {
 
     async fn delete_container(&self, id: u32) -> Result<()> {
         self.record(BackendCall::Delete(id));
+        if let Some(why) = self.fail_next_delete.lock().unwrap().take() {
+            anyhow::bail!("{}", why);
+        }
         self.containers.lock().unwrap().remove(&id);
         Ok(())
     }
@@ -147,6 +162,68 @@ impl ComputeBackend for FakeBackend {
     async fn get_container_status(&self, id: u32) -> Result<ContainerStatus> {
         Ok(self.status_of(id))
     }
+}
+
+/// A tiny, syntactically valid OCI manifest naming no real image: a config
+/// blob and one layer, together 1000 bytes, small enough to sit under any
+/// cap a test configures. It names no index, so it needs no arch to match.
+pub fn valid_manifest_bytes() -> Vec<u8> {
+    serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": 100,
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "layers": [{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "size": 900,
+            "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }]
+    })
+    .to_string()
+    .into_bytes()
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
+}
+
+/// The digest a spawn or availability body must name to get
+/// `valid_manifest_bytes` back from `stub_registry`.
+pub fn valid_digest() -> String {
+    format!("sha256:{}", sha256_hex(&valid_manifest_bytes()))
+}
+
+/// A registry stub that answers every manifest request with
+/// `valid_manifest_bytes`, regardless of repository or digest asked for —
+/// enough for any test that only needs *a* runnable image. Tests that care
+/// about a specific size, arch selection or a denied digest mount their own
+/// `Mock`s on the returned server instead (or alongside; wiremock tries
+/// mounted mocks most-specific-first).
+///
+/// The returned `MockServer` owns the listening socket and the task serving
+/// it: it must be kept alive (e.g. as a field on the test harness) for as
+/// long as the code under test may still call it.
+pub async fn stub_registry() -> MockServer {
+    let server = MockServer::start().await;
+    mount_default_manifest(&server).await;
+    server
+}
+
+pub async fn mount_default_manifest(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/v2/.*/manifests/.*$"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(valid_manifest_bytes()))
+        .mount(server)
+        .await;
 }
 
 /// A clock the test moves by hand, so expiry and request freshness are

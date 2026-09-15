@@ -162,6 +162,116 @@ pub struct SpawnResponse {
     pub access: Option<Access>,
 }
 
+/// Why a lease ended (spec §6.7). Serialised in snake_case: `"expiry"`,
+/// `"termination"`, `"eviction"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseEnd {
+    /// No payment bought another Lease Interval.
+    Expiry,
+    /// The tenant asked for it to end.
+    Termination,
+    /// The provider decided it should end.
+    Eviction,
+}
+
+/// `Provisioning → Running → Ended(…)` for a standalone or primary lease
+/// (spec §6.7). A standby's `Reserved` state is a later milestone.
+///
+/// On the wire and on disk this is serde's externally tagged form, which is
+/// what `status` answers and what the lease table holds:
+///
+/// ```json
+/// "provisioning" | "running" | { "ended": "expiry" | "termination" | "eviction" }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseState {
+    /// Accepted and paid; the workload is being started. Holds the workload
+    /// id and counts against capacity already, so a racing spawn cannot take
+    /// either.
+    Provisioning,
+    Running,
+    Ended(LeaseEnd),
+}
+
+impl LeaseState {
+    /// Whether the lease still holds its workload id and its capacity slot.
+    pub fn is_live(self) -> bool {
+        !matches!(self, LeaseState::Ended(_))
+    }
+}
+
+/// The answer to a successful status (spec §6.5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusResponse {
+    pub workload_id: String,
+    pub role: Role,
+    pub state: LeaseState,
+    pub expires_at: u64,
+    /// Absent once the lease has ended: the workload is gone, and naming a
+    /// host and port that no longer reach it would be a lie.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Access>,
+}
+
+/// The answer to a successful termination (spec §6.6). The state is always
+/// `{ "ended": "termination" }`; it is echoed so a tenant needs no second
+/// call to see that its lease is over.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TerminateResponse {
+    pub workload_id: String,
+    pub state: LeaseState,
+}
+
+/// Body of the free `<addr>.availability` route (spec §6.4; ticket M1-5 uses
+/// this shape rather than the spec draft's `image_digest`, so a mis-shaped
+/// spec-style body is refused as `invalid_request` like any other unknown
+/// field).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AvailabilityRequest {
+    pub listing: String,
+    pub version: u32,
+    pub image: ImageRef,
+}
+
+/// The answer to `availability`. Always HTTP 200: the answer IS the payload,
+/// including a refusal (`provider_http::availability_route` never maps this
+/// to a 4xx the way `refuse` does for paid/signed routes).
+///
+/// `Refused` is listed first: an untagged enum tries variants in order, and
+/// `Refused` requires fields `Runnable` lacks, so a runnable answer only
+/// ever matches `Runnable` while a refusal is never mistaken for one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AvailabilityResponse {
+    Refused {
+        would_run: bool,
+        error: ErrorCode,
+        message: String,
+    },
+    Runnable {
+        would_run: bool,
+    },
+}
+
+impl AvailabilityResponse {
+    pub fn would_run() -> Self {
+        Self::Runnable { would_run: true }
+    }
+
+    pub fn refused(error: ErrorCode, message: impl Into<String>) -> Self {
+        Self::Refused {
+            would_run: false,
+            error,
+            message: message.into(),
+        }
+    }
+}
+
 /// The answer to a successful extension.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

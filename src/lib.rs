@@ -22,6 +22,6 @@ pub use directory::{ConnectorDirectory, Directory, NullDirectory, PublishReport}
 pub use docker::DockerBackend;
 pub use provider::{
     load_config, render_routes, BackendKind, LeaseEnd, LeaseRecord, LeaseState, Listing,
-    ProviderConfig, ProviderService,
+    ProviderConfig, ProviderService, SWEEP_INTERVAL_SECS,
 };
 pub use provider_http::{router, AppState};

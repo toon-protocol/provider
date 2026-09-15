@@ -74,6 +74,11 @@ ssh_port_start = 40000
 # both are checked at load.
 workload_port_start = 42000
 
+# How long an ended lease is still answerable by `status` (as
+# Ended(expiry|termination|eviction)) before the sweep forgets it. It stops
+# counting against capacity the moment it ends; this is bookkeeping only.
+ended_retention_s = 86400
+
 # Where the lease table is mirrored. It is the only record that a lease
 # exists, so a restart without it strands every paid workload.
 lease_state_path = "/var/lib/toon-provider/leases.json"
@@ -107,3 +112,29 @@ cpu_millicores = 500
 memory_mb = 512
 storage_gb = 10
 # gpu = "rtx-4090"        # when the tier includes one
+
+# What this provider refuses to run. Applied identically by the free
+# `availability` route and by a paid spawn's validation (step 5): a spawn
+# naming a denied digest or an oversized image is refused `refused_image`,
+# and an index with no manifest for the listing's `arch` is refused
+# `no_matching_arch` either way. Both lists are optional; the default is
+# permissive (nothing denied, no size cap).
+[image_policy]
+# Exact `sha256:<hex>` digests never run, whether a spawn names one directly
+# or an index resolves to one.
+deny_digests = []
+# deny_digests = ["sha256:0000000000000000000000000000000000000000000000000000000000000000"]
+
+# Cheap prefix denial on `image.reference` (the repository name), checked
+# before any registry fetch. A trailing `*` matches any suffix; otherwise the
+# whole reference must match exactly.
+deny_references = []
+# deny_references = ["ghcr.io/some-untrusted-publisher/*"]
+
+# Total image size (config blob + every layer of the selected manifest)
+# above which a spawn is refused. Unset (the default) means no cap.
+# max_image_bytes = 5000000000
+
+# Test/ops escape hatch: fetch every manifest from this base URL instead of
+# the registry named in the reference. Leave unset in production.
+# registry_url_override = "http://localhost:5000"
