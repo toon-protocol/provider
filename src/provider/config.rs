@@ -172,6 +172,23 @@ pub struct ProviderConfig {
     #[serde(default = "default_http_bind_addr")]
     pub http_bind_addr: String,
 
+    /// Where the operator endpoint listens (`POST /operator/evict`): a
+    /// second, unrelated listener from `http_bind_addr`, carrying no
+    /// signature and no payment — reaching it at all is what authorises it.
+    /// MUST be loopback (`validate` refuses anything else): this port is not
+    /// in the connector's route table and MUST NEVER be exposed off this
+    /// host, not through the connector and not through a published compose
+    /// port.
+    #[serde(default = "default_operator_bind_addr")]
+    pub operator_bind_addr: String,
+
+    /// Where `toon-provider evict` sends its request — distinct from
+    /// `operator_bind_addr` the way `handler_base_url` is distinct from
+    /// `http_bind_addr`, in case the two ever need to differ (e.g. a CLI
+    /// running outside the provider's own container).
+    #[serde(default = "default_operator_url")]
+    pub operator_url: String,
+
     /// Where the CONNECTOR reaches this app — the origin of every
     /// `handler_url` that `toon-provider routes` prints. Distinct from
     /// `http_bind_addr` because inside compose the connector dials the app
@@ -369,6 +386,20 @@ impl ProviderConfig {
                 );
             }
         }
+        match self.operator_bind_addr.parse::<std::net::SocketAddr>() {
+            Ok(addr) if addr.ip().is_loopback() => {}
+            Ok(addr) => bail!(
+                "operator_bind_addr {} must be a loopback address (127.0.0.1 or ::1): it \
+                 accepts an eviction command with no signature and no payment, so reaching it \
+                 at all must mean being on this host",
+                addr
+            ),
+            Err(e) => bail!(
+                "operator_bind_addr {:?} is not a valid host:port: {}",
+                self.operator_bind_addr,
+                e
+            ),
+        }
         if self.workload_id_range_end < self.workload_id_range_start {
             bail!("workload_id_range_end is below workload_id_range_start");
         }
@@ -422,6 +453,14 @@ fn default_http_bind_addr() -> String {
     "127.0.0.1:8080".to_string()
 }
 
+fn default_operator_bind_addr() -> String {
+    "127.0.0.1:8090".to_string()
+}
+
+fn default_operator_url() -> String {
+    "http://127.0.0.1:8090".to_string()
+}
+
 fn default_handler_base_url() -> String {
     "http://127.0.0.1:8080".to_string()
 }
@@ -465,6 +504,8 @@ impl Default for ProviderConfig {
             capabilities: Vec::new(),
             listings: Vec::new(),
             http_bind_addr: default_http_bind_addr(),
+            operator_bind_addr: default_operator_bind_addr(),
+            operator_url: default_operator_url(),
             handler_base_url: default_handler_base_url(),
             workload_id_range_start: default_id_range_start(),
             workload_id_range_end: default_id_range_end(),
@@ -695,6 +736,23 @@ storage_gb = 1
             ..cfg
         };
         assert!(apart.validate().is_ok());
+    }
+
+    #[test]
+    fn operator_bind_addr_must_be_loopback() {
+        let cfg = ProviderConfig {
+            operator_bind_addr: "0.0.0.0:8090".to_string(),
+            ..ProviderConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        let cfg = ProviderConfig {
+            operator_bind_addr: "not-an-addr".to_string(),
+            ..ProviderConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        assert!(ProviderConfig::default().validate().is_ok());
     }
 
     #[test]

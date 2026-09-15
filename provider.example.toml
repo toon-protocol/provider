@@ -60,6 +60,17 @@ http_bind_addr = "127.0.0.1:8080"
 # `toon-provider routes` prints. Inside compose this is the service name.
 handler_base_url = "http://127.0.0.1:8080"
 
+# Where the loopback-only operator endpoint listens (`POST /operator/evict`,
+# used by `toon-provider evict`). It carries no signature and no payment, so
+# reaching it at all is what authorises an eviction — it MUST be loopback
+# (validation refuses anything else) and MUST NEVER be exposed off this host:
+# not through the connector, not through a published compose port.
+operator_bind_addr = "127.0.0.1:8090"
+
+# Where `toon-provider evict` sends its request. Distinct from
+# operator_bind_addr the way handler_base_url is distinct from http_bind_addr.
+operator_url = "http://127.0.0.1:8090"
+
 # Inclusive range of backend workload ids this provider may use.
 workload_id_range_start = 1000
 workload_id_range_end = 1999

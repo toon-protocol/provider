@@ -24,4 +24,4 @@ pub use provider::{
     load_config, render_routes, BackendKind, LeaseEnd, LeaseRecord, LeaseState, Listing,
     ProviderConfig, ProviderService, SWEEP_INTERVAL_SECS,
 };
-pub use provider_http::{router, AppState};
+pub use provider_http::{operator_router, router, AppState};

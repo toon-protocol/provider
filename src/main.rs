@@ -2,7 +2,8 @@
 //! or, with `routes`, the connector route table that config implies.
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use toon_provider::nostr::wire::{EvictRequest, EvictionReason};
 use toon_provider::{load_config, render_routes, ProviderService};
 
 #[derive(Parser)]
@@ -22,6 +23,47 @@ enum Command {
     /// and one extend row per listing version at the listing price, plus the
     /// free availability, status and terminate rows.
     Routes,
+
+    /// Evict a lease right now and publish a signed Eviction Notice.
+    ///
+    /// This talks to the RUNNING provider process's loopback-only operator
+    /// endpoint (`operator_url` in the config, `POST /operator/evict`) rather
+    /// than touching the lease state file — the running process holds the
+    /// lease table and the compute backend, and only it can stop a workload
+    /// and set the lease's state consistently. The provider named by
+    /// `--config` must already be running.
+    Evict {
+        /// The tenant-chosen workload id (hex) to evict.
+        #[arg(long = "workload-id")]
+        workload_id: String,
+        /// Why the lease is being evicted; published in the Eviction Notice.
+        #[arg(long, value_enum)]
+        reason: ReasonArg,
+        /// A human-readable explanation, published in the Eviction Notice.
+        #[arg(long)]
+        message: Option<String>,
+    },
+}
+
+/// `EvictionReason` as a `clap` value: `toon_provider::nostr::wire` stays
+/// free of a CLI dependency, so the CLI's own copy converts into it.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum ReasonArg {
+    Abuse,
+    Policy,
+    Maintenance,
+    Other,
+}
+
+impl From<ReasonArg> for EvictionReason {
+    fn from(reason: ReasonArg) -> Self {
+        match reason {
+            ReasonArg::Abuse => EvictionReason::Abuse,
+            ReasonArg::Policy => EvictionReason::Policy,
+            ReasonArg::Maintenance => EvictionReason::Maintenance,
+            ReasonArg::Other => EvictionReason::Other,
+        }
+    }
 }
 
 #[tokio::main]
@@ -32,6 +74,42 @@ async fn main() -> Result<()> {
     match cli.command {
         Some(Command::Routes) => {
             print!("{}", render_routes(&config));
+            Ok(())
+        }
+        Some(Command::Evict {
+            workload_id,
+            reason,
+            message,
+        }) => {
+            let request = EvictRequest {
+                workload_id,
+                reason: reason.into(),
+                message,
+            };
+            let url = format!(
+                "{}/operator/evict",
+                config.operator_url.trim_end_matches('/')
+            );
+            let response = reqwest::Client::new()
+                .post(&url)
+                .json(&request)
+                .send()
+                .await
+                .with_context(|| {
+                    format!(
+                        "reaching the operator endpoint at {} — is the provider running?",
+                        url
+                    )
+                })?;
+            let status = response.status();
+            let body: serde_json::Value = response
+                .json()
+                .await
+                .context("reading the operator endpoint's answer")?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+            if !status.is_success() {
+                anyhow::bail!("eviction refused: {}", status);
+            }
             Ok(())
         }
         None => {

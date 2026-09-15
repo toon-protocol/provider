@@ -34,5 +34,11 @@ ENV RUST_LOG=info
 # The provider's own TOON connector is the only thing that should reach this.
 EXPOSE 8080
 
+# The operator endpoint (`POST /operator/evict`, used by `toon-provider
+# evict`) is deliberately NOT exposed here: it is loopback-only by config
+# validation and reached from inside this same container (e.g. `docker
+# compose exec provider toon-provider evict ...`), never published as a
+# compose port.
+
 ENTRYPOINT ["toon-provider"]
 CMD ["--config", "/etc/toon-provider/provider.toml"]

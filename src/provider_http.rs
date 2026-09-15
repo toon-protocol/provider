@@ -33,12 +33,12 @@ use crate::clock::Clock;
 use crate::compute::ComputeBackend;
 use crate::directory::{ConnectorDirectory, Directory, NullDirectory};
 use crate::nostr::lease_request::AcceptedRequests;
-use crate::nostr::wire::{ErrorCode, ErrorResponse};
+use crate::nostr::wire::{ErrorCode, ErrorResponse, EvictRequest};
 use crate::provider::routes::{
     AVAILABILITY_PATH, EXTEND_PATTERN, SPAWN_PATTERN, STATUS_PATH, TERMINATE_PATH,
 };
 use crate::provider::{
-    availability, extend, spawn, status, terminate, ImagePolicy, LeaseRecord, OciRegistry,
+    availability, evict, extend, spawn, status, terminate, ImagePolicy, LeaseRecord, OciRegistry,
     ProviderConfig,
 };
 
@@ -146,6 +146,52 @@ pub async fn serve(state: AppState, bind_addr: &str) -> Result<()> {
     Ok(())
 }
 
+/// The operator surface: `POST /operator/evict`, and nothing else. Deliberately
+/// a SEPARATE router from `router` above rather than one more route on it —
+/// `router` is what the TOON connector forwards tenant traffic to, and
+/// eviction takes no signature and no payment because it is not a tenant
+/// operation: it is the operator of this box telling its own provider process
+/// to stop a lease. Keeping it a separate `Router` means it can never be
+/// reached through the connector's route table by a future change that adds
+/// routes to `router`, and a test can drive it exactly like `router` — an
+/// HTTP request in, JSON out — without needing a real loopback socket to
+/// prove the isolation.
+///
+/// The isolation that matters is `serve_operator`'s bind address, which
+/// `ProviderConfig::validate` refuses to be anything but loopback.
+pub fn operator_router(state: AppState) -> Router {
+    Router::new()
+        .route("/operator/evict", post(evict_route))
+        .with_state(state)
+}
+
+/// Serve the operator surface on its own bind address. Bound separately from
+/// `serve`'s app so the two ports can be firewalled differently: this one
+/// MUST NEVER be exposed off this host (`ProviderConfig::operator_bind_addr`
+/// carries the loopback requirement).
+pub async fn serve_operator(state: AppState, bind_addr: &str) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to bind the operator endpoint to {}: {}",
+                bind_addr,
+                e
+            )
+        })?;
+
+    info!(
+        "operator endpoint listening on {} (loopback only — never expose this)",
+        bind_addr
+    );
+
+    axum::serve(listener, operator_router(state))
+        .await
+        .map_err(|e| anyhow::anyhow!("operator endpoint error: {}", e))?;
+
+    Ok(())
+}
+
 /// Free and unauthenticated: it says the process is up, and nothing more. It
 /// must never report on leases — a route that costs nothing to call must not
 /// leak what this provider is running.
@@ -196,6 +242,29 @@ async fn status_route(State(state): State<AppState>, body: Bytes) -> Response {
 
 async fn terminate_route(State(state): State<AppState>, body: Bytes) -> Response {
     match terminate(&state, &body).await {
+        Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
+        Err(e) => refuse(e),
+    }
+}
+
+/// `POST /operator/evict` on the OPERATOR router (`operator_router`), never
+/// on `router`. No signature to check: the caller already reached a loopback
+/// port that `router` never listens on.
+async fn evict_route(State(state): State<AppState>, body: Bytes) -> Response {
+    let request: EvictRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            return refuse(ErrorResponse::new(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "body is not {{ \"workload_id\", \"reason\", \"message\"? }}: {}",
+                    e
+                ),
+            ))
+        }
+    };
+    let message = request.message.as_deref().unwrap_or("");
+    match evict(&state, &request.workload_id, request.reason, message).await {
         Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
         Err(e) => refuse(e),
     }
