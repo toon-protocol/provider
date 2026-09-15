@@ -49,9 +49,18 @@ Environment only; there is no config file.
 | `TOON_DEPOSIT` | `10000000` | Channel deposit in the token's smallest unit (10 USDC at 6 dp). |
 | `TOON_TIMEOUT_MS` | `60000` | Per-packet timeout. |
 | `RELAY_WRITE_ROUTES` | `{}` | JSON map of relay READ url -> the PAID ILP destination that writes to it, e.g. `{"ws://relay:7100":"g.toon.relay"}`. |
+| `TOON_ENDPOINT_REWRITE` | `{}` | JSON map of advertised URL prefix -> the address this process can actually reach it at. |
 
 `RELAY_WRITE_ROUTES` is what keeps the ephemeral lane out: a destination
 ending in `.ephemeral` is refused at startup by name.
+
+`TOON_ENDPOINT_REWRITE` exists because a client dials the endpoint a
+connector's **self-description advertises**, not the URL it was configured
+with — one free `GET /ilp` is the whole of bootstrapping. Normally those are
+the same node by the same name and this stays empty. It is not empty in the
+sandbox: the hub advertises `http://127.0.0.1:3200/ilp` so the host-run smokes
+can dial it, and a container on the compose network reaches the same node at
+`http://relay-connector:3000`.
 
 ## Why the provider knows relays by URL and this process knows them by route
 

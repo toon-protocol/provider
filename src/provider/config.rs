@@ -257,10 +257,11 @@ impl ProviderConfig {
                 .connector_seal_key
                 .strip_prefix("0x")
                 .unwrap_or(&self.connector_seal_key);
-            if digits.len() < 64
-                || !digits.len().is_multiple_of(2)
-                || !digits.chars().all(|c| c.is_ascii_hexdigit())
-            {
+            // `%` rather than `is_multiple_of`: the release image builds on
+            // the Rust in Dockerfile, where that method is still unstable.
+            #[allow(clippy::manual_is_multiple_of)]
+            let odd = digits.len() % 2 != 0;
+            if digits.len() < 64 || odd || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
                 bail!(
                     "connector_seal_key {:?} is not a public key in hex (at least 32 bytes, \
                      optionally 0x-prefixed) — copy it from the connector's /ilp identity",

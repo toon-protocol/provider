@@ -35,6 +35,28 @@ const CHANNEL_STORE = process.env.TOON_CHANNEL_STORE ?? '/var/lib/toon-publisher
 const DEPOSIT = BigInt(process.env.TOON_DEPOSIT ?? '10000000'); // 10 USDC at 6dp
 const TIMEOUT_MS = Number(process.env.TOON_TIMEOUT_MS ?? 60_000);
 
+// A connector's self-description advertises the endpoint a client should dial,
+// and the client dials THAT, not the URL it was configured with — one free GET
+// is the whole of bootstrapping. When the advertised address is one this
+// process cannot reach, this rewrites it. That is a deployment fact, not a
+// protocol one: the sandbox's hub advertises `http://127.0.0.1:3200/ilp`
+// because its smoke tests run on the host, and a container on the compose
+// network reaches the same node at `http://relay-connector:3000`.
+//   TOON_ENDPOINT_REWRITE='{"http://127.0.0.1:3200":"http://relay-connector:3000"}'
+const ENDPOINT_REWRITE = Object.entries(JSON.parse(process.env.TOON_ENDPOINT_REWRITE ?? '{}'));
+
+/** `fetch`, with every advertised prefix in ENDPOINT_REWRITE swapped. */
+const rewritingFetch = (input, init) => {
+  let url = typeof input === 'string' ? input : input?.url ?? String(input);
+  for (const [from, to] of ENDPOINT_REWRITE) {
+    if (url.startsWith(from)) {
+      url = to + url.slice(from.length);
+      break;
+    }
+  }
+  return fetch(url, init);
+};
+
 // Relay READ url -> the paid ILP destination that writes to it. The provider
 // knows relays by the URL it publishes and a tenant reads; only this process
 // needs to know what buying a write to one costs and where to buy it.
@@ -71,6 +93,11 @@ async function client() {
         channelStore: CHANNEL_STORE,
         deposit: DEPOSIT,
         timeoutMs: TIMEOUT_MS,
+        // One-shot and stateless, which is what publishing is: a handful of
+        // packets a minute, already serialized below. BTP's ordered socket
+        // buys nothing here and would bypass the endpoint rewrite.
+        transport: 'http',
+        fetch: rewritingFetch,
       });
       const opened = await c.channel.open({ deposit: DEPOSIT });
       console.log(
