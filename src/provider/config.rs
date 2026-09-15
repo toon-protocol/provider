@@ -71,10 +71,15 @@ pub struct ProviderConfig {
 impl ProviderConfig {
     /// Host port forwarded to a workload's SSH. Derived rather than stored, so
     /// every answer that names a port for a given id names the same one.
+    ///
+    /// The offset is computed in `u32` and saturated: narrowing it first would
+    /// let an id far above the range start wrap to a low offset and hand two
+    /// leases the same port.
     pub fn ssh_host_port(&self, id: u32) -> u16 {
         match self.ssh_port_start {
             Some(start) => {
-                start.saturating_add(id.saturating_sub(self.workload_id_range_start) as u16)
+                let offset = id.saturating_sub(self.workload_id_range_start);
+                u16::try_from(u32::from(start).saturating_add(offset)).unwrap_or(u16::MAX)
             }
             None => 30000 + (id % 10000) as u16,
         }
@@ -178,6 +183,19 @@ nostr_private_key = "nsec1example"
         assert_eq!(cfg.ssh_host_port(1000), 40000);
         assert_eq!(cfg.ssh_host_port(1007), 40007);
         assert_eq!(cfg.ssh_host_port(1007), cfg.ssh_host_port(1007));
+    }
+
+    #[test]
+    fn ssh_host_port_never_wraps_for_an_id_far_above_the_range() {
+        // Narrowing the offset to u16 before adding would wrap 1000 + 65536
+        // back to `start`, handing two leases the same forward.
+        let cfg = ProviderConfig {
+            ssh_port_start: Some(40000),
+            workload_id_range_start: 1000,
+            ..ProviderConfig::default()
+        };
+        assert_eq!(cfg.ssh_host_port(1000 + 65_536), u16::MAX);
+        assert_ne!(cfg.ssh_host_port(1000 + 65_536), cfg.ssh_host_port(1000));
     }
 
     #[test]

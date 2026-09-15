@@ -10,6 +10,11 @@
 //! in provider config files — but never fuzzy. A near-miss like `nested` does
 //! not grant `nesting`: a typo should cost the provider work, not hand out a
 //! capability it did not mean to.
+//!
+//! Nothing calls this yet: the listing that grants capabilities and the spawn
+//! that asks for them both land in a later ticket. It is kept, rather than
+//! deleted and rewritten, because the grant-and-check pair is the whole point.
+#![allow(dead_code)]
 
 /// Whether `capabilities` advertises `wanted`.
 pub fn advertises<S: AsRef<str>>(capabilities: &[S], wanted: &str) -> bool {
@@ -31,8 +36,9 @@ pub fn missing<S: AsRef<str>>(capabilities: &[S], wanted: &[String]) -> Vec<Stri
         .collect()
 }
 
-/// Split a comma-separated `--requires` value. Empty entries are dropped, so
-/// `--requires ""` is "no requirements" rather than a requirement named "".
+/// Split a comma-separated capability list, as a config file or a request
+/// carries one. Empty entries are dropped, so `""` is "no capabilities" rather
+/// than one capability named "".
 pub fn parse_list(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(str::trim)

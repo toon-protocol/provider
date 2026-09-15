@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 description = "Sell leases on workloads over the TOON Network"
 license = "Apache-2.0"
-repository = "https://github.com/toon-protocol/TOON_Network"
 readme = "README.md"
 keywords = ["toon", "compute", "marketplace", "nostr", "lease"]
 categories = ["network-programming"]
@@ -33,7 +32,6 @@ nostr-sdk = "0.43"
 # HTTP app, behind the provider's own TOON connector.
 axum = "0.7"
 
-chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
