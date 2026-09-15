@@ -45,6 +45,15 @@ impl FakeBackend {
             .unwrap_or(&ContainerStatus::Absent)
     }
 
+    /// Pretend a workload is already running, as it would be after a provider
+    /// restart. Records no call: nothing asked for it in this process.
+    pub fn seed_running(&self, id: u32) {
+        self.containers
+            .lock()
+            .unwrap()
+            .insert(id, ContainerStatus::Running);
+    }
+
     fn record(&self, call: BackendCall) {
         self.calls.lock().unwrap().push(call);
     }
