@@ -151,7 +151,12 @@ restart.
    routes exist to be paid; the provider so it serves them and republishes
    the Listing.
 
-From that moment:
+4. **Retire v1.** Keep running `toon-provider routes`. Once v1's last lease
+   has ended, the command stops printing its two rows. Delete the v1
+   `[[listings]]` entry, update the connector's `[[routes]]` block from the
+   new output, and restart both again.
+
+What the switch changes, from step 3 onwards:
 
 - **v2 is the Listing.** The Listing event is addressable on `d = basic`, so
   the republished event *replaces* the old one — same `d`, `version: 2`, new
@@ -167,11 +172,6 @@ From that moment:
   so is extending a v2 lease on v1's route.
 - **Capacity is shared.** `capacity` is per listing *name*, across versions,
   and Liveness publishes one `available` figure per name.
-
-4. **Retire v1.** Keep running `toon-provider routes`. Once v1's last lease
-   has ended, the command stops printing its two rows. Delete the v1
-   `[[listings]]` entry, update the connector's `[[routes]]` block from the
-   new output, and restart both again.
 
 In the sandbox this is the same edit in `infra/sandbox/conf/provider.toml`
 plus the regenerated rows in `conf/connector-provider.toml` (and
