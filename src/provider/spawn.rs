@@ -3,8 +3,9 @@
 //
 // Validation runs in the spec's order and refuses with the FIRST failing
 // code: (1) the Lease Request — signature, addressee, freshness, replay;
-// (2) the listing version and whether the volume and ports fit it; (3) the
-// role; (4) the workload id; (5) the image; (6) capacity. Then the workload
+// (2) the listing version — it must exist AND be the one on sale
+// (`ProviderConfig::sellable_listing`, shared with `availability`) — and
+// whether the volume and ports fit it; (3) the role; (4) the workload id; (5) the image; (6) capacity. Then the workload
 // is started. A refusal on this route is still billed (ADR 0003), so the
 // order is the whole of what a tenant can rely on: the first reason is the
 // one reported.
@@ -56,13 +57,7 @@ pub async fn spawn(
     // ── 2. the listing version, and the fit ─────────────────────────────
     let listing = state
         .config
-        .listing(listing_name, version)
-        .ok_or_else(|| {
-            ErrorResponse::new(
-                ErrorCode::WrongListingVersion,
-                format!("this provider sells no {} v{}", listing_name, version),
-            )
-        })?
+        .sellable_listing(listing_name, version)?
         .clone();
     if let Some(volume) = content.volume_gb {
         if volume > listing.resources.storage_gb {

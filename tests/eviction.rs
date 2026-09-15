@@ -258,7 +258,7 @@ async fn a_relay_set_reached_only_in_part_still_ends_the_lease() {
 #[tokio::test]
 async fn the_evict_endpoint_is_not_in_the_connector_route_table() {
     let h = harness().await;
-    let rows = toon_provider::provider::route_table(&h.service.app_state().config);
+    let rows = toon_provider::provider::route_table(&h.service.app_state().config, &[]);
     assert!(
         rows.iter().all(|r| !r.prefix.contains("evict")),
         "the operator surface must never appear in the connector's route table: {rows:?}"

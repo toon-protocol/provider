@@ -97,7 +97,12 @@ impl ProviderService {
             )
             .await;
 
-        for listing in &state.config.listings {
+        // Exactly one Listing per NAME, the version on sale. The event is
+        // addressable on `d = <listing name>` (spec §4.2), so a new version
+        // REPLACES the previous Listing on the relay rather than adding one;
+        // publishing a retired version beside it would be a race to be last
+        // written, and half the directory would read the old price.
+        for listing in state.config.listings_on_sale() {
             let what = format!("Listing {} v{}", listing.name, listing.version);
             let event = listing_event(listing, &state.config, &state.keys, now)?;
             landed &= state.publish_one(&what, event).await;

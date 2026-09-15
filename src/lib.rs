@@ -20,6 +20,7 @@ pub use clock::{system_clock, Clock, SystemClock};
 pub use compute::{ComputeBackend, ContainerConfig, ContainerStatus, NodeStatus, PortMapping};
 pub use directory::{ConnectorDirectory, Directory, NullDirectory, PublishReport};
 pub use docker::DockerBackend;
+pub use provider::persisted_leases;
 pub use provider::{
     load_config, render_routes, BackendKind, LeaseEnd, LeaseRecord, LeaseState, Listing,
     ProviderConfig, ProviderService, SWEEP_INTERVAL_SECS,
