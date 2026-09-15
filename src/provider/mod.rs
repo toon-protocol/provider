@@ -158,11 +158,9 @@ impl ProviderService {
             }
             // After the restore above, so the first Liveness counts the
             // leases that survived the restart rather than announcing an
-            // empty provider.
-            result = self.directory_loop() => {
-                tracing::error!("directory publication exited: {:?}", result);
-                result
-            }
+            // empty provider. It never returns: nothing about being
+            // advertised is worth stranding a paid workload for.
+            never = self.directory_loop() => never
         }
     }
 }

@@ -397,9 +397,44 @@ async fn a_relay_that_refuses_a_write_does_not_stop_the_provider() {
 }
 
 #[tokio::test]
+async fn a_relay_set_reached_only_in_part_asks_to_be_retried() {
+    // Spec §4: a provider publishes to EVERY relay in its Relay Set. Three of
+    // four is not finished.
+    let h = harness();
+    h.directory.relay_always_refuses("wss://relay-two.example");
+
+    assert!(!h.service.publish_directory().await.unwrap());
+    assert_eq!(h.directory.of_kind(K_PROFILE).len(), 1, "it still went out");
+}
+
+#[tokio::test]
 async fn a_publication_every_relay_took_is_not_retried() {
     let h = harness();
     assert!(h.service.publish_directory().await.unwrap());
+}
+
+// ── a config that would publish nothing usable ──────────────────────────────
+
+#[tokio::test]
+async fn a_provider_that_publishes_must_name_a_sealing_key_and_a_settlement() {
+    // ADR 0011: a tenant seals only to the key the Profile pins. A Profile
+    // that pins nothing cannot be acted on, so the config is refused at load
+    // rather than published.
+    for break_it in [
+        |c: &mut ProviderConfig| c.connector_seal_key = String::new(),
+        |c: &mut ProviderConfig| c.connector_url = String::new(),
+        |c: &mut ProviderConfig| c.settlement = Vec::new(),
+        |c: &mut ProviderConfig| c.relay_set = Vec::new(),
+    ] {
+        let mut cfg = config(
+            vec![listing("basic", 1, 4)],
+            &Keys::generate().secret_key().to_secret_hex(),
+            "/tmp/unused-leases.json".to_string(),
+        );
+        cfg.publish_url = Some("http://publisher:8081/publish".to_string());
+        break_it(&mut cfg);
+        assert!(cfg.validate().is_err());
+    }
 }
 
 // ── reading Liveness back ───────────────────────────────────────────────────

@@ -185,6 +185,9 @@ pub struct FakeDirectory {
     /// When set, the next publish fails with this message — a relay that is
     /// down, or a paid packet that was refused.
     fail_next_publish: Mutex<Option<String>>,
+    /// When set, every publish is recorded but reports this relay as having
+    /// refused — a Relay Set reached only in part.
+    relay_always_refuses: Mutex<Option<String>>,
 }
 
 impl FakeDirectory {
@@ -212,6 +215,12 @@ impl FakeDirectory {
     pub fn fail_next_publish(&self, why: &str) {
         *self.fail_next_publish.lock().unwrap() = Some(why.to_string());
     }
+
+    /// One relay of the Relay Set refuses every write from now on, while the
+    /// rest take it.
+    pub fn relay_always_refuses(&self, relay: &str) {
+        *self.relay_always_refuses.lock().unwrap() = Some(relay.to_string());
+    }
 }
 
 #[async_trait]
@@ -221,10 +230,14 @@ impl Directory for FakeDirectory {
             anyhow::bail!("{}", why);
         }
         self.published.lock().unwrap().push(event);
-        Ok(PublishReport {
+        let mut report = PublishReport {
             accepted: vec!["wss://relay.example".to_string()],
             failed: Default::default(),
-        })
+        };
+        if let Some(relay) = self.relay_always_refuses.lock().unwrap().clone() {
+            report.failed.insert(relay, "relay refused".to_string());
+        }
+        Ok(report)
     }
 
     async fn query_liveness(

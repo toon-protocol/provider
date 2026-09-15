@@ -31,6 +31,7 @@ use crate::nostr::kinds::K_LIVENESS;
 /// The caller logs the failures and carries on (a provider that crashed
 /// because one relay was down would take its paid workloads with it).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublishReport {
     /// Relay URLs that stored the event.
     #[serde(default)]
@@ -41,9 +42,15 @@ pub struct PublishReport {
 }
 
 impl PublishReport {
-    /// True when no relay in the Relay Set took the event.
-    pub fn is_empty(&self) -> bool {
-        self.accepted.is_empty()
+    /// True when no relay refused. Spec §4 is "to EVERY relay in its Relay
+    /// Set", so a publication that reached three relays of four is not
+    /// finished and the loop tries again — reaching some is not reaching all.
+    ///
+    /// It asks about the failures rather than counting the successes so that
+    /// a Directory which attempted nothing (`NullDirectory`, a provider with
+    /// no publisher) is finished rather than retried forever.
+    pub fn reached_every_relay(&self) -> bool {
+        self.failed.is_empty()
     }
 
     /// One line for the log: what went out and what did not.
@@ -105,6 +112,7 @@ impl Directory for NullDirectory {
 
 /// What `ConnectorDirectory` hands the directory publisher.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublishRequest {
     pub event: Event,
     /// The Relay Set, by read URL. The publisher maps each to that relay's
@@ -112,21 +120,33 @@ pub struct PublishRequest {
     pub relays: Vec<String>,
 }
 
-/// Publishes through the provider's own TOON connector, on the PAID relay
-/// route (ADR 0007) — never on the free ephemeral lane, whose rate limit is
-/// keyed by remote address and therefore shared by every provider behind one
-/// connector.
+/// Publishes on the PAID relay route (ADR 0007) — never on the free ephemeral
+/// lane, whose rate limit is keyed by remote address and is therefore shared
+/// by every provider behind one connector.
 ///
 /// The paying is delegated to a sidecar, the **directory publisher**
 /// (`tools/publisher`), reached at `publish_url`. That split is deliberate
 /// and is the whole of this milestone's decision: paying a TOON route means
 /// opening a payment channel on Solana or EVM, signing a balance proof per
-/// packet and sealing an ILP prepare to the far connector's key. There is one
-/// proven implementation of all of that, `@toon-protocol/client`, and it is
-/// not a Rust crate. Re-deriving it here would put the marketplace's money on
-/// a second, unproven payer. So the provider states WHAT to publish and the
-/// publisher decides HOW it is paid for; this type is the boundary, and it is
-/// the only thing that has to change if a Rust payer ever exists.
+/// packet and sealing an ILP prepare to the terminating connector's key.
+/// There is one proven implementation of all of that, `@toon-protocol/client`,
+/// and it is not a Rust crate. Re-deriving it here would put the
+/// marketplace's money on a second, unproven payer. So the provider states
+/// WHAT to publish and the publisher decides HOW it is paid for; this type is
+/// the boundary, and it is the only thing that changes if a Rust payer ever
+/// exists.
+///
+/// **Whose money pays, precisely.** The publisher is a TOON CLIENT with its
+/// own payment channel — it is not the provider's own connector originating a
+/// packet. A provider connector serves its routes and is PAID on them; making
+/// it also pay outward needs a channel in the other direction and an
+/// originating write on its operator surface (a signed RFC 9421 request
+/// carrying an OER ILP prepare, sealed to the relay's connector). That is a
+/// second money path for the same events and it is not what this milestone
+/// buys. What the ticket requires — the paid relay route, never the ephemeral
+/// lane — this shape gives; what it does not give is one identity paying for
+/// everything a provider does. A later milestone may collapse the two, and
+/// only this type changes when it does.
 ///
 /// Reads stay in-process: `query_liveness` is a free NIP-01 REQ.
 pub struct ConnectorDirectory {

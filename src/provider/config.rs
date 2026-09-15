@@ -246,6 +246,27 @@ impl ProviderConfig {
         if self.liveness_cadence_s == 0 {
             bail!("liveness_cadence_s must be positive: it is a publishing interval");
         }
+        // A provider that publishes must publish something a tenant can act
+        // on. These are the Profile fields spec §4.1 does not mark optional,
+        // and an empty one is worse than an absent directory: a Listing whose
+        // Profile names no sealing key cannot be sealed to at all (ADR 0011),
+        // and one naming no settlement cannot be paid.
+        if self.publish_url.is_some() {
+            for (what, empty) in [
+                ("connector_url", self.connector_url.is_empty()),
+                ("connector_seal_key", self.connector_seal_key.is_empty()),
+                ("relay_set", self.relay_set.is_empty()),
+                ("settlement", self.settlement.is_empty()),
+            ] {
+                if empty {
+                    bail!(
+                        "publish_url is set, so {} must be too: it is a Provider Profile \
+                         field a tenant needs to reach and pay this provider (spec §4.1)",
+                        what
+                    );
+                }
+            }
+        }
         // Empty means "not published yet"; anything else is pinned by a
         // tenant and sealed to (ADR 0011), so a typo must fail at load rather
         // than as an unopenable seal. The length is NOT fixed here: a

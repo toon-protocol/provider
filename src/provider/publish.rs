@@ -9,18 +9,68 @@
 // describes the moment, so it goes out every `liveness_cadence_s` with the
 // availability of that instant.
 //
-// Nothing here may take the provider down. A relay that refuses a write, a
-// publisher that is not up yet, a paid packet that times out: each is logged
-// and the loop carries on, because the leases already paid for are running
-// underneath it.
+// No failure of the DIRECTORY may take the provider down. A relay that
+// refuses a write, a publisher that is not up yet, a paid packet that times
+// out: each is logged and the loop carries on, because the leases already
+// paid for are running underneath it. The one thing that does stop the loop
+// is an event that cannot be BUILT — a config the provider should not have
+// started with, and one no amount of retrying fixes.
 
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use super::ProviderService;
 use crate::nostr::directory_events::{listing_event, liveness_event, profile_event};
+use crate::provider_http::AppState;
+
+impl AppState {
+    /// Publish one event, and say whether any relay of the Relay Set took it.
+    ///
+    /// `what` names the event in the log, because the caller is a loop and
+    /// "published" on its own says nothing. A failure is reported, never
+    /// raised: a provider whose Profile did not land is not purchasable — a
+    /// Listing without its Profile is refused by tenants (ADR 0002) — but its
+    /// running leases still are.
+    async fn publish_one(&self, what: &str, event: nostr_sdk::Event) -> bool {
+        match self.directory.publish(event).await {
+            Ok(report) => {
+                info!("{what} published: {}", report.summary());
+                report.reached_every_relay()
+            }
+            Err(e) => {
+                warn!("{what} was not published: {e:#}");
+                false
+            }
+        }
+    }
+
+    /// How many leases of each listing could start right now: the tier's
+    /// declared capacity minus its live leases, across every version of it.
+    ///
+    /// Keyed by listing NAME, not by name and version, because capacity is a
+    /// slice of hardware and every version of a tier sells the same slice —
+    /// which is exactly what `ProviderConfig::capacity_of` answers and what
+    /// `validate` enforces the agreement of.
+    pub async fn available(&self) -> BTreeMap<String, u32> {
+        let leases = self.leases.lock().await;
+
+        let mut available = BTreeMap::new();
+        for listing in &self.config.listings {
+            let live = leases
+                .values()
+                .filter(|l| l.state.is_live() && l.listing == listing.name)
+                .count();
+            let live = u32::try_from(live).unwrap_or(u32::MAX);
+            available.insert(
+                listing.name.clone(),
+                self.config.capacity_of(&listing.name).saturating_sub(live),
+            );
+        }
+        available
+    }
+}
 
 impl ProviderService {
     /// Publish the Provider Profile and every Listing, and say whether every
@@ -33,47 +83,21 @@ impl ProviderService {
     pub async fn publish_directory(&self) -> Result<bool> {
         let state = &self.state;
         let now = state.clock.now();
-        let mut complete = true;
 
-        let profile = profile_event(&state.config, &state.keys, now)?;
-        match state.directory.publish(profile).await {
-            Ok(report) => {
-                complete &= !report.is_empty();
-                info!("Provider Profile published: {}", report.summary());
-            }
-            // A provider whose Profile did not land is not purchasable — a
-            // Listing without its Profile is refused by tenants (ADR 0002) —
-            // but its running leases still are, so this warns rather than
-            // returning.
-            Err(e) => {
-                complete = false;
-                warn!("Provider Profile was not published: {e:#}");
-            }
-        }
+        let mut landed = state
+            .publish_one(
+                "Provider Profile",
+                profile_event(&state.config, &state.keys, now)?,
+            )
+            .await;
 
         for listing in &state.config.listings {
+            let what = format!("Listing {} v{}", listing.name, listing.version);
             let event = listing_event(listing, &state.config, &state.keys, now)?;
-            match state.directory.publish(event).await {
-                Ok(report) => {
-                    complete &= !report.is_empty();
-                    info!(
-                        "Listing {} v{} published: {}",
-                        listing.name,
-                        listing.version,
-                        report.summary()
-                    );
-                }
-                Err(e) => {
-                    complete = false;
-                    warn!(
-                        "Listing {} v{} was not published: {e:#}",
-                        listing.name, listing.version
-                    );
-                }
-            }
+            landed &= state.publish_one(&what, event).await;
         }
 
-        Ok(complete)
+        Ok(landed)
     }
 
     /// Publish one Liveness event for the instant `now`. Public so a test can
@@ -81,58 +105,49 @@ impl ProviderService {
     pub async fn publish_liveness(&self, now: u64) -> Result<()> {
         let state = &self.state;
         let event = liveness_event(
-            self.available().await,
+            state.available().await,
             state.config.liveness_cadence_s,
             &state.keys,
             now,
         )?;
-
-        match state.directory.publish(event).await {
-            Ok(report) => info!("Liveness published: {}", report.summary()),
-            Err(e) => warn!("Liveness was not published: {e:#}"),
-        }
+        state.publish_one("Liveness", event).await;
         Ok(())
     }
 
-    /// How many leases of each listing could start right now: the tier's
-    /// declared capacity minus its live leases, across every version of it.
-    ///
-    /// Keyed by listing NAME, not by name and version, because capacity is a
-    /// slice of hardware and every version of a tier sells the same slice
-    /// (`ProviderConfig::validate` enforces the agreement).
-    pub async fn available(&self) -> BTreeMap<String, u32> {
-        let leases = self.state.leases.lock().await;
-
-        let mut available = BTreeMap::new();
-        for listing in &self.state.config.listings {
-            if available.contains_key(&listing.name) {
-                continue;
-            }
-            let live = leases
-                .values()
-                .filter(|l| l.state.is_live() && l.listing == listing.name)
-                .count();
-            let live = u32::try_from(live).unwrap_or(u32::MAX);
-            available.insert(listing.name.clone(), listing.capacity.saturating_sub(live));
-        }
-        available
-    }
-
     /// Keep this provider in the directory, forever: the Profile and the
-    /// Listings until they land, then one Liveness per cadence.
-    pub(super) async fn directory_loop(&self) -> Result<()> {
+    /// Listings until every relay has them, then one Liveness per cadence.
+    ///
+    /// It never returns. Nothing about the directory is worth stopping a
+    /// provider for — the sweep and the paid routes are running beside this
+    /// loop, and a provider that exited because it could not be advertised
+    /// would strand the workloads it has already been paid for.
+    pub(super) async fn directory_loop(&self) -> ! {
         let cadence = tokio::time::Duration::from_secs(self.state.config.liveness_cadence_s.max(1));
-        let mut directory_published = false;
 
+        // An interval rather than sleep-after-publish: publishing takes as
+        // long as a paid packet takes, and adding that to every wait would
+        // walk the cadence out past the expiry it is measured against
+        // (ADR 0007). `Delay` rather than `Burst` so a slow publication
+        // delays the next tick instead of firing a backlog of them at once.
+        let mut ticker = tokio::time::interval(cadence);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        let mut directory_published = false;
         loop {
-            // Publish first, then wait: the startup publication IS the first
-            // cadence, and a provider that waited one out would be invisible
-            // for its whole cadence after every restart.
+            // The first tick is immediate: the startup publication IS the
+            // first cadence, and a provider that waited one out would be
+            // invisible for a whole cadence after every restart.
+            ticker.tick().await;
+
             if !directory_published {
-                directory_published = self.publish_directory().await?;
+                match self.publish_directory().await {
+                    Ok(landed) => directory_published = landed,
+                    Err(e) => error!("the Provider Profile or a Listing could not be built: {e:#}"),
+                }
             }
-            self.publish_liveness(self.state.clock.now()).await?;
-            tokio::time::sleep(cadence).await;
+            if let Err(e) = self.publish_liveness(self.state.clock.now()).await {
+                error!("Liveness could not be built: {e:#}");
+            }
         }
     }
 }
