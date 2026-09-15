@@ -39,8 +39,8 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub relay_set: Vec<String>,
 
-    /// Privileges beyond an ordinary workload that this provider is willing to
-    /// grant, e.g. `docker`, `nesting`.
+    /// Capabilities this provider is willing to grant — privileges beyond an
+    /// ordinary workload, e.g. `docker`, `nesting`.
     #[serde(default)]
     pub capabilities: Vec<String>,
 
@@ -61,7 +61,7 @@ pub struct ProviderConfig {
     pub ssh_port_start: Option<u16>,
 
     /// Where the lease table is mirrored to disk. It is the only record that a
-    /// lease exists — the backend knows a container is running but not whose it
+    /// lease exists — the backend knows a workload is running but not whose it
     /// is or when it expires — so held purely in memory, a restart would strand
     /// every paid workload.
     #[serde(default = "default_lease_state_path")]
@@ -121,12 +121,6 @@ pub fn load_config(path: &str) -> Result<ProviderConfig> {
     toml::from_str(&content).with_context(|| format!("parse provider config at {}", path))
 }
 
-pub fn save_config(path: &str, config: &ProviderConfig) -> Result<()> {
-    let content = toml::to_string_pretty(config).context("encode provider config")?;
-    std::fs::write(path, content).with_context(|| format!("write provider config to {}", path))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,7 +159,7 @@ nostr_private_key = "nsec1example"
             ..ProviderConfig::default()
         };
 
-        save_config(path.to_str().unwrap(), &cfg).unwrap();
+        std::fs::write(&path, toml::to_string_pretty(&cfg).unwrap()).unwrap();
         let back = load_config(path.to_str().unwrap()).unwrap();
 
         assert_eq!(back.provider_name, "Round Trip");

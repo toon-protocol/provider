@@ -21,7 +21,7 @@ pub(crate) const STANDBY_SILENCE_SECS: u64 = 180;
 /// best-effort: a brief two-live window is an accepted trade-off.
 pub(crate) const STANDBY_TAKEOVER_DELAY_SECS: u64 = 30;
 
-/// A paid-for, acknowledged warm-standby reservation. No container exists yet;
+/// A paid-for, acknowledged warm-standby reservation. No workload exists yet;
 /// the standby is armed and waiting for the primary to go silent.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct StandbySlot {

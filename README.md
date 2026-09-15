@@ -4,7 +4,7 @@ Sell leases on workloads over the [TOON Network](https://github.com/toon-protoco
 
 A **provider** runs this on hardware it controls. It publishes what it sells to
 its relays, and a **tenant** pays a listing's route over a TOON payment channel
-to spawn a container and to buy each further **Lease Interval**. When the
+to spawn a workload and to buy each further **Lease Interval**. When the
 payments stop the lease expires and the workload is destroyed.
 
 The app is an ordinary HTTP app that runs behind the provider's own TOON

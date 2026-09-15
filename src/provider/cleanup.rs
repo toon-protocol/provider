@@ -37,12 +37,10 @@ impl ProviderService {
         for id in expired {
             info!("lease {} expired; destroying its workload", id);
 
-            if leases.remove(&id).is_none() {
-                continue;
-            }
+            leases.remove(&id);
 
             // Delete unconditionally: the lease is already out of the table, so
-            // a failed stop that skipped the delete would leak the container
+            // a failed stop that skipped the delete would leak the workload
             // and its id forever, with no retry.
             if let Err(e) = self.backend.stop_container(id).await {
                 warn!("stop failed for {} ({}), deleting anyway", id, e);
@@ -53,7 +51,7 @@ impl ProviderService {
             }
 
             // Persist per lease, not once per sweep: a crash midway through
-            // would otherwise resurrect entries whose containers are gone.
+            // would otherwise resurrect entries whose workloads are gone.
             persist_leases(&leases, &self.config.lease_state_path);
         }
     }

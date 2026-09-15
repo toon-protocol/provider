@@ -1,7 +1,7 @@
 // The lease table, mirrored to disk.
 //
 // A running lease must survive a provider restart: the backend knows a
-// container exists but not whose lease it is or when that lease expires, so
+// workload exists but not whose lease it is or when that lease expires, so
 // losing this file strands a paid workload or forgets who it belongs to.
 
 use std::collections::HashMap;
@@ -18,7 +18,8 @@ use tracing::{error, warn};
 /// resulting `expires_at` is worth keeping.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LeaseRecord {
-    /// Backend workload id. Keys the lease table and names the container.
+    /// Backend workload id. Keys the lease table and names the workload on
+    /// the host.
     pub id: u32,
 
     /// The tenant-chosen workload id from the spawn, when there is one.
@@ -85,7 +86,7 @@ pub(crate) fn load_leases(path: &str) -> HashMap<u32, LeaseRecord> {
         Err(e) => {
             error!(
                 "lease table at {} is unreadable ({}); starting with an empty table. \
-                 Containers it referenced will need manual cleanup.",
+                 Workloads it referenced will need manual cleanup.",
                 path, e
             );
             HashMap::new()

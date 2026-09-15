@@ -31,6 +31,61 @@ impl DockerBackend {
         }
     }
 
+    /// The full `docker` argv for a workload. Separate from `create_container`
+    /// so a unit test can assert on the real argv without a daemon.
+    fn run_args(&self, config: &ContainerConfig) -> Vec<String> {
+        let mut args: Vec<String> = vec![
+            "run".into(),
+            "-d".into(),
+            "--name".into(),
+            container_name(config.id),
+            "--restart".into(),
+            "unless-stopped".into(),
+            "--cpus".into(),
+            config.cpu_cores.to_string(),
+            "--memory".into(),
+            format!("{}m", config.memory_mb),
+        ];
+
+        if let Some(net) = &self.network {
+            args.push("--network".into());
+            args.push(net.clone());
+        }
+
+        for port in &config.ports {
+            args.push("-p".into());
+            args.push(format!(
+                "{}:{}/{}",
+                port.host_port, port.container_port, port.protocol
+            ));
+        }
+
+        for (k, v) in &config.env {
+            args.push("-e".into());
+            args.push(format!("{}={}", k, v));
+        }
+
+        // Named per workload id, so two leases never share state and a
+        // re-spawn at the same id cannot inherit the last tenant's volume
+        // (`delete_container` removes it).
+        if let Some(path) = &config.data_path {
+            args.push("-v".into());
+            args.push(format!("{}-data:{}", container_name(config.id), path));
+        }
+
+        if let Some(entrypoint) = &config.entrypoint {
+            args.push("--entrypoint".into());
+            args.push(entrypoint.clone());
+        }
+
+        // The image separates the flags from the command: docker treats
+        // everything after it as the workload's argv.
+        args.push(config.image.clone());
+        args.extend(config.args.iter().cloned());
+
+        args
+    }
+
     async fn docker(&self, args: &[&str]) -> Result<std::process::Output> {
         Command::new("docker")
             .args(args)
@@ -78,55 +133,7 @@ impl ComputeBackend for DockerBackend {
     }
 
     async fn create_container(&self, config: &ContainerConfig) -> Result<String> {
-        let mut args: Vec<String> = vec![
-            "run".into(),
-            "-d".into(),
-            "--name".into(),
-            container_name(config.id),
-            "--restart".into(),
-            "unless-stopped".into(),
-            "--cpus".into(),
-            config.cpu_cores.to_string(),
-            "--memory".into(),
-            format!("{}m", config.memory_mb),
-        ];
-
-        if let Some(net) = &self.network {
-            args.push("--network".into());
-            args.push(net.clone());
-        }
-
-        for port in &config.ports {
-            args.push("-p".into());
-            args.push(format!(
-                "{}:{}/{}",
-                port.host_port, port.container_port, port.protocol
-            ));
-        }
-
-        for (k, v) in &config.env {
-            args.push("-e".into());
-            args.push(format!("{}={}", k, v));
-        }
-
-        // Named per workload id, so two leases never share state and a
-        // re-spawn at the same id cannot inherit the last tenant's volume
-        // (`delete_container` removes it).
-        if let Some(path) = &config.data_path {
-            args.push("-v".into());
-            args.push(format!("{}-data:{}", container_name(config.id), path));
-        }
-
-        if let Some(entrypoint) = &config.entrypoint {
-            args.push("--entrypoint".into());
-            args.push(entrypoint.clone());
-        }
-
-        // The image separates the flags from the command: docker treats
-        // everything after it as the container's argv.
-        args.push(config.image.clone());
-        args.extend(config.args.iter().cloned());
-
+        let args = self.run_args(config);
         let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let output = self.docker(&arg_refs).await?;
         if !output.status.success() {
@@ -216,9 +223,9 @@ mod tests {
     }
 
     #[test]
-    fn run_args_include_all_pieces() {
-        // Mirrors the argv construction in `create_container`; we can't shell
-        // out to docker from a unit test.
+    fn run_args_carry_every_piece_of_the_config() {
+        // Asserts on the real argv builder, so a change to `create_container`
+        // cannot silently pass. Shelling out to docker is `tests/docker_backend`.
         let cfg = ContainerConfig {
             id: 42,
             name: "toon-42".to_string(),
@@ -233,50 +240,49 @@ mod tests {
                 container_port: 7777,
                 protocol: "tcp".to_string(),
             }],
-            env: {
-                let mut m = std::collections::HashMap::new();
-                m.insert("FOO".to_string(), "bar".to_string());
-                m
-            },
-            entrypoint: None,
+            env: std::collections::HashMap::from([("FOO".to_string(), "bar".to_string())]),
+            entrypoint: Some("/bin/sh".to_string()),
             args: vec!["sleep".to_string(), "300".to_string()],
             data_path: Some("/var/data".to_string()),
         };
 
-        let mut args: Vec<String> = vec![
-            "run".into(),
-            "-d".into(),
-            "--name".into(),
-            container_name(cfg.id),
-            "--restart".into(),
-            "unless-stopped".into(),
-            "--cpus".into(),
-            cfg.cpu_cores.to_string(),
-            "--memory".into(),
-            format!("{}m", cfg.memory_mb),
-        ];
-        for port in &cfg.ports {
-            args.push("-p".into());
-            args.push(format!(
-                "{}:{}/{}",
-                port.host_port, port.container_port, port.protocol
-            ));
-        }
-        for (k, v) in &cfg.env {
-            args.push("-e".into());
-            args.push(format!("{}={}", k, v));
-        }
-        args.push(cfg.image.clone());
-        args.extend(cfg.args.iter().cloned());
+        let args = DockerBackend::new().run_args(&cfg);
 
         assert!(args.contains(&"toon-42".to_string()));
         assert!(args.contains(&"17777:7777/tcp".to_string()));
         assert!(args.contains(&"FOO=bar".to_string()));
-        // The image separates flags from the container's argv.
+        assert!(args.contains(&"toon-42-data:/var/data".to_string()));
+        assert!(args.contains(&"256m".to_string()));
+
+        // Everything after the image is the workload's argv, so every flag —
+        // --entrypoint included — has to come before it.
         let image_at = args.iter().position(|a| a == "alpine:latest").unwrap();
         assert_eq!(
             &args[image_at + 1..],
             &["sleep".to_string(), "300".to_string()]
         );
+        assert!(args[..image_at].contains(&"--entrypoint".to_string()));
+    }
+
+    #[test]
+    fn a_stateless_workload_gets_no_volume() {
+        let cfg = ContainerConfig {
+            id: 7,
+            name: "toon-7".to_string(),
+            image: "alpine:latest".to_string(),
+            cpu_cores: 1,
+            memory_mb: 64,
+            storage_gb: 1,
+            ssh_key: None,
+            host_port: None,
+            ports: vec![],
+            env: std::collections::HashMap::new(),
+            entrypoint: None,
+            args: vec![],
+            data_path: None,
+        };
+        assert!(!DockerBackend::new()
+            .run_args(&cfg)
+            .contains(&"-v".to_string()));
     }
 }

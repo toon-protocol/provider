@@ -12,7 +12,7 @@ mod config;
 mod persistence;
 mod standby;
 
-pub use config::{load_config, save_config, BackendKind, ProviderConfig};
+pub use config::{load_config, BackendKind, ProviderConfig};
 pub use persistence::LeaseRecord;
 pub use standby::StandbySlot;
 
@@ -73,7 +73,7 @@ impl ProviderService {
 
     /// Reload leases from disk and reconcile them against the backend.
     ///
-    /// The backend is the authority on what exists: a container deleted while
+    /// The backend is the authority on what exists: a workload deleted while
     /// the provider was down would otherwise be tracked forever and
     /// re-announced as capacity that isn't there.
     pub async fn restore_leases(&self) {
@@ -93,7 +93,7 @@ impl ProviderService {
                     continue;
                 }
                 Err(e) => {
-                    // An unreachable backend must not be read as "the container
+                    // An unreachable backend must not be read as "the workload
                     // is gone". The expiry sweep deletes it at expiry anyway.
                     warn!(
                         "could not verify workload {} ({}); keeping it tracked",

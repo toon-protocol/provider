@@ -80,7 +80,7 @@ async fn a_lease_whose_workload_vanished_while_we_were_down_is_dropped() {
     let path = state_file(dir.path(), &[lease(LIVE, NOW + 600)]);
 
     // The backend is the authority on what exists: nothing was seeded, so the
-    // container is gone.
+    // workload is gone.
     let backend = FakeBackend::new();
     let provider = service(path.clone(), backend.clone());
     provider.restore_leases().await;

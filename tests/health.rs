@@ -62,6 +62,6 @@ async fn health_says_nothing_about_leases() {
 
 #[tokio::test]
 async fn an_unknown_route_is_404_not_a_panic() {
-    let (status, _) = get("/pods/spawn").await;
+    let (status, _) = get("/no-such-route").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }

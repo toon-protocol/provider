@@ -4,6 +4,10 @@
 // Docker is the only implementation in this milestone. The trait stays
 // backend-agnostic — ids, not Docker handles; `Result`, not exit codes — so an
 // LXD, Proxmox or KVM backend can return without touching its callers.
+//
+// This module deliberately says "container": it is the backend's own noun for
+// the object it creates and destroys. Everything above it — leases, tenants,
+// listings — speaks the glossary, and calls the same thing a workload.
 
 use std::collections::HashMap;
 

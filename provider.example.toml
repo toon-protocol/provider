@@ -16,7 +16,7 @@ nostr_private_key = "nsec1..."
 # The relays this provider publishes its Profile, Listings and Liveness to.
 relay_set = ["wss://relay.toon.network"]
 
-# Privileges beyond an ordinary workload that this provider grants.
+# Capabilities this provider grants: privileges beyond an ordinary workload.
 capabilities = ["docker"]
 
 # Where the HTTP app listens. Only this provider's TOON connector should be
