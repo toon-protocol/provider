@@ -105,7 +105,10 @@ one HTTP path here:
 `[[routes]]` rows, ready to paste into the connector's config. It prints two
 rows per **live** listing version — the version on sale, plus every retired
 version that still has a running lease — so it reads the lease table at
-`lease_state_path` (read-only) to find out which those are. Every answer
+`lease_state_path` (read-only) to find out which those are. Run it from the
+provider's own working directory, or make `lease_state_path` absolute:
+reading the wrong table would leave out the routes running leases extend on,
+and the command warns on stderr when it finds no table at all. Every answer
 is JSON; a refusal is `{ "error": "<code>", "message": "…" }` with a 4xx
 status and the spec's code, and on a paid route it is still billed.
 

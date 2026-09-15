@@ -37,6 +37,22 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Command::Routes) => {
+            // A retired listing version keeps its rows only while a lease is
+            // live on it, so reading the WRONG lease table silently drops the
+            // routes those leases extend on. `lease_state_path` is usually
+            // relative to the provider's working directory, and this command
+            // is run from wherever the operator happens to be — so say so
+            // rather than print a table that looks fine and is not. On
+            // stderr, so the rows on stdout still pipe into a config file.
+            let path = std::path::Path::new(&config.lease_state_path);
+            if !path.exists() {
+                eprintln!(
+                    "warning: no lease table at {} — the rows below assume this provider has \
+                     no running lease, so any retired listing version is left out. Run this \
+                     from the provider's working directory, or make lease_state_path absolute.",
+                    config.lease_state_path
+                );
+            }
             let leases = persisted_leases(&config.lease_state_path);
             print!("{}", render_routes(&config, &leases));
             Ok(())
