@@ -13,7 +13,7 @@ use std::collections::HashMap;
 
 use tracing::{error, info, warn};
 
-use super::config::{Listing, MAX_PORTS_PER_WORKLOAD};
+use super::config::{Listing, ProviderConfig, MAX_PORTS_PER_WORKLOAD};
 use super::image_policy;
 use super::persistence::{count_live, persist_leases, LeaseRecord, LeaseState};
 use crate::compute::{container_name, ContainerConfig, PortMapping};
@@ -30,6 +30,43 @@ pub const VOLUME_MOUNT_PATH: &str = "/data";
 
 fn invalid(message: impl Into<String>) -> ErrorResponse {
     ErrorResponse::new(ErrorCode::InvalidRequest, message)
+}
+
+/// Step 2 of the spec's spawn validation: the route's listing version exists
+/// AND is the one on sale.
+///
+/// Shared with `availability` so the free answer and the paid one cannot
+/// disagree (spec §9). The second half is ADR 0009: a price or resource
+/// change publishes a NEW version, and spec §4.2 says that Listing REPLACES
+/// the previous one — so the older versions are RETIRED and sell nothing.
+/// Their routes stay only so the leases already on them can be extended at
+/// the price those leases were sold at, whether or not any lease is still on
+/// them; a spawn there is refused `wrong_listing_version` either way, which
+/// is the one code a tenant can act on (pay the newest version's route).
+pub(super) fn listing_on_sale<'a>(
+    config: &'a ProviderConfig,
+    name: &str,
+    version: u32,
+) -> Result<&'a Listing, ErrorResponse> {
+    let listing = config.listing(name, version).ok_or_else(|| {
+        ErrorResponse::new(
+            ErrorCode::WrongListingVersion,
+            format!("this provider sells no {} v{}", name, version),
+        )
+    })?;
+    // The lookup above succeeded, so there is a newest version.
+    let latest = config.latest_version(name).unwrap_or(version);
+    if version != latest {
+        return Err(ErrorResponse::new(
+            ErrorCode::WrongListingVersion,
+            format!(
+                "{} v{} is retired and sells no new lease; it is sold as v{} now. \
+                 Its route stays only to extend the leases already on it.",
+                name, version, latest
+            ),
+        ));
+    }
+    Ok(listing)
 }
 
 /// Serve one spawn on `<addr>.<listing>.v<version>.spawn`.
@@ -54,16 +91,7 @@ pub async fn spawn(
     check_shape(&content)?;
 
     // ── 2. the listing version, and the fit ─────────────────────────────
-    let listing = state
-        .config
-        .listing(listing_name, version)
-        .ok_or_else(|| {
-            ErrorResponse::new(
-                ErrorCode::WrongListingVersion,
-                format!("this provider sells no {} v{}", listing_name, version),
-            )
-        })?
-        .clone();
+    let listing = listing_on_sale(&state.config, listing_name, version)?.clone();
     if let Some(volume) = content.volume_gb {
         if volume > listing.resources.storage_gb {
             return Err(invalid(format!(

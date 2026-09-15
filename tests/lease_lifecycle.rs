@@ -149,20 +149,27 @@ async fn an_expiry_the_sweep_has_not_reached_yet_still_refuses_an_extension() {
 #[tokio::test]
 async fn extending_on_another_listing_version_is_wrong_listing_version() {
     // ADR 0009: a lease keeps the price it started at, so an extension must
-    // be bought on the route the lease was spawned on.
+    // be bought on the route the lease was spawned on. v2 is the version on
+    // sale here, so the lease is bought there and v1 is the retired route it
+    // must not be extendable on.
     let h = harness_with(vec![listing("basic", 1, 2), listing("basic", 2, 2)]).await;
-    let lease = spawn_lease(&h, 1).await;
+    let content = spawn_content(1);
+    let (status, body) = post(
+        &h.app,
+        "/listings/basic/v2/spawn",
+        json!({ "request": RequestSpec::spawn(&h, &content).sign() }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    let expires_at = body["expires_at"].as_u64().unwrap();
 
-    let (status, body) = extend_on(&h, "/listings/basic/v2/extend", &lease.workload_id).await;
+    let (status, body) = extend_on(&h, "/listings/basic/v1/extend", &content.workload_id).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{}", body);
     assert_eq!(error_of(&body), "wrong_listing_version");
 
     // ...and the lease keeps the expiry it had.
-    let (_, body) = extend(&h, &lease.workload_id).await;
-    assert_eq!(
-        body["expires_at"].as_u64().unwrap(),
-        lease.expires_at + INTERVAL
-    );
+    let (_, body) = extend_on(&h, "/listings/basic/v2/extend", &content.workload_id).await;
+    assert_eq!(body["expires_at"].as_u64().unwrap(), expires_at + INTERVAL);
 }
 
 #[tokio::test]

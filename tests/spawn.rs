@@ -367,9 +367,25 @@ async fn a_full_listing_is_no_capacity() {
 
 #[tokio::test]
 async fn capacity_is_per_listing_name_across_versions() {
-    let h = harness_with(vec![listing("basic", 1, 1), listing("basic", 2, 1)]).await;
+    // The one slot is filled on v1, while v1 is still the version on sale.
+    // Then the price changes (a new version and a restart, ADR 0009) and v2
+    // is asked for the same hardware.
+    let h = harness_with(vec![listing("basic", 1, 1)]).await;
     let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
     assert_eq!(status, StatusCode::OK);
+
+    let h = restart(
+        vec![listing("basic", 1, 1), listing("basic", 2, 1)],
+        h.provider_key.clone(),
+        h.state_path.clone(),
+        h.backend.clone(),
+        h.clock.clone(),
+        common::stub_registry().await,
+        ImagePolicyConfig::default(),
+    )
+    .await;
+    h.service.restore_leases().await;
+
     let event = RequestSpec::spawn(&h, &spawn_content(2)).sign();
     let (_, body) = post(
         &h.app,

@@ -10,6 +10,7 @@
 
 use super::image_policy;
 use super::persistence::count_live;
+use super::spawn::listing_on_sale;
 use crate::nostr::wire::{AvailabilityRequest, AvailabilityResponse, ErrorCode, ErrorResponse};
 use crate::provider_http::AppState;
 
@@ -31,20 +32,12 @@ async fn check(state: &AppState, body: &[u8]) -> Result<(), ErrorResponse> {
         )
     })?;
 
-    // Step 2: the listing version exists. (Ports and volume have no home in
-    // this request shape, so there is nothing of step 2 left to check.)
-    let listing = state
-        .config
-        .listing(&request.listing, request.version)
-        .ok_or_else(|| {
-            ErrorResponse::new(
-                ErrorCode::WrongListingVersion,
-                format!(
-                    "this provider sells no {} v{}",
-                    request.listing, request.version
-                ),
-            )
-        })?;
+    // Step 2: the listing version exists and is on sale — a retired version
+    // starts no lease, so `would_run` there is `false` with the same
+    // `wrong_listing_version` a paid spawn would have bought. (Ports and
+    // volume have no home in this request shape, so there is nothing of
+    // step 2 left to check.)
+    let listing = listing_on_sale(&state.config, &request.listing, request.version)?;
 
     // Step 5: the same image policy a paid spawn applies.
     image_policy::check(
