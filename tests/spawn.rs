@@ -775,3 +775,19 @@ async fn a_spawned_lease_survives_a_restart() {
         vec![BackendCall::Stop(1000), BackendCall::Delete(1000)]
     );
 }
+
+#[tokio::test]
+async fn a_workload_that_vanished_keeps_its_id_until_its_lease_ends() {
+    // The daemon no longer has toon-1000, but its lease is still paid for:
+    // the next spawn must take the next id, not refuse, and not reuse 1000.
+    let h = harness();
+    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    assert_eq!(status, StatusCode::OK);
+    h.backend.vanish(1000);
+
+    h.clock.advance(1);
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(2)).sign()).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["access"]["ssh_port"], 40001, "the second id, 1001");
+    assert_eq!(h.backend.calls()[2], BackendCall::Create(1001));
+}

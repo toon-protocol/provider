@@ -117,21 +117,12 @@ pub async fn spawn(
                 format!("every {} slot is taken", listing.name),
             ));
         }
-        id = state
-            .backend
-            .find_available_id(
-                state.config.workload_id_range_start,
-                state.config.workload_id_range_end,
+        id = free_workload_id(state, &leases).await.ok_or_else(|| {
+            ErrorResponse::new(
+                ErrorCode::NoCapacity,
+                "no free workload id on this provider",
             )
-            .await
-            .ok()
-            .filter(|id| !leases.contains_key(id))
-            .ok_or_else(|| {
-                ErrorResponse::new(
-                    ErrorCode::NoCapacity,
-                    "no free workload id on this provider",
-                )
-            })?;
+        })?;
         ssh_port = state.config.ssh_host_port(id);
         ports = content
             .ports
@@ -215,6 +206,24 @@ pub async fn spawn(
             ))
         }
     }
+}
+
+/// The lowest workload id in range that neither the backend nor the lease
+/// table holds. Both are asked: the backend knows what runs, and the table
+/// knows what is still leased — a workload that vanished from the daemon
+/// keeps its id until its lease ends, or a re-spawn could land on a lease
+/// the sweep is about to reap.
+async fn free_workload_id(state: &AppState, leases: &HashMap<u32, LeaseRecord>) -> Option<u32> {
+    let end = state.config.workload_id_range_end;
+    let mut from = state.config.workload_id_range_start;
+    while from <= end {
+        let id = state.backend.find_available_id(from, end).await.ok()?;
+        if !leases.contains_key(&id) {
+            return Some(id);
+        }
+        from = id.checked_add(1)?;
+    }
+    None
 }
 
 fn mark_running(leases: &mut HashMap<u32, LeaseRecord>, id: u32, expires_at: u64) -> u64 {

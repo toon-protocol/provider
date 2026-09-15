@@ -66,6 +66,12 @@ impl FakeBackend {
             .insert(id, ContainerStatus::Running);
     }
 
+    /// The workload disappears from the daemon without the provider asking —
+    /// an operator's `docker rm`, a host reboot. Records no call.
+    pub fn vanish(&self, id: u32) {
+        self.containers.lock().unwrap().remove(&id);
+    }
+
     pub fn fail_next_create(&self, why: &str) {
         *self.fail_next_create.lock().unwrap() = Some(why.to_string());
     }
