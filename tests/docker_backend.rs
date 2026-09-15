@@ -78,8 +78,14 @@ async fn docker_backend_creates_starts_and_destroys_a_workload() {
     );
 
     // The id must come back to the pool once the lease ends.
-    let taken = backend.find_available_id(TEST_ID, TEST_ID + 1).await.unwrap();
-    assert_ne!(taken, TEST_ID, "a live workload's id must not be handed out");
+    let taken = backend
+        .find_available_id(TEST_ID, TEST_ID + 1)
+        .await
+        .unwrap();
+    assert_ne!(
+        taken, TEST_ID,
+        "a live workload's id must not be handed out"
+    );
 
     backend.delete_container(TEST_ID).await.expect("delete");
     assert_eq!(
@@ -88,7 +94,10 @@ async fn docker_backend_creates_starts_and_destroys_a_workload() {
         "an expired lease leaves no container behind"
     );
     assert_eq!(
-        backend.find_available_id(TEST_ID, TEST_ID + 1).await.unwrap(),
+        backend
+            .find_available_id(TEST_ID, TEST_ID + 1)
+            .await
+            .unwrap(),
         TEST_ID,
         "the destroyed workload's id is free again"
     );

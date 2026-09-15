@@ -95,7 +95,10 @@ impl ProviderService {
                 Err(e) => {
                     // An unreachable backend must not be read as "the container
                     // is gone". The expiry sweep deletes it at expiry anyway.
-                    warn!("could not verify workload {} ({}); keeping it tracked", id, e);
+                    warn!(
+                        "could not verify workload {} ({}); keeping it tracked",
+                        id, e
+                    );
                 }
                 Ok(_) => {}
             }

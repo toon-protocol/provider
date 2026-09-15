@@ -7,9 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use toon_provider::compute::{
-    ComputeBackend, ContainerConfig, ContainerStatus, NodeStatus,
-};
+use toon_provider::compute::{ComputeBackend, ContainerConfig, ContainerStatus, NodeStatus};
 
 /// One thing the provider asked the compute backend to do. Tests assert on this
 /// sequence rather than on the provider's internal state.

@@ -56,8 +56,5 @@ pub async fn serve(state: AppState, bind_addr: &str) -> Result<()> {
 /// must never report on leases — a route that costs nothing to call must not
 /// leak what this provider is running.
 async fn health() -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "status": "ok" })),
-    )
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" })))
 }

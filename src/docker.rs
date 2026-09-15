@@ -53,7 +53,14 @@ impl ComputeBackend for DockerBackend {
     async fn find_available_id(&self, range_start: u32, range_end: u32) -> Result<u32> {
         let name_filter = format!("name={}", WORKLOAD_NAME_PREFIX);
         let output = self
-            .docker(&["ps", "-a", "--format", "{{.Names}}", "--filter", &name_filter])
+            .docker(&[
+                "ps",
+                "-a",
+                "--format",
+                "{{.Names}}",
+                "--filter",
+                &name_filter,
+            ])
             .await?;
         let names = String::from_utf8_lossy(&output.stdout);
         let used: std::collections::HashSet<u32> =
@@ -267,6 +274,9 @@ mod tests {
         assert!(args.contains(&"FOO=bar".to_string()));
         // The image separates flags from the container's argv.
         let image_at = args.iter().position(|a| a == "alpine:latest").unwrap();
-        assert_eq!(&args[image_at + 1..], &["sleep".to_string(), "300".to_string()]);
+        assert_eq!(
+            &args[image_at + 1..],
+            &["sleep".to_string(), "300".to_string()]
+        );
     }
 }

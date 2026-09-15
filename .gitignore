@@ -1,18 +1,8 @@
 /target
-inventory.ini
 
-# Database files
-cashu.db
-*.db
+# Provider state and local config
+*.json.tmp
+/provider.toml
+/leases.json
 
-# Data directories
-data/
-
-# Environment files
-.env
-
-# Keep template files
-!*.env.template
-# Claude Code agent worktrees (local only)
-.claude/worktrees/
 .DS_Store

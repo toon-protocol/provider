@@ -116,8 +116,8 @@ impl Default for ProviderConfig {
 }
 
 pub fn load_config(path: &str) -> Result<ProviderConfig> {
-    let content =
-        std::fs::read_to_string(path).with_context(|| format!("read provider config at {}", path))?;
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("read provider config at {}", path))?;
     toml::from_str(&content).with_context(|| format!("parse provider config at {}", path))
 }
 

@@ -150,9 +150,7 @@ where
 
         // Sybil cap: scale the weight down so this tenant's total
         // contribution to this provider equals max_share.
-        let total = *per_tenant_total
-            .get(r.tenant_npub.as_str())
-            .unwrap_or(&0);
+        let total = *per_tenant_total.get(r.tenant_npub.as_str()).unwrap_or(&0);
         let same = *per_tenant_for_provider
             .get(r.tenant_npub.as_str())
             .unwrap_or(&0);
@@ -221,10 +219,7 @@ mod tests {
     fn single_tenant_with_single_provider_is_capped_to_share() {
         let receipts = vec![signed_receipt("l1", "P", "C", 1.0)];
         let mut tenants = HashMap::new();
-        tenants.insert(
-            "C".to_string(),
-            tenant("C", 1_700_000_000 - 60 * 24 * 3600),
-        );
+        tenants.insert("C".to_string(), tenant("C", 1_700_000_000 - 60 * 24 * 3600));
         let score = score_provider(
             "P",
             &receipts,
@@ -264,10 +259,7 @@ mod tests {
         let mut r = signed_receipt("l1", "P", "C", 1.0);
         r.provider_co_signature = None;
         let mut tenants = HashMap::new();
-        tenants.insert(
-            "C".to_string(),
-            tenant("C", 1_700_000_000 - 60 * 24 * 3600),
-        );
+        tenants.insert("C".to_string(), tenant("C", 1_700_000_000 - 60 * 24 * 3600));
         let score = score_provider(
             "P",
             &[r],
@@ -284,10 +276,7 @@ mod tests {
     fn signature_verification_failure_drops_receipt() {
         let receipts = vec![signed_receipt("l1", "P", "C", 1.0)];
         let mut tenants = HashMap::new();
-        tenants.insert(
-            "C".to_string(),
-            tenant("C", 1_700_000_000 - 60 * 24 * 3600),
-        );
+        tenants.insert("C".to_string(), tenant("C", 1_700_000_000 - 60 * 24 * 3600));
         let score = score_provider(
             "P",
             &receipts,
@@ -304,10 +293,7 @@ mod tests {
     fn channel_claim_failure_drops_receipt() {
         let receipts = vec![signed_receipt("l1", "P", "C", 1.0)];
         let mut tenants = HashMap::new();
-        tenants.insert(
-            "C".to_string(),
-            tenant("C", 1_700_000_000 - 60 * 24 * 3600),
-        );
+        tenants.insert("C".to_string(), tenant("C", 1_700_000_000 - 60 * 24 * 3600));
         let score = score_provider(
             "P",
             &receipts,
@@ -348,10 +334,7 @@ mod tests {
         }
         receipts.push(signed_receipt("lq", "Q", "C", 1.0));
         let mut tenants = HashMap::new();
-        tenants.insert(
-            "C".to_string(),
-            tenant("C", 1_700_000_000 - 60 * 24 * 3600),
-        );
+        tenants.insert("C".to_string(), tenant("C", 1_700_000_000 - 60 * 24 * 3600));
 
         let score = score_provider(
             "P",

@@ -1,0 +1,36 @@
+# The provider's whole configuration. One file, no environment variables.
+
+# Which ComputeBackend runs workloads. "docker" is the only one today.
+backend = "docker"
+
+provider_name = "Example Provider"
+
+# Where tenants reach workloads. Ports are exposed as public_ip:host_port;
+# there are no hostnames and no TLS.
+public_ip = "203.0.113.7"
+
+# Signs everything this provider publishes, and is the identity a Lease
+# Request is addressed to.
+nostr_private_key = "nsec1..."
+
+# The relays this provider publishes its Profile, Listings and Liveness to.
+relay_set = ["wss://relay.toon.network"]
+
+# Privileges beyond an ordinary workload that this provider grants.
+capabilities = ["docker"]
+
+# Where the HTTP app listens. Only this provider's TOON connector should be
+# able to reach it.
+http_bind_addr = "127.0.0.1:8080"
+
+# Inclusive range of backend workload ids this provider may use.
+workload_id_range_start = 1000
+workload_id_range_end = 1999
+
+# First host port handed out for a workload's SSH forward. Omit to derive one
+# from the workload id.
+ssh_port_start = 40000
+
+# Where the lease table is mirrored. It is the only record that a lease
+# exists, so a restart without it strands every paid workload.
+lease_state_path = "/var/lib/toon-provider/leases.json"

@@ -1,0 +1,12 @@
+toon-provider
+Copyright 2026 The TOON Network contributors
+
+This product includes software developed by Dhananjay Purohit and the Paygress
+contributors, https://github.com/DhananjayPurohit/Paygress, forked at commit
+c92b870485cacbb3c526982c89630298f5cedfb4.
+
+That software is licensed under the Apache License, Version 2.0; a copy is in
+the LICENSE file alongside this notice. The fork retains Paygress's compute
+backends, lease accounting, expiry sweep and workload durability, and replaces
+its payments, transport, discovery and storage. It does not interoperate with
+Paygress providers or clients.
