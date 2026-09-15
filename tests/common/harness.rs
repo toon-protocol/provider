@@ -4,6 +4,12 @@
 //! Lifted out of `tests/spawn.rs` when the extend, status and terminate
 //! routes needed the same fixtures. Nothing here reaches into the provider:
 //! a test asserts on the answer and on what the backend was asked to do.
+//!
+//! Every spawn resolves its image against a registry, because the image
+//! policy applies to every spawn — so a harness starts a `wiremock` stub of
+//! one (`common::stub_registry`) and points the provider's
+//! `image_policy.registry_url_override` at it. That makes building a harness
+//! `async`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,14 +23,23 @@ use tower::ServiceExt;
 use super::{FakeBackend, FakeClock};
 use toon_provider::nostr::kinds::K_LEASE_REQUEST;
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, Resources, SpawnContent};
+use toon_provider::provider::ImagePolicyConfig;
 use toon_provider::{router, Clock, Listing, ProviderConfig, ProviderService};
+use wiremock::MockServer;
 
 pub const NOW: u64 = 1_700_000_000;
 pub const INTERVAL: u64 = 3600;
 pub const PUBLIC_IP: &str = "203.0.113.7";
 pub const SSH_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@example";
-pub const DIGEST: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// The digest every spawn in these tests names: whatever
+/// `common::stub_registry` answers a manifest fetch with. It cannot be an
+/// arbitrary constant — the registry client verifies the bytes it fetched
+/// against the digest that was asked for.
+pub fn digest() -> String {
+    super::valid_digest()
+}
 
 pub struct Harness {
     pub app: axum::Router,
@@ -34,6 +49,9 @@ pub struct Harness {
     pub provider: PublicKey,
     pub state_path: String,
     pub provider_key: String,
+    /// Kept alive only so the stubbed registry keeps answering for as long
+    /// as this harness's app might still call it; never read otherwise.
+    pub _registry: MockServer,
 }
 
 pub fn listing(name: &str, version: u32, capacity: u32) -> Listing {
@@ -54,7 +72,17 @@ pub fn listing(name: &str, version: u32, capacity: u32) -> Listing {
     }
 }
 
-pub fn harness_with(listings: Vec<Listing>) -> Harness {
+pub async fn harness_with(listings: Vec<Listing>) -> Harness {
+    harness_with_policy(listings, ImagePolicyConfig::default()).await
+}
+
+/// Like `harness_with`, but with a caller-chosen image policy — for tests
+/// that check the policy itself, rather than just needing *a* runnable
+/// image.
+pub async fn harness_with_policy(
+    listings: Vec<Listing>,
+    image_policy: ImagePolicyConfig,
+) -> Harness {
     let keys = Keys::generate();
     let dir = tempfile::tempdir().unwrap();
     let state_path = dir
@@ -68,16 +96,24 @@ pub fn harness_with(listings: Vec<Listing>) -> Harness {
         state_path,
         FakeBackend::new(),
         FakeClock::at(NOW),
+        super::stub_registry().await,
+        image_policy,
     )
+    .await
 }
 
-/// The provider process, (re)started over a lease table on disk.
-pub fn restart(
+/// The provider process, (re)started over a lease table on disk, resolving
+/// images against `registry` (a fresh `common::stub_registry` server unless
+/// the caller wants a specific one, e.g. to reuse a policy mounted on it).
+#[allow(clippy::too_many_arguments)]
+pub async fn restart(
     listings: Vec<Listing>,
     provider_key: String,
     state_path: String,
     backend: Arc<FakeBackend>,
     clock: Arc<FakeClock>,
+    registry: MockServer,
+    image_policy: ImagePolicyConfig,
 ) -> Harness {
     let config = ProviderConfig {
         public_ip: PUBLIC_IP.to_string(),
@@ -88,6 +124,10 @@ pub fn restart(
         ssh_port_start: Some(40000),
         workload_port_start: 41000,
         lease_state_path: state_path.clone(),
+        image_policy: ImagePolicyConfig {
+            registry_url_override: Some(registry.uri()),
+            ..image_policy
+        },
         ..ProviderConfig::default()
     };
     let service =
@@ -101,11 +141,12 @@ pub fn restart(
         provider,
         state_path,
         provider_key,
+        _registry: registry,
     }
 }
 
-pub fn harness() -> Harness {
-    harness_with(vec![listing("basic", 1, 2)])
+pub async fn harness() -> Harness {
+    harness_with(vec![listing("basic", 1, 2)]).await
 }
 
 pub fn workload_id(seed: u8) -> String {
@@ -117,7 +158,7 @@ pub fn spawn_content(seed: u8) -> SpawnContent {
         workload_id: workload_id(seed),
         image: ImageRef {
             reference: "docker.io/library/alpine".to_string(),
-            digest: DIGEST.to_string(),
+            digest: digest(),
             registry_entry: None,
         },
         env: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),

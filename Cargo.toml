@@ -36,11 +36,22 @@ clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Fetching OCI manifests/indexes by digest from upstream registries, for the
+# image policy (deny list, size cap, arch selection). rustls avoids a system
+# OpenSSL dependency.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.10"
+bytes = "1"
+
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
 proptest = "1"
 rand = "0.8"
 tempfile = "3"
+
+# Stubs upstream OCI registries in image policy tests (prior art: Paygress
+# `tests/blossom.rs`).
+wiremock = "0.6"
 
 [profile.release]
 # Optimize for small binary size

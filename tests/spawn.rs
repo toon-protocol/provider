@@ -12,20 +12,21 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use common::harness::{
-    error_of, harness, harness_with, listing, post, restart, spawn, spawn_content, workload_id,
-    RequestSpec, DIGEST, INTERVAL, NOW, PUBLIC_IP, SSH_KEY,
+    digest, error_of, harness, harness_with, harness_with_policy, listing, post, restart, spawn,
+    spawn_content, workload_id, RequestSpec, INTERVAL, NOW, PUBLIC_IP, SSH_KEY,
 };
 use common::{BackendCall, FakeBackend, FakeClock};
 use toon_provider::compute::PortMapping;
 use toon_provider::nostr::kinds::K_LEASE_REQUEST;
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, SpawnContent};
+use toon_provider::provider::ImagePolicyConfig;
 use toon_provider::Clock;
 
 // ── success ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn a_valid_spawn_starts_the_workload_and_answers_the_access_details() {
-    let h = harness();
+    let h = harness().await;
     let content = spawn_content(1);
     let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
 
@@ -51,7 +52,7 @@ async fn a_valid_spawn_starts_the_workload_and_answers_the_access_details() {
     let created = &h.backend.created()[0];
     assert_eq!(
         created.image,
-        format!("docker.io/library/alpine@{}", DIGEST),
+        format!("docker.io/library/alpine@{}", digest()),
         "pulled by reference@digest so the daemon verifies the bytes"
     );
     assert_eq!(created.ssh_key.as_deref(), Some(SSH_KEY));
@@ -82,7 +83,7 @@ async fn a_valid_spawn_starts_the_workload_and_answers_the_access_details() {
 
 #[tokio::test]
 async fn a_tampered_request_is_bad_signature() {
-    let h = harness();
+    let h = harness().await;
     let mut event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
     // Same signature, different content: the id no longer matches.
     event["content"] = Value::String(serde_json::to_string(&spawn_content(2)).unwrap());
@@ -94,7 +95,7 @@ async fn a_tampered_request_is_bad_signature() {
 
 #[tokio::test]
 async fn a_forged_signature_is_bad_signature() {
-    let h = harness();
+    let h = harness().await;
     let mut event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
     event["sig"] = Value::String("00".repeat(64));
     let (_, body) = spawn(&h, event).await;
@@ -103,7 +104,7 @@ async fn a_forged_signature_is_bad_signature() {
 
 #[tokio::test]
 async fn an_expired_request_is_stale() {
-    let h = harness();
+    let h = harness().await;
     let spec = RequestSpec {
         created_at: NOW - 100,
         expiration: Some(NOW - 1),
@@ -116,7 +117,7 @@ async fn an_expired_request_is_stale() {
 
 #[tokio::test]
 async fn a_request_valid_for_more_than_300_seconds_is_stale() {
-    let h = harness();
+    let h = harness().await;
     let spec = RequestSpec {
         created_at: NOW - 400,
         expiration: Some(NOW + 10), // 410 s window
@@ -137,7 +138,7 @@ async fn a_request_valid_for_more_than_300_seconds_is_stale() {
 
 #[tokio::test]
 async fn a_request_with_no_expiration_is_invalid() {
-    let h = harness();
+    let h = harness().await;
     let spec = RequestSpec {
         expiration: None,
         ..RequestSpec::spawn(&h, &spawn_content(1))
@@ -148,7 +149,7 @@ async fn a_request_with_no_expiration_is_invalid() {
 
 #[tokio::test]
 async fn a_request_addressed_to_another_provider_is_refused() {
-    let h = harness();
+    let h = harness().await;
     let spec = RequestSpec {
         provider: Keys::generate().public_key(),
         ..RequestSpec::spawn(&h, &spawn_content(1))
@@ -165,7 +166,7 @@ async fn a_request_addressed_to_another_provider_is_refused() {
 
 #[tokio::test]
 async fn a_request_for_another_op_or_kind_is_invalid() {
-    let h = harness();
+    let h = harness().await;
     let spec = RequestSpec {
         op: "status",
         ..RequestSpec::spawn(&h, &spawn_content(1))
@@ -183,7 +184,7 @@ async fn a_request_for_another_op_or_kind_is_invalid() {
 
 #[tokio::test]
 async fn a_body_that_is_not_an_envelope_is_invalid() {
-    let h = harness();
+    let h = harness().await;
     let (status, body) = post(&h.app, "/listings/basic/v1/spawn", json!({ "hello": 1 })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(error_of(&body), "invalid_request");
@@ -192,7 +193,7 @@ async fn a_body_that_is_not_an_envelope_is_invalid() {
 #[tokio::test]
 async fn runtime_flags_host_mounts_devices_and_capabilities_are_invalid() {
     // ADR 0004: privileges come from the listing, never from the spawn.
-    let h = harness();
+    let h = harness().await;
     for (field, value) in [
         ("privileged", json!(true)),
         ("runtime_flags", json!(["--privileged"])),
@@ -215,7 +216,7 @@ async fn runtime_flags_host_mounts_devices_and_capabilities_are_invalid() {
 
 #[tokio::test]
 async fn a_standby_set_is_refused_this_milestone() {
-    let h = harness();
+    let h = harness().await;
     let content = SpawnContent {
         standby_set: Some(vec![h.provider.to_hex(), "bb".repeat(32)]),
         ..spawn_content(1)
@@ -227,7 +228,7 @@ async fn a_standby_set_is_refused_this_milestone() {
 
 #[tokio::test]
 async fn a_registry_entry_is_refused_this_milestone() {
-    let h = harness();
+    let h = harness().await;
     let mut content = spawn_content(1);
     content.image.registry_entry = Some(json!({ "address": "x", "relay": "wss://r" }));
     let (_, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
@@ -237,7 +238,7 @@ async fn a_registry_entry_is_refused_this_milestone() {
 
 #[tokio::test]
 async fn malformed_ids_keys_images_and_ports_are_invalid() {
-    let h = harness();
+    let h = harness().await;
     let cases: Vec<(&str, SpawnContent)> = vec![
         (
             "short workload id",
@@ -258,7 +259,7 @@ async fn malformed_ids_keys_images_and_ports_are_invalid() {
             SpawnContent {
                 image: ImageRef {
                     reference: "docker.io/library/alpine:latest".to_string(),
-                    digest: DIGEST.to_string(),
+                    digest: digest(),
                     registry_entry: None,
                 },
                 ..spawn_content(1)
@@ -303,7 +304,7 @@ async fn malformed_ids_keys_images_and_ports_are_invalid() {
 
 #[tokio::test]
 async fn a_listing_version_this_provider_does_not_sell_is_wrong_listing_version() {
-    let h = harness();
+    let h = harness().await;
     for path in [
         "/listings/basic/v2/spawn",
         "/listings/gpu/v1/spawn",
@@ -318,7 +319,7 @@ async fn a_listing_version_this_provider_does_not_sell_is_wrong_listing_version(
 
 #[tokio::test]
 async fn a_workload_id_held_by_another_tenant_is_taken() {
-    let h = harness();
+    let h = harness().await;
     let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
     assert_eq!(status, StatusCode::OK);
 
@@ -335,7 +336,7 @@ async fn a_workload_id_held_by_another_tenant_is_taken() {
 
 #[tokio::test]
 async fn the_same_tenant_respawning_an_id_it_holds_is_taken_too() {
-    let h = harness();
+    let h = harness().await;
     let tenant = Keys::generate();
     let first = RequestSpec {
         tenant: Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap(),
@@ -355,7 +356,7 @@ async fn the_same_tenant_respawning_an_id_it_holds_is_taken_too() {
 
 #[tokio::test]
 async fn a_full_listing_is_no_capacity() {
-    let h = harness_with(vec![listing("basic", 1, 1)]);
+    let h = harness_with(vec![listing("basic", 1, 1)]).await;
     let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
     assert_eq!(status, StatusCode::OK);
     let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(2)).sign()).await;
@@ -366,7 +367,7 @@ async fn a_full_listing_is_no_capacity() {
 
 #[tokio::test]
 async fn capacity_is_per_listing_name_across_versions() {
-    let h = harness_with(vec![listing("basic", 1, 1), listing("basic", 2, 1)]);
+    let h = harness_with(vec![listing("basic", 1, 1), listing("basic", 2, 1)]).await;
     let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
     assert_eq!(status, StatusCode::OK);
     let event = RequestSpec::spawn(&h, &spawn_content(2)).sign();
@@ -385,7 +386,7 @@ async fn capacity_is_per_listing_name_across_versions() {
 
 #[tokio::test]
 async fn a_replayed_lease_request_is_refused() {
-    let h = harness();
+    let h = harness().await;
     let event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
     let (status, _) = spawn(&h, event.clone()).await;
     assert_eq!(status, StatusCode::OK);
@@ -401,7 +402,7 @@ async fn a_request_refused_after_acceptance_cannot_be_resent_either() {
     // The id is remembered once the signed request was accepted as
     // authentic, so a captured refusal cannot be replayed onto the right
     // route later. A tenant signs a new request instead.
-    let h = harness();
+    let h = harness().await;
     let event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
     let (_, body) = post(
         &h.app,
@@ -417,7 +418,7 @@ async fn a_request_refused_after_acceptance_cannot_be_resent_either() {
 #[tokio::test]
 async fn the_first_failing_step_is_the_one_reported() {
     // Every later fault present, one earlier fault added per case.
-    let h = harness_with(vec![listing("basic", 1, 1)]);
+    let h = harness_with(vec![listing("basic", 1, 1)]).await;
     // Fill the listing and take an id, so steps 4 and 6 would fail.
     let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
     assert_eq!(status, StatusCode::OK);
@@ -482,7 +483,7 @@ async fn the_first_failing_step_is_the_one_reported() {
 
 #[tokio::test]
 async fn a_workload_that_fails_to_start_is_no_capacity_and_releases_its_slot() {
-    let h = harness_with(vec![listing("basic", 1, 1)]);
+    let h = harness_with(vec![listing("basic", 1, 1)]).await;
     h.backend.fail_next_create("pull failed: manifest unknown");
     let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
     assert_eq!(status, StatusCode::CONFLICT, "{}", body);
@@ -501,7 +502,7 @@ async fn a_workload_that_fails_to_start_is_no_capacity_and_releases_its_slot() {
 async fn payment_headers_are_never_read() {
     // ADR 0005: a packet through a hop carries no X-TOON-* headers, so a
     // request that carries them must be served exactly as one that does not.
-    let h = harness();
+    let h = harness().await;
     let event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
     let response = h
         .app
@@ -526,7 +527,7 @@ async fn payment_headers_are_never_read() {
 
 #[tokio::test]
 async fn an_unpaid_lease_expires_and_its_workload_id_is_free_again() {
-    let h = harness_with(vec![listing("basic", 1, 1)]);
+    let h = harness_with(vec![listing("basic", 1, 1)]).await;
     let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
     assert_eq!(status, StatusCode::OK);
     let expires_at = body["expires_at"].as_u64().unwrap();
@@ -554,7 +555,7 @@ async fn an_unpaid_lease_expires_and_its_workload_id_is_free_again() {
 
 #[tokio::test]
 async fn a_spawned_lease_survives_a_restart() {
-    let h = harness();
+    let h = harness().await;
     let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     let expires_at = body["expires_at"].as_u64().unwrap();
@@ -569,7 +570,10 @@ async fn a_spawned_lease_survives_a_restart() {
         h.state_path.clone(),
         backend.clone(),
         FakeClock::at(NOW + 10),
-    );
+        common::stub_registry().await,
+        ImagePolicyConfig::default(),
+    )
+    .await;
     restarted.service.restore_leases().await;
 
     // It still holds its workload id...
@@ -591,7 +595,7 @@ async fn a_spawned_lease_survives_a_restart() {
 async fn a_workload_that_vanished_keeps_its_id_until_its_lease_ends() {
     // The daemon no longer has toon-1000, but its lease is still paid for:
     // the next spawn must take the next id, not refuse, and not reuse 1000.
-    let h = harness();
+    let h = harness().await;
     let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
     assert_eq!(status, StatusCode::OK);
     h.backend.vanish(1000);
@@ -607,7 +611,7 @@ async fn a_workload_that_vanished_keeps_its_id_until_its_lease_ends() {
 async fn a_request_created_in_the_future_is_stale() {
     // Otherwise a created_at far ahead of the clock would stretch the 300 s
     // window past what it is meant to bound.
-    let h = harness();
+    let h = harness().await;
     let spec = RequestSpec {
         created_at: NOW + 1000,
         expiration: Some(NOW + 1300),
@@ -619,7 +623,7 @@ async fn a_request_created_in_the_future_is_stale() {
 
 #[tokio::test]
 async fn a_request_naming_a_second_provider_is_refused() {
-    let h = harness();
+    let h = harness().await;
     let mut event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
     // Re-sign with an extra `p` for someone else.
     let tenant = Keys::generate();
@@ -645,7 +649,7 @@ async fn a_request_naming_a_second_provider_is_refused() {
 #[tokio::test]
 async fn ports_are_checked_against_the_listing_not_before_it() {
     // §6.2 step 2: the listing version first, then whether the ports fit.
-    let h = harness();
+    let h = harness().await;
     let content = SpawnContent {
         ports: (1..=17)
             .map(|p| PortRequest {
@@ -665,4 +669,99 @@ async fn ports_are_checked_against_the_listing_not_before_it() {
     assert_eq!(error_of(&body), "wrong_listing_version");
     let (_, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
     assert_eq!(error_of(&body), "invalid_request");
+}
+
+// ── image policy (M1-5) ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_paid_spawn_with_a_denied_digest_is_refused_image() {
+    let policy = ImagePolicyConfig {
+        deny_digests: vec![digest()],
+        ..Default::default()
+    };
+    let h = harness_with_policy(vec![listing("basic", 1, 2)], policy).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
+    assert_eq!(error_of(&body), "refused_image");
+    assert!(
+        h.backend.calls().is_empty(),
+        "a refused image must never reach the compute backend"
+    );
+}
+
+#[tokio::test]
+async fn a_denied_image_is_reported_before_a_full_listing() {
+    // Image policy (step 5) runs before capacity (step 6): a request that is
+    // both denied-image and over-capacity answers `refused_image`, the
+    // spec's order (§6.2), the same order `availability` applies.
+    //
+    // Two distinct, independently-resolvable images so the first spawn can
+    // legitimately fill the listing's one slot before the second is tried:
+    // `common::stub_registry`'s catch-all only ever verifies one digest, so
+    // this test mounts its own registry with both.
+    let registry = wiremock::MockServer::start().await;
+    let good = common::valid_manifest_bytes();
+    let good_digest = format!("sha256:{}", common::sha256_hex(&good));
+    let denied_bytes = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.manifest.v1+json",
+        "config": {
+            "mediaType": "application/vnd.oci.image.config.v1+json",
+            "size": 100,
+            "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "layers": [{
+            "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip",
+            "size": 12345,
+            "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }]
+    })
+    .to_string()
+    .into_bytes();
+    let denied_digest = format!("sha256:{}", common::sha256_hex(&denied_bytes));
+
+    for (digest, bytes) in [(&good_digest, good), (&denied_digest, denied_bytes)] {
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(format!(
+                "/v2/library/alpine/manifests/{}",
+                digest
+            )))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(bytes))
+            .mount(&registry)
+            .await;
+    }
+
+    let policy = ImagePolicyConfig {
+        deny_digests: vec![denied_digest.clone()],
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir
+        .keep()
+        .join("leases.json")
+        .to_string_lossy()
+        .into_owned();
+    let h = restart(
+        vec![listing("basic", 1, 1)],
+        Keys::generate().secret_key().to_secret_hex(),
+        state_path,
+        FakeBackend::new(),
+        FakeClock::at(NOW),
+        registry,
+        policy,
+    )
+    .await;
+
+    // Fill the listing's one slot with the undenied image.
+    let mut runnable = spawn_content(1);
+    runnable.image.digest = good_digest;
+    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &runnable).sign()).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A different workload id (so `workload_id_taken` does not fire first)
+    // naming the denied digest, on a now-full listing.
+    let mut refused = spawn_content(2);
+    refused.image.digest = denied_digest;
+    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &refused).sign()).await;
+    assert_eq!(error_of(&body), "refused_image");
 }

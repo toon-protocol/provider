@@ -304,3 +304,68 @@ fn the_status_and_terminate_answers_round_trip() {
         terminated
     );
 }
+
+#[test]
+fn availability_request_round_trips_the_tickets_shape() {
+    let request = AvailabilityRequest {
+        listing: "basic".to_string(),
+        version: 1,
+        image: ImageRef {
+            reference: "docker.io/library/alpine".to_string(),
+            digest: format!("sha256:{}", "cd".repeat(32)),
+            registry_entry: None,
+        },
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["listing"], "basic");
+    assert_eq!(value["version"], 1);
+    assert_eq!(
+        value["image"]["digest"],
+        format!("sha256:{}", "cd".repeat(32))
+    );
+    let back: AvailabilityRequest = serde_json::from_value(value).unwrap();
+    assert_eq!(back, request);
+}
+
+#[test]
+fn an_unknown_availability_field_is_refused_at_parse() {
+    // Including the spec draft's own `image_digest` shape: this route's
+    // ticket fixes `{ listing, version, image: { reference, digest } }`, not
+    // the spec draft's flatter shape.
+    let mut value = serde_json::to_value(AvailabilityRequest {
+        listing: "basic".to_string(),
+        version: 1,
+        image: ImageRef {
+            reference: "docker.io/library/alpine".to_string(),
+            digest: format!("sha256:{}", "cd".repeat(32)),
+            registry_entry: None,
+        },
+    })
+    .unwrap();
+    value["image_digest"] = json!(format!("sha256:{}", "cd".repeat(32)));
+    assert!(serde_json::from_value::<AvailabilityRequest>(value).is_err());
+}
+
+#[test]
+fn a_runnable_availability_answer_writes_and_reads_just_would_run() {
+    let value = serde_json::to_value(AvailabilityResponse::would_run()).unwrap();
+    assert_eq!(value, json!({ "would_run": true }));
+    let back: AvailabilityResponse = serde_json::from_value(value).unwrap();
+    assert_eq!(back, AvailabilityResponse::would_run());
+}
+
+#[test]
+fn a_refused_availability_answer_round_trips_its_error_and_message() {
+    let refused = AvailabilityResponse::refused(ErrorCode::NoMatchingArch, "no arm64 manifest");
+    let value = serde_json::to_value(&refused).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "would_run": false,
+            "error": "no_matching_arch",
+            "message": "no arm64 manifest"
+        })
+    );
+    let back: AvailabilityResponse = serde_json::from_value(value).unwrap();
+    assert_eq!(back, refused);
+}

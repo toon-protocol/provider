@@ -15,6 +15,17 @@ pub use crate::nostr::wire::{LeaseEnd, LeaseState};
 
 use crate::nostr::wire::{Access, PortAccess, Role};
 
+/// How many live (`Provisioning` or `Running`) leases of `listing` are on
+/// the table right now. Shared by `availability`'s capacity check and
+/// spawn's, so a change to what counts as "live" cannot desync the two
+/// (they must agree: spec §9, "availability... applies the same policy").
+pub fn count_live(leases: &HashMap<u32, LeaseRecord>, listing: &str) -> usize {
+    leases
+        .values()
+        .filter(|l| l.state.is_live() && l.listing == listing)
+        .count()
+}
+
 /// One lease: a tenant's prepaid right to one workload on this provider, until
 /// it expires.
 ///

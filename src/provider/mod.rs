@@ -8,19 +8,28 @@
 // publication lands in a later ticket.
 //
 // The routes themselves are one module each: `spawn` starts a lease,
-// `lifecycle` extends, reports and ends one, and `cleanup` is where every
+// `lifecycle` extends, reports and ends one, `availability` answers whether a
+// spawn would run without starting anything, and `cleanup` is where every
 // ending — Expiry or Termination — actually destroys the workload.
+// `image_policy` is the rule both `spawn` and `availability` apply, so the
+// two can never disagree.
 
+mod availability;
 mod cleanup;
 mod config;
+pub mod image_policy;
 mod lifecycle;
 mod persistence;
 pub mod routes;
 mod spawn;
 mod standby;
 
+pub use availability::availability;
 pub use cleanup::SWEEP_INTERVAL_SECS;
-pub use config::{load_config, BackendKind, Listing, ProviderConfig, MAX_PORTS_PER_WORKLOAD};
+pub use config::{
+    load_config, BackendKind, ImagePolicyConfig, Listing, ProviderConfig, MAX_PORTS_PER_WORKLOAD,
+};
+pub use image_policy::{ImagePolicy, OciRegistry};
 pub use lifecycle::{extend, status, terminate};
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
