@@ -115,6 +115,14 @@ and picks the manifest for its own architecture. Anything else in the
 content — a runtime flag, a host mount, a device, a capability — is refused
 as `invalid_request`; privileges come only from the listing (ADR 0004).
 
+**SSH.** The tenant's key is handed to the workload as the environment
+variable `SSH_PUBLIC_KEY`, and `access.ssh_port` forwards to the workload's
+port 22. An image whose sshd installs that variable serves SSH as-is; any other
+image can bridge it with the spawn's own `entrypoint` and `args` (e.g.
+`["/bin/sh"]` + `["-c", "PUBLIC_KEY=\"$SSH_PUBLIC_KEY\" exec /init"]` for
+`linuxserver/openssh-server`). No password is ever issued. A volume, when
+asked for, is mounted at `/data`.
+
 ## Extending, checking and ending a lease
 
 **`POST /listings/<listing>/v<n>/extend`** (paid) takes `{ "workload_id": "…" }`
@@ -165,14 +173,6 @@ every later sweep until the backend confirms the container is gone, so a
 failed delete never leaves a workload running for free. All of this survives a
 restart: running leases keep their expiry, tenant, listing version and access
 details, and ended leases restore as ended.
-
-**SSH.** The tenant's key is handed to the workload as the environment
-variable `SSH_PUBLIC_KEY`, and `access.ssh_port` forwards to the workload's
-port 22. An image whose sshd installs that variable serves SSH as-is; any other
-image can bridge it with the spawn's own `entrypoint` and `args` (e.g.
-`["/bin/sh"]` + `["-c", "PUBLIC_KEY=\"$SSH_PUBLIC_KEY\" exec /init"]` for
-`linuxserver/openssh-server`). No password is ever issued. A volume, when
-asked for, is mounted at `/data`.
 
 ## Build, test and run
 

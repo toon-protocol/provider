@@ -49,13 +49,14 @@ fn find(leases: &HashMap<u32, LeaseRecord>, workload_id: &str) -> Option<u32> {
     candidates.last().map(|l| l.id)
 }
 
-/// Why a lease that is no longer live can buy nothing and end nothing.
-fn already_ended(state: LeaseState) -> ErrorResponse {
-    let how = match state {
-        LeaseState::Ended(LeaseEnd::Expiry) => "expired",
-        LeaseState::Ended(LeaseEnd::Termination) => "was terminated",
-        LeaseState::Ended(LeaseEnd::Eviction) => "was evicted",
-        _ => "is over",
+/// A lease that has ended can buy nothing and end nothing. `expired` is the
+/// spec's code for all three endings (§6.3 names no other): the lease is
+/// over, and the message says how.
+fn already_ended(end: LeaseEnd) -> ErrorResponse {
+    let how = match end {
+        LeaseEnd::Expiry => "expired",
+        LeaseEnd::Termination => "was terminated",
+        LeaseEnd::Eviction => "was evicted",
     };
     ErrorResponse::new(
         ErrorCode::Expired,
@@ -80,9 +81,9 @@ pub async fn extend(
 
     let mut leases = state.leases.lock().await;
     let id = find(&leases, &request.workload_id).ok_or_else(unknown_workload)?;
-    let lease = leases.get(&id).ok_or_else(unknown_workload)?;
-    if !lease.state.is_live() {
-        return Err(already_ended(lease.state));
+    let lease = leases.get_mut(&id).ok_or_else(unknown_workload)?;
+    if let LeaseState::Ended(end) = lease.state {
+        return Err(already_ended(end));
     }
     if lease.listing != listing_name || lease.listing_version != version {
         return Err(ErrorResponse::new(
@@ -109,7 +110,6 @@ pub async fn extend(
         })?
         .lease_interval_s;
 
-    let lease = leases.get_mut(&id).ok_or_else(unknown_workload)?;
     lease.expires_at = lease.expires_at.saturating_add(interval);
     let expires_at = lease.expires_at;
     persist_leases(&leases, &state.config.lease_state_path);
@@ -153,8 +153,8 @@ pub async fn terminate(state: &AppState, body: &[u8]) -> Result<TerminateRespons
         let id = find(&leases, &workload_id).ok_or_else(unknown_workload)?;
         let lease = leases.get(&id).ok_or_else(unknown_workload)?;
         check_tenant(lease, &tenant)?;
-        if !lease.state.is_live() {
-            return Err(already_ended(lease.state));
+        if let LeaseState::Ended(end) = lease.state {
+            return Err(already_ended(end));
         }
         id
     };
@@ -163,7 +163,10 @@ pub async fn terminate(state: &AppState, body: &[u8]) -> Result<TerminateRespons
     // this lease between the two is reported as an ending, not destroyed
     // twice.
     if !end_lease(state, id, LeaseEnd::Termination, now).await {
-        return Err(already_ended(LeaseState::Ended(LeaseEnd::Expiry)));
+        return Err(ErrorResponse::new(
+            ErrorCode::Expired,
+            "this lease ended while the request was in flight",
+        ));
     }
 
     Ok(TerminateResponse {
