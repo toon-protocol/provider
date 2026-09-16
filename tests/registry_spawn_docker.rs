@@ -1,8 +1,12 @@
-//! The paid spawn of a `{ digest, registry_entry }` image against a REAL
-//! Docker daemon: the layers fetched through the entry — one from the
-//! stubbed TOON store, one from the stubbed upstream registry — verified,
-//! assembled into an OCI layout, loaded, and the workload run by the
-//! resulting image id (spec §8.4).
+//! The paid spawn of an Image Registry image against a REAL Docker daemon:
+//! the layers fetched down §8.4's chain, verified, assembled into an OCI
+//! layout, loaded, and the workload run by the resulting image id.
+//!
+//! Both forms this provider fetches itself are run here, over the same
+//! image: `{ digest, registry_entry }`, whose layers come from the entry's
+//! sources (one from the stubbed TOON store, one from the stubbed upstream
+//! registry), and `{ digest }` alone, whose every blob is found as a Blob
+//! Record on the provider's Relay Set.
 //!
 //! `#[ignore]` by default like `tests/docker_backend.rs`: `cargo test` must
 //! pass on a machine with no Docker. Run it with `cargo test -- --ignored`
@@ -26,8 +30,10 @@ use toon_provider::{router, DockerBackend, ProviderService};
 const BASE: &str = "alpine:3.20";
 /// Well outside the default lease id range, so a stray test container can
 /// never collide with a real lease. The daemon is shared with everything
-/// else on this host.
-const ID: u32 = 59101;
+/// else on this host; the two forms take an id each so they never collide
+/// with one another either.
+const ENTRY_ID: u32 = 59101;
+const DIGEST_ID: u32 = 59102;
 const LAYER_TAR: &str = "application/vnd.oci.image.layer.v1.tar";
 
 async fn docker(args: &[&str]) -> std::process::Output {
@@ -67,14 +73,47 @@ fn marker_layer() -> Vec<u8> {
 #[tokio::test]
 #[ignore = "needs a Docker daemon; run with `cargo test -- --ignored`"]
 async fn a_registry_entry_image_runs_on_docker_by_digest() {
+    runs_on_docker(Form::Entry).await;
+}
+
+#[tokio::test]
+#[ignore = "needs a Docker daemon; run with `cargo test -- --ignored`"]
+async fn a_bare_digest_image_runs_on_docker_by_digest() {
+    runs_on_docker(Form::BareDigest).await;
+}
+
+/// Which of the two forms names the image, and therefore where the
+/// provider has to go for its blobs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Form {
+    /// `{ digest, registry_entry }`: the entry names a source per blob, and
+    /// the marker layer's is the upstream registry.
+    Entry,
+    /// `{ digest }`: no entry at all, so every blob — the marker layer
+    /// included — has to be in the store with a Blob Record on the Relay
+    /// Set.
+    BareDigest,
+}
+
+async fn runs_on_docker(form: Form) {
+    let id = match form {
+        Form::Entry => ENTRY_ID,
+        Form::BareDigest => DIGEST_ID,
+    };
+    let seed: u8 = match form {
+        Form::Entry => 0x91,
+        Form::BareDigest => 0x92,
+    };
+    let ssh_port = 59301 + u16::from(form == Form::BareDigest);
     let backend = Arc::new(DockerBackend::new());
     // Leave nothing behind from an earlier interrupted run.
-    toon_provider::ComputeBackend::delete_container(backend.as_ref(), ID)
+    toon_provider::ComputeBackend::delete_container(backend.as_ref(), id)
         .await
         .unwrap();
 
     // The image: the base rootfs in the TOON store as 1 MiB parts, the
-    // marker layer upstream, the config and manifest in the store.
+    // config and manifest in the store, and the marker layer wherever the
+    // form under test can reach it.
     let mut w = World::new().await;
     let rootfs = base_rootfs_layer().await;
     let marker = marker_layer();
@@ -91,7 +130,10 @@ async fn a_registry_entry_image_runs_on_docker_by_digest() {
     .into_bytes();
     let config_digest = w.store(&config, CONFIG, 64 * 1024).await;
     let rootfs_digest = w.store(&rootfs, LAYER_TAR, 1024 * 1024).await;
-    let marker_digest = w.upstream(&marker, LAYER_TAR).await;
+    let marker_digest = match form {
+        Form::Entry => w.upstream(&marker, LAYER_TAR).await,
+        Form::BareDigest => w.store(&marker, LAYER_TAR, 1024 * 1024).await,
+    };
     let manifest = manifest_with_layers(
         (&config_digest, config.len()),
         &[
@@ -102,14 +144,17 @@ async fn a_registry_entry_image_runs_on_docker_by_digest() {
     let manifest_digest = w.store(&manifest, MANIFEST, 4096).await;
 
     let config = toon_provider::ProviderConfig {
-        workload_id_range_start: ID,
-        workload_id_range_end: ID,
-        ssh_port_start: Some(59301),
-        workload_port_start: 59401,
+        workload_id_range_start: id,
+        workload_id_range_end: id,
+        ssh_port_start: Some(ssh_port),
+        workload_port_start: 59401 + 10 * u16::from(form == Form::BareDigest),
         ..store_config(&w, vec![listing("basic", 1, 1)])
     };
     let directory = FakeDirectory::new();
-    directory.seed_image_entry(w.entry(&manifest_digest, MANIFEST));
+    match form {
+        Form::Entry => directory.seed_image_entry(w.entry(&manifest_digest, MANIFEST)),
+        Form::BareDigest => seed_blob_records(&w, &directory),
+    }
     let clock = FakeClock::at(NOW);
     let service = ProviderService::with_backend_clock_and_directory(
         config.clone(),
@@ -131,18 +176,22 @@ async fn a_registry_entry_image_runs_on_docker_by_digest() {
         config,
     };
 
+    let image = match form {
+        Form::Entry => ImageRef::from_registry(manifest_digest.clone(), w.address(), RELAY),
+        Form::BareDigest => ImageRef::by_digest(manifest_digest.clone()),
+    };
     let tenant = nostr_sdk::Keys::generate();
     let (status, body) = spawn_as(
         &h,
-        0x91,
-        ImageRef::from_registry(manifest_digest.clone(), w.address(), RELAY),
+        seed,
+        image,
         nostr_sdk::Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap(),
     )
     .await;
 
     assert_eq!(status, StatusCode::OK, "{}", body);
-    assert_eq!(body["access"]["ssh_port"], 59301, "{}", body);
-    let name = toon_provider::compute::container_name(ID);
+    assert_eq!(body["access"]["ssh_port"], ssh_port, "{}", body);
+    let name = toon_provider::compute::container_name(id);
     let inspected = docker(&[
         "inspect",
         "-f",
@@ -160,15 +209,29 @@ async fn a_registry_entry_image_runs_on_docker_by_digest() {
         "the workload runs the image by id, not by a tag: {}",
         image
     );
-    // The upstream layer was pulled by digest; the rootfs came as parts.
-    assert_eq!(
-        w.registry_paths().await,
-        vec![format!("/v2/{}/blobs/{}", REPOSITORY, marker_digest)]
-    );
+    // The rootfs came as parts either way; the marker layer came from
+    // wherever this form could reach it.
     assert!(w
         .gateway_paths()
         .await
         .contains(&format!("/raw/{}-part0", &rootfs_digest[7..19])));
+    match form {
+        Form::Entry => assert_eq!(
+            w.registry_paths().await,
+            vec![format!("/v2/{}/blobs/{}", REPOSITORY, marker_digest)],
+            "the entry's `oci` source was pulled by digest"
+        ),
+        Form::BareDigest => {
+            assert!(
+                w.registry_paths().await.is_empty(),
+                "a bare digest pulls from no upstream registry"
+            );
+            assert!(w
+                .gateway_paths()
+                .await
+                .contains(&format!("/raw/{}-part0", &marker_digest[7..19])));
+        }
+    }
     // Both layers are in the running filesystem.
     let ls = docker(&["exec", &name, "ls", "/toon-marker", "/bin/sh"]).await;
     assert!(
@@ -181,7 +244,7 @@ async fn a_registry_entry_image_runs_on_docker_by_digest() {
     let request = signed(
         &h,
         "terminate",
-        json!({ "workload_id": "91".repeat(32) }),
+        json!({ "workload_id": format!("{:02x}", seed).repeat(32) }),
         Some(nostr_sdk::Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap()),
     );
     let (status, body) = post(&h.app, "/terminate", json!({ "request": request })).await;

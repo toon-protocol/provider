@@ -47,6 +47,9 @@ pub enum Tamper {
     CorruptPart(usize),
     /// The record's size for part `n` is one byte off.
     WrongPartSize(usize),
+    /// The gateway answers 5xx for part `n`. The record is honest and the
+    /// bytes exist; the store is simply not serving them right now.
+    GatewayError(usize),
 }
 
 pub struct World {
@@ -55,8 +58,14 @@ pub struct World {
     pub publisher: Keys,
     /// Every blob the entry will list, in the order they were added.
     pub blobs: Vec<EntryBlob>,
-    /// How many parts each stored blob was split into, by digest.
-    pub parts: HashMap<String, usize>,
+    /// How many parts each upload was split into, by the txid prefix its
+    /// parts were mounted under.
+    parts: HashMap<String, usize>,
+    /// The signed Blob Record of each stored blob, by digest — what an
+    /// entry's `toon-store` source cites AND what a Relay Set would answer
+    /// a `#x` lookup with. Seed it into a `FakeDirectory` to put the blob
+    /// on the Relay Set (`seed_blob_records`).
+    records: HashMap<String, Event>,
 }
 
 impl World {
@@ -67,6 +76,7 @@ impl World {
             publisher: Keys::generate(),
             blobs: Vec::new(),
             parts: HashMap::new(),
+            records: HashMap::new(),
         }
     }
 
@@ -91,9 +101,52 @@ impl World {
         tamper: Tamper,
     ) {
         let hex = claimed.strip_prefix("sha256:").unwrap();
+        let (event, record_txid) = self
+            .upload(&hex[..12], claimed, bytes, part_size, tamper)
+            .await;
+        self.records.insert(claimed.to_string(), event);
+        self.blobs.push(EntryBlob {
+            digest: claimed.to_string(),
+            size: bytes.len() as u64,
+            media_type: media_type.to_string(),
+            source: BlobSource::ToonStore {
+                blob_record_txid: record_txid,
+            },
+        });
+    }
+
+    /// A SECOND upload of `claimed`, under txids prefixed with `label`: a
+    /// Blob Record someone else published for the same blob. Mounted on the
+    /// gateway and answered as an event, but listed in no entry — this is a
+    /// record a provider finds by `#x` on its Relay Set, not one an entry
+    /// cites. Answers the signed record.
+    pub async fn another_record(
+        &mut self,
+        label: &str,
+        claimed: &str,
+        bytes: &[u8],
+        part_size: usize,
+        tamper: Tamper,
+    ) -> Event {
+        self.upload(label, claimed, bytes, part_size, tamper)
+            .await
+            .0
+    }
+
+    /// Upload `bytes` as parts under `<label>-part<n>` and the signed Blob
+    /// Record describing them as `<label>-record`, however the `tamper`
+    /// says this upload misbehaves. Answers the record and its own txid.
+    async fn upload(
+        &mut self,
+        label: &str,
+        claimed: &str,
+        bytes: &[u8],
+        part_size: usize,
+        tamper: Tamper,
+    ) -> (Event, String) {
         let mut parts = Vec::new();
         for (i, chunk) in bytes.chunks(part_size).enumerate() {
-            let txid = format!("{}-part{}", &hex[..12], i);
+            let txid = format!("{}-part{}", label, i);
             let served: Vec<u8> = match tamper {
                 Tamper::CorruptPart(n) if n == i => chunk.iter().map(|b| b ^ 0xff).collect(),
                 _ => chunk.to_vec(),
@@ -102,7 +155,12 @@ impl World {
                 Tamper::WrongPartSize(n) if n == i => chunk.len() as u64 + 1,
                 _ => chunk.len() as u64,
             };
-            mount_raw(&self.gateway, &txid, served).await;
+            match tamper {
+                Tamper::GatewayError(n) if n == i => {
+                    mount_raw_status(&self.gateway, &txid, 503).await
+                }
+                _ => mount_raw(&self.gateway, &txid, served).await,
+            }
             parts.push(BlobPart {
                 txid,
                 sha256: sha256_hex(chunk),
@@ -115,23 +173,25 @@ impl World {
             part_size: part_size as u64,
             parts,
         };
-        self.parts.insert(claimed.to_string(), record.parts.len());
+        self.parts.insert(label.to_string(), record.parts.len());
         let event = blob_record_event(&record, &self.publisher, NOW).unwrap();
-        let record_txid = format!("{}-record", &hex[..12]);
+        let record_txid = format!("{}-record", label);
         mount_raw(
             &self.gateway,
             &record_txid,
             serde_json::to_vec(&event).unwrap(),
         )
         .await;
-        self.blobs.push(EntryBlob {
-            digest: claimed.to_string(),
-            size: bytes.len() as u64,
-            media_type: media_type.to_string(),
-            source: BlobSource::ToonStore {
-                blob_record_txid: record_txid,
-            },
-        });
+        (event, record_txid)
+    }
+
+    /// The signed Blob Record of a stored blob: what the Relay Set would
+    /// answer a `#x` lookup for it with.
+    pub fn record(&self, digest: &str) -> Event {
+        self.records
+            .get(digest)
+            .unwrap_or_else(|| panic!("{} was never stored", digest))
+            .clone()
     }
 
     /// List `digest` as a `toon-store` blob whose Blob Record the gateway
@@ -206,10 +266,29 @@ impl World {
 
     /// The `/raw/` paths a stored blob's record and parts live at.
     pub fn raw_paths(&self, digest: &str) -> Vec<String> {
-        let hex = &digest.strip_prefix("sha256:").unwrap()[..12];
-        let mut paths = vec![format!("/raw/{}-record", hex)];
-        paths.extend((0..self.parts[digest]).map(|i| format!("/raw/{}-part{}", hex, i)));
+        self.raw_paths_of(&digest.strip_prefix("sha256:").unwrap()[..12])
+    }
+
+    /// The `/raw/` paths of one upload, by the label its txids carry —
+    /// a stored blob's digest prefix, or the label `another_record` used.
+    pub fn raw_paths_of(&self, label: &str) -> Vec<String> {
+        let mut paths = vec![format!("/raw/{}-record", label)];
+        paths.extend(self.part_paths_of(label));
         paths
+    }
+
+    /// The `/raw/` paths of one upload's PARTS, without its record: what a
+    /// provider reads when it already holds the record — because the Relay
+    /// Set handed it over as an event, rather than the store as bytes.
+    pub fn part_paths_of(&self, label: &str) -> Vec<String> {
+        (0..self.parts[label])
+            .map(|i| format!("/raw/{}-part{}", label, i))
+            .collect()
+    }
+
+    /// The `/raw/` paths of a stored blob's parts, without its record.
+    pub fn part_paths(&self, digest: &str) -> Vec<String> {
+        self.part_paths_of(&digest.strip_prefix("sha256:").unwrap()[..12])
     }
 
     /// Every path the gateway was asked for, as a set.
@@ -221,6 +300,23 @@ impl World {
             .iter()
             .map(|r| r.url.path().to_string())
             .collect()
+    }
+
+    /// Every path the gateway was asked for, in order and with repeats —
+    /// so a test can say a blob was fetched ONCE.
+    pub async fn gateway_path_list(&self) -> Vec<String> {
+        self.gateway
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|r| r.url.path().to_string())
+            .collect()
+    }
+
+    /// The signed Blob Record of every blob stored so far.
+    pub fn records(&self) -> Vec<Event> {
+        self.records.values().cloned().collect()
     }
 
     pub async fn gateway_request_count(&self) -> usize {
@@ -248,6 +344,16 @@ impl World {
                 .iter()
                 .any(|p| p.contains(digest))
     }
+}
+
+/// The gateway answers `status` for this upload and serves no bytes: a
+/// store that is down, a gateway that has lost the data item.
+pub async fn mount_raw_status(gateway: &MockServer, txid: &str, status: u16) {
+    Mock::given(method("GET"))
+        .and(path(format!("/raw/{}", txid)))
+        .respond_with(ResponseTemplate::new(status))
+        .mount(gateway)
+        .await;
 }
 
 pub async fn mount_raw(gateway: &MockServer, txid: &str, bytes: Vec<u8>) {
@@ -457,6 +563,21 @@ pub async fn availability(h: &StoreHarness, image: Value) -> Value {
     .await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     body
+}
+
+/// Put every blob stored so far on the provider's Relay Set, as the Blob
+/// Records their publisher would have published beside uploading the parts
+/// — what a `#x` lookup for any of them finds.
+pub fn seed_blob_records(w: &World, directory: &FakeDirectory) {
+    for record in w.records() {
+        directory.seed_blob_record(record);
+    }
+}
+
+/// The `{ digest }` form: no reference and no entry, so every blob is found
+/// by Blob Record lookup on the provider's Relay Set (spec §8.4 step 3).
+pub fn bare_image(digest: &str) -> Value {
+    json!({ "digest": digest })
 }
 
 pub fn registry_image(w: &World, digest: &str) -> Value {

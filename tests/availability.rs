@@ -412,9 +412,10 @@ async fn availability_never_calls_the_backend_across_every_outcome() {
 async fn an_image_registry_form_answers_refused_image_before_a_tenant_pays() {
     // The whole point of the free route: a tenant naming an image this
     // provider cannot fetch learns it here, instead of buying the same
-    // answer on `.spawn` (ADR 0003 — a refusal is still billed). A bare
-    // digest is not resolved at all yet; a registry entry is resolved, and
-    // here the relay hinted at holds no such entry.
+    // answer on `.spawn` (ADR 0003 — a refusal is still billed). Both
+    // Image Registry forms are resolved: here the relay hinted at holds no
+    // such entry, and this provider's Relay Set holds no Blob Record for
+    // the bare digest.
     let registry = common::stub_registry().await;
     let h = harness(
         vec![listing("basic", 1, 2, "amd64")],
@@ -436,7 +437,7 @@ async fn an_image_registry_form_answers_refused_image_before_a_tenant_pays() {
         (
             "digest alone",
             json!({ "digest": valid_digest() }),
-            "does not yet look up Blob Records",
+            "no source is known for blob",
         ),
     ] {
         let body = json!({ "listing": "basic", "version": 1, "image": image });
