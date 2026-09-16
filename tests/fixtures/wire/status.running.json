@@ -1,0 +1,51 @@
+{
+  "fixture": {
+    "case": "running",
+    "description": "Status (spec §6.5) of the running lease, signed by its tenant, with `lease_request.status` as its body. `state` is the one-word `running`.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "status"
+  },
+  "http_path": "/status",
+  "request_body": {
+    "request": {
+      "content": "{\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "created_at": 1700000000,
+      "id": "a6306c01832614b58783e553548b417493a7d46bb4362c35a5703dfb79829a6e",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "ce13852ab8ba54c6833f1f199a2f14958528f81552383c51f6dda76d1a48a72dcde53064e878cd0c452e1512e19f85687460b05f27bc6bd2e68b9854bf61e310",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "status"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "access": {
+      "host": "203.0.113.7",
+      "ports": [
+        {
+          "container_port": 443,
+          "host_port": 41000
+        }
+      ],
+      "ssh_port": 40000
+    },
+    "expires_at": 1700003600,
+    "role": "standalone",
+    "state": "running",
+    "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "response_status": 200,
+  "route": "g.fixture.status"
+}

@@ -1,0 +1,64 @@
+{
+  "content": {
+    "arch": "amd64",
+    "capabilities": [],
+    "lease_interval_s": 3600,
+    "price": 1000,
+    "resources": {
+      "cpu_millicores": 500,
+      "gpu": "rtx-4090",
+      "memory_mb": 256,
+      "storage_gb": 4
+    },
+    "version": 1
+  },
+  "event": {
+    "content": "{\"version\":1,\"resources\":{\"cpu_millicores\":500,\"memory_mb\":256,\"storage_gb\":4,\"gpu\":\"rtx-4090\"},\"arch\":\"amd64\",\"lease_interval_s\":3600,\"price\":1000,\"capabilities\":[]}",
+    "created_at": 1700000000,
+    "id": "cff64202735b9e471812a9edde5314fcb5a1519b0d0b4a533c18c5e53e736e22",
+    "kind": 30432,
+    "pubkey": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+    "sig": "e13643452bd83e6021a8b199f396fe71bde7fdda49d3847ea442b1d0f2b79eaeae9c96ebddafd058a9e2114ba2087e70b9884083d6106663a82f056b9faa9612",
+    "tags": [
+      [
+        "d",
+        "gpu"
+      ],
+      [
+        "a",
+        "10432:466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27:"
+      ],
+      [
+        "L",
+        "toon.network"
+      ],
+      [
+        "l",
+        "isolation:shared-kernel",
+        "toon.network"
+      ],
+      [
+        "l",
+        "arch:amd64",
+        "toon.network"
+      ],
+      [
+        "l",
+        "gpu:rtx-4090",
+        "toon.network"
+      ],
+      [
+        "g",
+        "u4pruydqqvj"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "listing.gpu",
+    "description": "The `gpu` Listing: as `listing`, plus `resources.gpu` in content and an `l gpu:<model>` label, and no capabilities.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "directory"
+  },
+  "kind_name": "K_LISTING",
+  "nip01_serialization": "[0,\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\",1700000000,30432,[[\"d\",\"gpu\"],[\"a\",\"10432:466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27:\"],[\"L\",\"toon.network\"],[\"l\",\"isolation:shared-kernel\",\"toon.network\"],[\"l\",\"arch:amd64\",\"toon.network\"],[\"l\",\"gpu:rtx-4090\",\"toon.network\"],[\"g\",\"u4pruydqqvj\"]],\"{\\\"version\\\":1,\\\"resources\\\":{\\\"cpu_millicores\\\":500,\\\"memory_mb\\\":256,\\\"storage_gb\\\":4,\\\"gpu\\\":\\\"rtx-4090\\\"},\\\"arch\\\":\\\"amd64\\\",\\\"lease_interval_s\\\":3600,\\\"price\\\":1000,\\\"capabilities\\\":[]}\"]"
+}

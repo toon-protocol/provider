@@ -1,0 +1,40 @@
+{
+  "fixture": {
+    "case": "wrong_listing_version",
+    "description": "A valid spawn paid on a `basic` version this provider does not sell (v2; it sells v1). Still billed (ADR 0003).",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/listings/basic/v2/spawn",
+  "request_body": {
+    "request": {
+      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd\",\"reference\":\"docker.io/library/alpine\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"volume_gb\":2,\"workload_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}",
+      "created_at": 1700000000,
+      "id": "6f97a4654c9724c729d409c1e993d70a08cf65e26b9d42a8a53e59f42560ed30",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "ed83dcec69baaaa092b6ad4e1588a668ba4112a7ec7f21edf29f299406b6636d732aaff68ed509c43b32706e4365124f36b726a78afc606139e12619bf0e3807",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "spawn"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "error": "wrong_listing_version",
+    "message": "this provider sells no basic v2; it sells v1"
+  },
+  "response_status": 404,
+  "route": "g.fixture.basic.v2.spawn",
+  "validation_step": "§6.2 step 2: the route's listing version exists"
+}

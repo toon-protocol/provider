@@ -1,0 +1,18 @@
+{
+  "fixture": {
+    "case": "ok",
+    "description": "A paid extension (spec §6.3) on the lease's own listing version: unsigned, `{ workload_id }` only, and `expires_at` grows by one lease interval.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "extend"
+  },
+  "http_path": "/listings/basic/v1/extend",
+  "request_body": {
+    "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "response_body": {
+    "expires_at": 1700007200,
+    "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "response_status": 200,
+  "route": "g.fixture.basic.v1.extend"
+}

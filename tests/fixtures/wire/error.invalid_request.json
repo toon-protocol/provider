@@ -1,0 +1,40 @@
+{
+  "fixture": {
+    "case": "invalid_request",
+    "description": "A spawn whose content carries a field the spec does not name (`privileged`). Unknown fields are refused, never dropped: a runtime flag, host mount, device or capability in a spawn is not silently ignored (ADR 0004).",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/listings/basic/v1/spawn",
+  "request_body": {
+    "request": {
+      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd\",\"reference\":\"docker.io/library/alpine\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"privileged\":true,\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"volume_gb\":2,\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "created_at": 1700000000,
+      "id": "e9b41577aafd22980bea1144e831b64db7a3bc8a8190a1a3f7480c2f54216bf0",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "4fc1e7903b0354f8733ba43cd523dfa04f5eb9993f535e390009cc5204b59a3a7d4773de4b00ba3d88879d181ad193bbd1dc18e25993a2989abd79475f2cdd46",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "spawn"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "error": "invalid_request",
+    "message": "spawn content: unknown field `privileged`, expected one of `workload_id`, `image`, `env`, `ports`, `volume_gb`, `ssh_public_key`, `entrypoint`, `args`, `standby_set`, `template` at line 1 column 273"
+  },
+  "response_status": 400,
+  "route": "g.fixture.basic.v1.spawn",
+  "validation_step": "§6.2 step 1: the content parses as the op's shape"
+}

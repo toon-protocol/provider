@@ -1,0 +1,82 @@
+{
+  "content": {
+    "args": [
+      "-c",
+      "sleep 300"
+    ],
+    "entrypoint": [
+      "/bin/sh"
+    ],
+    "env": {
+      "GREETING": "hello"
+    },
+    "image": {
+      "digest": "sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd",
+      "reference": "docker.io/library/alpine"
+    },
+    "ports": [
+      {
+        "container_port": 443,
+        "protocol": "tcp"
+      }
+    ],
+    "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
+    "volume_gb": 2,
+    "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "event": {
+    "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd\",\"reference\":\"docker.io/library/alpine\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"volume_gb\":2,\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+    "created_at": 1700000000,
+    "id": "6334f3fb62e13710e0d0ec601a7429cfd3d8dba5dffc40d7fafd4c5d91532962",
+    "kind": 4432,
+    "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+    "sig": "811157e0357d1fdb29dbfb6c7ce47551b5558d6e2cf5d06d93a5a93d93420f0c826132d3c83c6661bf2ac56f2b1fedd29b88306fe840d73bad834560f400c90b",
+    "tags": [
+      [
+        "p",
+        "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+      ],
+      [
+        "op",
+        "spawn"
+      ],
+      [
+        "expiration",
+        "1700000060"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "spawn",
+    "description": "Buys a lease on `<addr>.basic.v1.spawn`. The body of `spawn.ok`.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "lease_request"
+  },
+  "kind_name": "K_LEASE_REQUEST",
+  "nip01_serialization": "[0,\"4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa\",1700000000,4432,[[\"p\",\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\"],[\"op\",\"spawn\"],[\"expiration\",\"1700000060\"]],\"{\\\"args\\\":[\\\"-c\\\",\\\"sleep 300\\\"],\\\"entrypoint\\\":[\\\"/bin/sh\\\"],\\\"env\\\":{\\\"GREETING\\\":\\\"hello\\\"},\\\"image\\\":{\\\"digest\\\":\\\"sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd\\\",\\\"reference\\\":\\\"docker.io/library/alpine\\\"},\\\"ports\\\":[{\\\"container_port\\\":443,\\\"protocol\\\":\\\"tcp\\\"}],\\\"ssh_public_key\\\":\\\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\\\",\\\"volume_gb\\\":2,\\\"workload_id\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"}\"]",
+  "packet_body": {
+    "request": {
+      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd\",\"reference\":\"docker.io/library/alpine\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"volume_gb\":2,\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "created_at": 1700000000,
+      "id": "6334f3fb62e13710e0d0ec601a7429cfd3d8dba5dffc40d7fafd4c5d91532962",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "811157e0357d1fdb29dbfb6c7ce47551b5558d6e2cf5d06d93a5a93d93420f0c826132d3c83c6661bf2ac56f2b1fedd29b88306fe840d73bad834560f400c90b",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "spawn"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "packet_body_encoding": "The HTTP request body is this JSON object: the signed event, unmodified, as the value of the single key `request`. No other key is allowed. The connector carries the whole HTTP request inside its sealed envelope; the provider app receives this body as plaintext JSON."
+}

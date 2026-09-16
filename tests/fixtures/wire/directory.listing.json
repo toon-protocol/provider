@@ -1,0 +1,64 @@
+{
+  "content": {
+    "arch": "amd64",
+    "capabilities": [
+      "x-fixture"
+    ],
+    "lease_interval_s": 3600,
+    "price": 1000,
+    "resources": {
+      "cpu_millicores": 500,
+      "memory_mb": 256,
+      "storage_gb": 4
+    },
+    "version": 1
+  },
+  "event": {
+    "content": "{\"version\":1,\"resources\":{\"cpu_millicores\":500,\"memory_mb\":256,\"storage_gb\":4},\"arch\":\"amd64\",\"lease_interval_s\":3600,\"price\":1000,\"capabilities\":[\"x-fixture\"]}",
+    "created_at": 1700000000,
+    "id": "141b74be4bdf05c0d0db41ced372bc573ca739f928e0e2195caa032520a88da0",
+    "kind": 30432,
+    "pubkey": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+    "sig": "7789bfcb5d50a6cc20710d126f5b4a5b8667927b320f12292e4549ba49627f33e3058a70268ea551516fcc9981bd97285c153ef27f64936116ece1240717729e",
+    "tags": [
+      [
+        "d",
+        "basic"
+      ],
+      [
+        "a",
+        "10432:466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27:"
+      ],
+      [
+        "L",
+        "toon.network"
+      ],
+      [
+        "l",
+        "isolation:shared-kernel",
+        "toon.network"
+      ],
+      [
+        "l",
+        "arch:amd64",
+        "toon.network"
+      ],
+      [
+        "t",
+        "x-fixture"
+      ],
+      [
+        "g",
+        "u4pruydqqvj"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "listing",
+    "description": "The `basic` Listing (spec §4.2): addressable on `d`, pointing at its Profile through `a`, with one `t` tag per capability (here the experimental `x-fixture`) and `l` labels for isolation and arch. `routes.listing` is what this event generates.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "directory"
+  },
+  "kind_name": "K_LISTING",
+  "nip01_serialization": "[0,\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\",1700000000,30432,[[\"d\",\"basic\"],[\"a\",\"10432:466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27:\"],[\"L\",\"toon.network\"],[\"l\",\"isolation:shared-kernel\",\"toon.network\"],[\"l\",\"arch:amd64\",\"toon.network\"],[\"t\",\"x-fixture\"],[\"g\",\"u4pruydqqvj\"]],\"{\\\"version\\\":1,\\\"resources\\\":{\\\"cpu_millicores\\\":500,\\\"memory_mb\\\":256,\\\"storage_gb\\\":4},\\\"arch\\\":\\\"amd64\\\",\\\"lease_interval_s\\\":3600,\\\"price\\\":1000,\\\"capabilities\\\":[\\\"x-fixture\\\"]}\"]"
+}
