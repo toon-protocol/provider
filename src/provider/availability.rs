@@ -45,7 +45,14 @@ async fn check(state: &AppState, body: &[u8]) -> Result<(), ErrorResponse> {
     // spawn applies, so an image this provider cannot fetch is reported here
     // for free rather than bought.
     let image = SpawnImage::parse(&request.image)?;
-    image_policy::check(&state.image_registry, &state.image_policy, listing, &image).await?;
+    image_policy::check(
+        &state.fetcher,
+        state.directory.as_ref(),
+        &state.image_policy,
+        listing,
+        &image,
+    )
+    .await?;
 
     // Step 6: capacity, counted the same way spawn counts it — live leases
     // against the listing name's declared capacity — read-only, so this

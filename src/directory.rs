@@ -11,18 +11,37 @@
 // how money reaches a relay.
 //
 // Reads are free — a NIP-01 REQ over a relay's websocket costs nothing — so
-// `query_liveness` speaks to the Relay Set directly and needs no payer.
+// `query_liveness` and `get_image_entry` speak to relays directly and need
+// no payer. `get_image_entry` reads from the ONE relay a spawn hinted at
+// (spec §6.2), not the Relay Set: an Image Registry entry is a publisher's
+// event, and the tenant says where it can be found.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use nostr_sdk::{Client, Event, Filter, Kind, PublicKey};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::nostr::kinds::K_LIVENESS;
+
+/// The `<kind>:<pubkey>:<d>` coordinate of an addressable event, as a
+/// spawn's `registry_entry.address` carries it (spec §6.2). `d` may itself
+/// contain colons (`web:1.0`), so only the first two are separators.
+pub fn parse_coordinate(address: &str) -> Result<(u16, PublicKey, String)> {
+    let mut parts = address.splitn(3, ':');
+    let (Some(kind), Some(pubkey), Some(d)) = (parts.next(), parts.next(), parts.next()) else {
+        bail!("{:?} is not a `<kind>:<pubkey>:<d>` address", address);
+    };
+    let kind: u16 = kind
+        .parse()
+        .with_context(|| format!("{:?}: the kind is not a number", address))?;
+    let pubkey = PublicKey::from_hex(pubkey)
+        .with_context(|| format!("{:?}: the pubkey is not 32 bytes of hex", address))?;
+    Ok((kind, pubkey, d.to_string()))
+}
 
 /// Which relays of the Relay Set took an event, and why the rest did not.
 ///
@@ -84,6 +103,13 @@ pub trait Directory: Send + Sync {
     /// `provider`, or `None` when it holds none — which is what "not live"
     /// means (spec §4.3). Reads are free.
     async fn query_liveness(&self, provider: PublicKey) -> Result<Option<Event>>;
+
+    /// The Image Registry entry at `address` (`30434:<pubkey>:<name>:<tag>`)
+    /// as `relay` holds it, or `None` when it holds none (spec §6.2, §8.1).
+    /// The relay is the one the spawn hinted at, not the Relay Set. Reads
+    /// are free. The caller checks that what came back IS the entry named:
+    /// signed by the address's pubkey, under its `d`.
+    async fn get_image_entry(&self, address: &str, relay: &str) -> Result<Option<Event>>;
 }
 
 /// The Directory of a provider that publishes nothing: no `publish_url` is
@@ -108,6 +134,34 @@ impl Directory for NullDirectory {
     async fn query_liveness(&self, _provider: PublicKey) -> Result<Option<Event>> {
         Ok(None)
     }
+
+    /// A provider with no publisher can still READ: an Image Registry
+    /// entry lives on whatever relay the spawn named, which needs no money.
+    async fn get_image_entry(&self, address: &str, relay: &str) -> Result<Option<Event>> {
+        fetch_addressable(address, relay).await
+    }
+}
+
+/// One free NIP-01 REQ to `relay` for the addressable event at `address`,
+/// newest publication first — two publications of one `d` may both be on
+/// the wire while the older one is being replaced.
+async fn fetch_addressable(address: &str, relay: &str) -> Result<Option<Event>> {
+    let (kind, pubkey, d) = parse_coordinate(address)?;
+    let client = Client::default();
+    client
+        .add_relay(relay)
+        .await
+        .with_context(|| format!("{} is not a usable relay URL", relay))?;
+    client.connect().await;
+    let filter = Filter::new()
+        .kind(Kind::Custom(kind))
+        .author(pubkey)
+        .identifier(d)
+        .limit(1);
+    let events = client.fetch_events(filter, QUERY_TIMEOUT).await;
+    client.disconnect().await;
+    let events = events.with_context(|| format!("reading {} from {}", address, relay))?;
+    Ok(events.into_iter().max_by_key(|e| e.created_at))
 }
 
 /// What `ConnectorDirectory` hands the directory publisher.
@@ -235,5 +289,9 @@ impl Directory for ConnectorDirectory {
         // Newest wins: two relays may hold different publications of a
         // replaceable event while the older one is still propagating.
         Ok(events.into_iter().max_by_key(|e| e.created_at))
+    }
+
+    async fn get_image_entry(&self, address: &str, relay: &str) -> Result<Option<Event>> {
+        fetch_addressable(address, relay).await
     }
 }

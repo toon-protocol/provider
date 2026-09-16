@@ -338,15 +338,6 @@ pub enum SpawnImage {
     Digest { digest: String },
 }
 
-/// What a provider says when it is handed an Image Registry form it cannot
-/// yet resolve. `refused_image`, not `invalid_request`: the request is
-/// well-formed and the spec allows it — this provider simply cannot fetch
-/// those bytes yet, and a tenant must learn that from `availability` before
-/// it pays rather than from a lease it cannot use.
-pub const IMAGE_REGISTRY_NOT_RESOLVED: &str =
-    "image: this provider does not yet resolve the Image Registry, so it cannot fetch an image \
-     named by digest alone or by a registry entry; name it with an upstream `reference` as well";
-
 impl SpawnImage {
     /// Tell the three forms apart, refusing any fourth shape as
     /// `invalid_request` (spec §6.2 step 5).

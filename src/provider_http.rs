@@ -38,7 +38,7 @@ use crate::provider::routes::{
     AVAILABILITY_PATH, EXTEND_PATTERN, SPAWN_PATTERN, STATUS_PATH, TERMINATE_PATH,
 };
 use crate::provider::{
-    availability, evict, extend, spawn, status, terminate, ImagePolicy, LeaseRecord, OciRegistry,
+    availability, evict, extend, spawn, status, terminate, BlobFetcher, ImagePolicy, LeaseRecord,
     ProviderConfig,
 };
 
@@ -63,7 +63,10 @@ pub struct AppState {
     /// `availability` and a paid spawn's validation step 5, so the two never
     /// disagree.
     pub image_policy: Arc<ImagePolicy>,
-    pub image_registry: Arc<OciRegistry>,
+    /// How every image byte is fetched and verified (spec §8.4): from the
+    /// TOON store through the configured gateway, or from an upstream OCI
+    /// registry. One instance, so its cache of verified blobs is shared.
+    pub fetcher: Arc<BlobFetcher>,
 }
 
 impl AppState {
@@ -79,7 +82,8 @@ impl AppState {
             .context("nostr_private_key must be a hex or nsec1 secret key")?;
         let directory = directory_from_config(&config)?;
         let image_policy = Arc::new(ImagePolicy::from_config(&config.image_policy));
-        let image_registry = Arc::new(OciRegistry::new(
+        let fetcher = Arc::new(BlobFetcher::new(
+            config.gateway_url_pattern.clone(),
             config.image_policy.registry_url_override.clone(),
         ));
         Ok(Self {
@@ -91,7 +95,7 @@ impl AppState {
             leases: Arc::new(Mutex::new(HashMap::new())),
             accepted_requests: Arc::new(AcceptedRequests::new()),
             image_policy,
-            image_registry,
+            fetcher,
         })
     }
 
