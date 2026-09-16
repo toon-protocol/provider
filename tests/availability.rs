@@ -406,3 +406,80 @@ async fn availability_never_calls_the_backend_across_every_outcome() {
 
     assert!(h.backend.calls().is_empty());
 }
+
+#[tokio::test]
+async fn an_image_registry_form_answers_refused_image_before_a_tenant_pays() {
+    // The whole point of the free route: a tenant naming an image by digest
+    // learns here that this provider cannot fetch it, instead of buying the
+    // same answer on `.spawn` (ADR 0003 — a refusal is still billed).
+    let registry = common::stub_registry().await;
+    let h = harness(
+        vec![listing("basic", 1, 2, "amd64")],
+        ImagePolicyConfig::default(),
+        registry,
+    )
+    .await;
+
+    let entry = json!({
+        "address": "30434:4444444444444444444444444444444444444444444444444444444444444444:web:1.0",
+        "relay": "wss://relay.example",
+    });
+    for (label, image) in [
+        (
+            "digest with a registry entry",
+            json!({ "digest": valid_digest(), "registry_entry": entry }),
+        ),
+        ("digest alone", json!({ "digest": valid_digest() })),
+    ] {
+        let body = json!({ "listing": "basic", "version": 1, "image": image });
+        let (status, resp) = post(&h.app, body).await;
+
+        assert_eq!(status, StatusCode::OK, "{}: {}", label, resp);
+        assert_eq!(resp["would_run"], false, "{}", label);
+        assert_eq!(resp["error"], "refused_image", "{}", label);
+        assert!(
+            resp["message"]
+                .as_str()
+                .unwrap()
+                .contains("does not yet resolve the Image Registry"),
+            "{}: {}",
+            label,
+            resp
+        );
+    }
+    assert!(h.backend.calls().is_empty());
+}
+
+#[tokio::test]
+async fn an_image_that_is_neither_of_the_three_forms_is_invalid_request() {
+    let registry = common::stub_registry().await;
+    let h = harness(
+        vec![listing("basic", 1, 2, "amd64")],
+        ImagePolicyConfig::default(),
+        registry,
+    )
+    .await;
+
+    for (label, image) in [
+        (
+            "a reference and a registry entry",
+            json!({
+                "reference": REFERENCE,
+                "digest": valid_digest(),
+                "registry_entry": {
+                    "address": "30434:4444444444444444444444444444444444444444444444444444444444444444:web:1.0",
+                    "relay": "wss://relay.example",
+                },
+            }),
+        ),
+        ("a malformed digest", json!({ "digest": "sha256:abc" })),
+    ] {
+        let body = json!({ "listing": "basic", "version": 1, "image": image });
+        let (status, resp) = post(&h.app, body).await;
+
+        assert_eq!(status, StatusCode::OK, "{}", label);
+        assert_eq!(resp["would_run"], false, "{}", label);
+        assert_eq!(resp["error"], "invalid_request", "{}: {}", label, resp);
+    }
+    assert!(h.backend.calls().is_empty());
+}

@@ -9,7 +9,7 @@ use toon_provider::nostr::directory_events::{
 };
 use toon_provider::nostr::image_events::{
     blob_record_event, image_entry_event, template_event, BlobRecord, BlobRecordContent,
-    BlobSource, ImageEntry, ImageEntryContent, Template, TemplateContent,
+    BlobSource, ImageEntry, ImageEntryContent, SpawnImage, Template, TemplateContent,
 };
 use toon_provider::nostr::kinds::{K_BLOB, K_IMAGE, K_LEASE_REQUEST, K_TEMPLATE, TOON_LABEL};
 use toon_provider::nostr::wire::*;
@@ -79,13 +79,106 @@ fn a_spawn_may_not_carry_runtime_flags_host_mounts_devices_or_capabilities() {
 }
 
 #[test]
-fn standby_set_and_registry_entry_parse_so_they_can_be_refused_by_name() {
+fn standby_set_parses_so_it_can_be_refused_by_name() {
     let mut with = serde_json::to_value(spawn_content()).unwrap();
     with["standby_set"] = json!(["aa".repeat(32), "bb".repeat(32)]);
-    with["image"]["registry_entry"] = json!({ "address": "30434:pk:d", "relay": "wss://r" });
     let parsed: SpawnContent = serde_json::from_value(with).unwrap();
     assert_eq!(parsed.standby_set.as_ref().map(Vec::len), Some(2));
-    assert!(parsed.image.registry_entry.is_some());
+}
+
+#[test]
+fn the_three_spawn_image_forms_write_exactly_their_own_fields() {
+    // Spec §6.2 writes three shapes, and each is exactly its own fields:
+    // an absent `reference` or `registry_entry` is omitted, never null.
+    let digest = format!("sha256:{}", "cd".repeat(32));
+    for (form, expected) in [
+        (
+            ImageRef::upstream("docker.io/library/alpine", &digest),
+            json!({ "reference": "docker.io/library/alpine", "digest": digest }),
+        ),
+        (
+            ImageRef::from_registry(&digest, ENTRY_ADDRESS, "wss://relay.example"),
+            json!({
+                "digest": digest,
+                "registry_entry": { "address": ENTRY_ADDRESS, "relay": "wss://relay.example" },
+            }),
+        ),
+        (ImageRef::by_digest(&digest), json!({ "digest": digest })),
+    ] {
+        let value = serde_json::to_value(&form).unwrap();
+        assert_eq!(value, expected);
+        assert_eq!(serde_json::from_value::<ImageRef>(value).unwrap(), form);
+    }
+}
+
+#[test]
+fn the_three_spawn_image_forms_are_told_apart_and_a_fourth_is_refused() {
+    let digest = format!("sha256:{}", "cd".repeat(32));
+    assert_eq!(
+        SpawnImage::parse(&ImageRef::upstream("docker.io/library/alpine", &digest)).unwrap(),
+        SpawnImage::Upstream {
+            reference: "docker.io/library/alpine".to_string(),
+            digest: digest.clone(),
+        }
+    );
+    let registry =
+        SpawnImage::parse(&ImageRef::from_registry(&digest, ENTRY_ADDRESS, "wss://r")).unwrap();
+    assert!(matches!(registry, SpawnImage::Registry { .. }));
+    assert_eq!(
+        SpawnImage::parse(&ImageRef::by_digest(&digest)).unwrap(),
+        SpawnImage::Digest {
+            digest: digest.clone()
+        }
+    );
+
+    // Only the upstream form names something to pull; the other two are
+    // resolved through §8.4 instead, and say so by answering `None`.
+    assert_eq!(
+        SpawnImage::parse(&ImageRef::upstream("alpine", &digest))
+            .unwrap()
+            .upstream_pull(),
+        Some(format!("alpine@{}", digest))
+    );
+    assert_eq!(
+        SpawnImage::parse(&ImageRef::by_digest(&digest))
+            .unwrap()
+            .upstream_pull(),
+        None
+    );
+
+    let mut fourth = ImageRef::upstream("docker.io/library/alpine", &digest);
+    fourth.registry_entry = Some(RegistryEntryRef {
+        address: ENTRY_ADDRESS.to_string(),
+        relay: "wss://r".to_string(),
+    });
+    for (label, image) in [
+        ("a reference and a registry entry", fourth),
+        (
+            "a tag instead of a repository",
+            ImageRef::upstream("docker.io/library/alpine:latest", &digest),
+        ),
+        ("a truncated digest", ImageRef::by_digest("sha256:abc")),
+        (
+            "an uppercase digest",
+            ImageRef::by_digest(format!("sha256:{}", "CD".repeat(32))),
+        ),
+        ("a digest with no algorithm", ImageRef::by_digest("cd".repeat(32))),
+        (
+            "an address that names another kind",
+            ImageRef::from_registry(&digest, "30432:aa:basic", "wss://r"),
+        ),
+        (
+            "an address with no `d`",
+            ImageRef::from_registry(&digest, format!("30434:{}:", "44".repeat(32)), "wss://r"),
+        ),
+        (
+            "an entry with no relay",
+            ImageRef::from_registry(&digest, ENTRY_ADDRESS, ""),
+        ),
+    ] {
+        let refused = SpawnImage::parse(&image).expect_err(label);
+        assert_eq!(refused.error, ErrorCode::InvalidRequest, "{}", label);
+    }
 }
 
 #[test]
@@ -618,6 +711,10 @@ const TEMPLATE_CONTENT: &str = concat!(
     r#""env_tenant":["API_KEY","SEED"],"#,
     r#""min_resources":{"cpu_millicores":500,"memory_mb":512,"storage_gb":4}}"#,
 );
+
+/// A publisher's Image Registry entry coordinate, as spec §6.2 writes it.
+const ENTRY_ADDRESS: &str =
+    "30434:4444444444444444444444444444444444444444444444444444444444444444:web:1.0";
 
 const ENTRY_DIGEST_HEX: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const BLOB_DIGEST_HEX: &str = "2222222222222222222222222222222222222222222222222222222222222222";
