@@ -132,7 +132,7 @@ pub async fn spawn(
         image = SpawnImage::parse(&content.image)?;
         resolved = image_policy::check(
             &state.fetcher,
-            &state.directory,
+            state.directory.clone(),
             &state.image_policy,
             &listing,
             &image,
@@ -282,9 +282,14 @@ pub async fn spawn(
     }
 }
 
-/// Fetch every layer of an image resolved through its Image Registry entry,
-/// assemble the verified blobs into an OCI layout and load it into the
-/// backend; answer the image id the backend runs it by (spec §8.4).
+/// Fetch every layer of an image whose bytes THIS PROVIDER holds — the two
+/// content-address forms, through an Image Registry entry or by digest
+/// alone — assemble the verified blobs into an OCI layout and load it into
+/// the backend; answer the image id the backend runs it by (spec §8.4).
+///
+/// Each layer goes down the same chain resolution came down, and down the
+/// same `BlobSources` value, so a Blob Record the Relay Set already
+/// answered for is not looked up twice.
 ///
 /// The manifest and the config are already in the cache — resolution put
 /// them there — so the layout is written straight out of the cache once

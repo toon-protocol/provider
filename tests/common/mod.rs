@@ -304,8 +304,10 @@ pub struct FakeDirectory {
     entry_lookups: Mutex<Vec<(String, String)>>,
     /// Blob Records `find_blob_records` answers with, as the Relay Set
     /// holding them would: matched by kind and `#x`, in the order they were
-    /// seeded, so a test can say which of two records for one digest the
-    /// provider tries first.
+    /// seeded. Seeding order models the order a Relay Set answered in —
+    /// `ConnectorDirectory` sorts its own answer newest first — so a test
+    /// can say which of two records for one digest the provider tries
+    /// first, whatever decided that order in production.
     blob_records: Mutex<Vec<nostr_sdk::Event>>,
     /// Every digest the provider looked Blob Records up for, in order — so
     /// a test can see that the Relay Set was (or was not) searched, and for

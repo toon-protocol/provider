@@ -128,7 +128,7 @@ impl ResolvedImage {
 /// than the index digest) is on the deny list.
 pub async fn check(
     fetcher: &BlobFetcher,
-    directory: &Arc<dyn Directory>,
+    directory: Arc<dyn Directory>,
     policy: &ImagePolicy,
     listing: &Listing,
     image: &SpawnImage,
@@ -153,8 +153,10 @@ pub async fn check(
             // Milestone 1's form: the registry serves every manifest, and
             // the layers are the backend's to pull once the image passes.
             // Nothing else is checked for them here, because this provider
-            // never holds their bytes.
-            let sources = BlobSources::upstream(registry, repository, directory.clone());
+            // never holds their bytes — and no Relay Set is searched for
+            // them either, which is §6.2's "No Image Registry lookup at
+            // all" for this form.
+            let sources = BlobSources::upstream(registry, repository);
             let (manifest_digest, size_bytes, manifest) =
                 resolve(fetcher, digest, &listing.arch, &sources).await?;
             ResolvedImage {
@@ -176,7 +178,7 @@ pub async fn check(
                 fetcher,
                 digest,
                 &listing.arch,
-                BlobSources::entry(entry, directory.clone()),
+                BlobSources::entry(entry, directory),
             )
             .await?
         }
@@ -187,7 +189,7 @@ pub async fn check(
                 fetcher,
                 digest,
                 &listing.arch,
-                BlobSources::relay_set(directory.clone()),
+                BlobSources::relay_set(directory),
             )
             .await?
         }

@@ -47,7 +47,7 @@ async fn check(state: &AppState, body: &[u8]) -> Result<(), ErrorResponse> {
     let image = SpawnImage::parse(&request.image)?;
     image_policy::check(
         &state.fetcher,
-        &state.directory,
+        state.directory.clone(),
         &state.image_policy,
         listing,
         &image,

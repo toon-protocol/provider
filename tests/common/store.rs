@@ -208,6 +208,21 @@ impl World {
         });
     }
 
+    /// List `digest` as an `oci` blob in a repository the registry will not
+    /// serve it from: an upstream that refuses, which §8.4 moves past like
+    /// any other source that cannot serve.
+    pub fn list_unserved_upstream(&mut self, digest: &str, size: u64, media_type: &str) {
+        self.blobs.push(EntryBlob {
+            digest: digest.to_string(),
+            size,
+            media_type: media_type.to_string(),
+            source: BlobSource::Oci {
+                registry: "docker.io".to_string(),
+                repository: REPOSITORY.to_string(),
+            },
+        });
+    }
+
     /// Serve `bytes` from the upstream registry and list it as an `oci`
     /// blob. Answers the blob's digest.
     pub async fn upstream(&mut self, bytes: &[u8], media_type: &str) -> String {
@@ -289,6 +304,24 @@ impl World {
     /// The `/raw/` paths of a stored blob's parts, without its record.
     pub fn part_paths(&self, digest: &str) -> Vec<String> {
         self.part_paths_of(&digest.strip_prefix("sha256:").unwrap()[..12])
+    }
+
+    /// The `/raw/` path of one part of a stored blob — so a test names a
+    /// part the way this world does rather than re-deriving the txid rule.
+    pub fn part_path(&self, digest: &str, index: usize) -> String {
+        format!(
+            "/raw/{}-part{}",
+            &digest.strip_prefix("sha256:").unwrap()[..12],
+            index
+        )
+    }
+
+    /// The `/raw/` path of a stored blob's own Blob Record upload.
+    pub fn record_path(&self, digest: &str) -> String {
+        format!(
+            "/raw/{}-record",
+            &digest.strip_prefix("sha256:").unwrap()[..12]
+        )
     }
 
     /// Every path the gateway was asked for, as a set.

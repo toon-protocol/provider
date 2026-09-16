@@ -272,8 +272,9 @@ asking each relay in [`relay_set`](#configuration) for the Blob Records
 tagged `#x = <hex>`, whoever signed them. That is safe because no signer is
 trusted: each part is checked against its recorded sha256 and size and each
 blob against the digest that was asked for, so a wrong record is discarded
-and the next one is tried (ADR 0006). A provider with no Relay Set
-configured finds none and refuses every bare digest.
+and the next one is tried (ADR 0006). Relay reads are free, so this needs
+no `publish_url` — only relays; a provider with none configured finds none
+and refuses every bare digest.
 
 **Through an upstream reference**, the image is pulled by the daemon as
 `reference@digest`, so the daemon verifies the bytes and picks the manifest
@@ -500,7 +501,10 @@ index, a manifest, a config, a layer — and whichever form named the image:
    here contacts nothing: no relay, no gateway, no registry.
 2. **The source the image's own description names.** For
    `{ reference, digest }` that is the upstream OCI registry the reference
-   names, over plain HTTP(S) (`docker.io` references resolve against
+   names — and *only* that, because the spec gives this form "no Image
+   Registry lookup at all" (§6.2): a registry that will not serve a blob of
+   it ends the chain rather than starting a search for someone else's copy.
+   It is read over plain HTTP(S) (`docker.io` references resolve against
    `registry-1.docker.io`, with an anonymous token from the challenge in
    `Www-Authenticate` when the registry answers 401 — the generic bearer
    flow every OCI-distribution registry supports; other registries are
@@ -513,7 +517,8 @@ index, a manifest, a config, a layer — and whichever form named the image:
    must be the entry named — signed by the address's pubkey, under its
    `<name>:<tag>`, describing this digest. A bare digest names nothing, so
    this step is skipped.
-3. **Blob Records on the Relay Set.** Every relay in `relay_set` is asked
+3. **Blob Records on the Relay Set**, for the two content-address forms.
+   Every relay in `relay_set` is asked
    for the kind-30435 events tagged `#x = <hex>`, and each is tried as a
    part list. **Any signer's record is safe to try**: the provider checks
    each part against its recorded sha256 and size and the reassembled blob

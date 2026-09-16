@@ -49,7 +49,7 @@ use tracing::warn;
 
 use super::blob_cache::{BlobCache, CacheError};
 use super::oci::{OciClient, OciEndpoint};
-use crate::directory::{Directory, NullDirectory};
+use crate::directory::Directory;
 use crate::nostr::image_events::{BlobRecord, BlobRecordContent, BlobSource, ImageEntry};
 use crate::nostr::wire::{ErrorCode, ErrorResponse};
 
@@ -128,27 +128,32 @@ impl Candidate {
 /// of the layers reuses what resolution already found.
 #[derive(Clone)]
 pub struct BlobSources {
-    named: Named,
-    directory: Arc<dyn Directory>,
-    /// Blob Records found on the Relay Set, by digest. `None` for a digest
+    describes: Description,
+    /// The Relay Set to search for Blob Records — `None` when §8.4 step 3
+    /// does not apply to this image at all: Milestone 1's `reference` form,
+    /// which §6.2 gives "No Image Registry lookup at all", and an image
+    /// nothing describes and no relay is asked about.
+    directory: Option<Arc<dyn Directory>>,
+    /// Blob Records found on the Relay Set, by digest. Absent for a digest
     /// nobody has asked about yet.
     found: Arc<Mutex<HashMap<String, Vec<Candidate>>>>,
 }
 
 impl std::fmt::Debug for BlobSources {
-    /// Written by hand: `Arc<dyn Directory>` has no `Debug`, and what a
-    /// reader of a log line wants is which form named the image, not the
-    /// port behind it.
+    /// Written by hand only because `Arc<dyn Directory>` has none, and
+    /// `ResolvedImage` — which carries one of these — derives `Debug`. What
+    /// it prints is the part a reader would want: which form named the
+    /// image, not the port behind it.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.named {
-            Named::Upstream {
+        match &self.describes {
+            Description::Upstream {
                 registry,
                 repository,
             } => write!(f, "BlobSources(upstream {}/{})", registry, repository),
-            Named::Entry(entry) => {
+            Description::Entry(entry) => {
                 write!(f, "BlobSources(entry {}:{})", entry.name, entry.tag)
             }
-            Named::Nothing => write!(f, "BlobSources(Relay Set only)"),
+            Description::Nothing => write!(f, "BlobSources(Relay Set only)"),
         }
     }
 }
@@ -156,7 +161,7 @@ impl std::fmt::Debug for BlobSources {
 /// What the image's own description says, which is one of the three forms
 /// §6.2 allows.
 #[derive(Clone)]
-enum Named {
+enum Description {
     /// `{ reference, digest }`: the repository the tenant named serves the
     /// image's manifests. Its layers are the backend's to pull.
     Upstream {
@@ -173,41 +178,40 @@ enum Named {
 }
 
 impl BlobSources {
-    /// Milestone 1's form: one upstream repository for the whole image.
-    pub fn upstream(
-        registry: impl Into<String>,
-        repository: impl Into<String>,
-        directory: Arc<dyn Directory>,
-    ) -> Self {
+    /// Milestone 1's form: one upstream repository for the whole image, and
+    /// NO Relay Set. That is §6.2's own word for it — "No Image Registry
+    /// lookup at all" — so a registry that will not serve a blob of it is
+    /// the end of the chain, not the start of a search for someone else's
+    /// copy.
+    pub fn upstream(registry: impl Into<String>, repository: impl Into<String>) -> Self {
         Self::with(
-            Named::Upstream {
+            Description::Upstream {
                 registry: registry.into(),
                 repository: repository.into(),
             },
-            directory,
+            None,
         )
     }
 
     /// The form that names an Image Registry entry.
     pub fn entry(entry: ImageEntry, directory: Arc<dyn Directory>) -> Self {
-        Self::with(Named::Entry(Box::new(entry)), directory)
+        Self::with(Description::Entry(Box::new(entry)), Some(directory))
     }
 
     /// `{ digest }` alone: the Relay Set is the only source.
     pub fn relay_set(directory: Arc<dyn Directory>) -> Self {
-        Self::with(Named::Nothing, directory)
+        Self::with(Description::Nothing, Some(directory))
     }
 
     /// Sources for an image nothing describes and no relay is asked about:
-    /// what a caller that only reads the cache (the layout writer, a unit
-    /// test) hands in.
+    /// what a caller that only reads the cache hands in.
     pub fn nowhere() -> Self {
-        Self::with(Named::Nothing, Arc::new(NullDirectory))
+        Self::with(Description::Nothing, None)
     }
 
-    fn with(named: Named, directory: Arc<dyn Directory>) -> Self {
+    fn with(describes: Description, directory: Option<Arc<dyn Directory>>) -> Self {
         Self {
-            named,
+            describes,
             directory,
             found: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -217,8 +221,8 @@ impl BlobSources {
     /// Empty when it names nothing for it — a bare digest, or an entry that
     /// does not list the blob.
     pub fn named(&self, digest: &str) -> Vec<Candidate> {
-        match &self.named {
-            Named::Upstream {
+        match &self.describes {
+            Description::Upstream {
                 registry,
                 repository,
             } => vec![Candidate::Oci {
@@ -226,14 +230,14 @@ impl BlobSources {
                 repository: repository.clone(),
                 endpoint: OciEndpoint::Manifests,
             }],
-            Named::Entry(entry) => entry
+            Description::Entry(entry) => entry
                 .content
                 .blobs
                 .iter()
                 .find(|blob| blob.digest == digest)
                 .map(|blob| vec![Candidate::from_entry_source(&blob.source, &blob.media_type)])
                 .unwrap_or_default(),
-            Named::Nothing => Vec::new(),
+            Description::Nothing => Vec::new(),
         }
     }
 
@@ -242,23 +246,26 @@ impl BlobSources {
     /// a different mistake from a bare digest nobody has uploaded every
     /// blob of, and a tenant can only act on the difference.
     pub fn no_source_message(&self, digest: &str) -> String {
-        let why = match &self.named {
-            Named::Upstream {
+        let why = match &self.describes {
+            Description::Upstream {
                 registry,
                 repository,
             } => format!("{}/{} does not serve it", registry, repository),
-            Named::Entry(entry) => format!(
+            Description::Entry(entry) => format!(
                 "the Image Registry entry {}:{} does not list it",
                 entry.name, entry.tag
             ),
-            Named::Nothing => "the image was named by digest alone, so nothing names a source \
-                 for it"
-                .to_string(),
+            Description::Nothing => {
+                "the image was named by digest alone, so nothing names a source for it".to_string()
+            }
+        };
+        let relay_set = match &self.directory {
+            Some(_) => ", and this provider's Relay Set holds no Blob Record for it",
+            None => "",
         };
         format!(
-            "no source is known for blob {}: {}, and this provider's Relay Set holds no Blob \
-             Record for it",
-            digest, why
+            "no source is known for blob {}: {}{}",
+            digest, why, relay_set
         )
     }
 
@@ -274,10 +281,13 @@ impl BlobSources {
     /// Nothing else about a record is judged — not its signer, not its
     /// publisher — because the parts and the blob are checked by hash.
     pub async fn discovered(&self, digest: &str) -> Vec<Candidate> {
+        let Some(directory) = &self.directory else {
+            return Vec::new();
+        };
         if let Some(found) = self.found.lock().unwrap().get(digest) {
             return found.clone();
         }
-        let events = match self.directory.find_blob_records(digest).await {
+        let events = match directory.find_blob_records(digest).await {
             Ok(events) => events,
             Err(e) => {
                 warn!(

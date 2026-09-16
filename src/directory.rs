@@ -133,7 +133,24 @@ pub trait Directory: Send + Sync {
 /// It is not an error. A provider whose tenants already know its address is
 /// reachable without ever appearing in the directory, and an unconfigured
 /// sandbox should not fail to start.
-pub struct NullDirectory;
+///
+/// It still READS. Relay reads are free (§8.4, §6.2), so not having a payer
+/// costs a provider nothing it needs to resolve an image: it keeps its
+/// Relay Set here purely to search it for Blob Records. A provider with no
+/// relays configured at all finds none, which is the honest answer rather
+/// than an error.
+#[derive(Default)]
+pub struct NullDirectory {
+    relay_set: Vec<String>,
+}
+
+impl NullDirectory {
+    /// A publisher-less Directory that still searches `relay_set` for Blob
+    /// Records.
+    pub fn new(relay_set: Vec<String>) -> Self {
+        Self { relay_set }
+    }
+}
 
 #[async_trait]
 impl Directory for NullDirectory {
@@ -156,14 +173,49 @@ impl Directory for NullDirectory {
         fetch_addressable(address, relay).await
     }
 
-    /// None. This Directory has no Relay Set to ask — it is what a provider
-    /// with no `publish_url` gets, and the Relay Set it would search is the
-    /// one it publishes to. A provider that wants to serve bare digests
-    /// configures `relay_set` and `publish_url`; one that does not still
-    /// serves every image whose source a spawn names.
-    async fn find_blob_records(&self, _digest: &str) -> Result<Vec<Event>> {
-        Ok(Vec::new())
+    /// The same free search of the Relay Set the publishing Directory does:
+    /// paying for writes has nothing to do with reading.
+    async fn find_blob_records(&self, digest: &str) -> Result<Vec<Event>> {
+        fetch_blob_records(&self.relay_set, digest).await
     }
+}
+
+/// One free NIP-01 REQ to every relay in `relay_set` for the Blob Records
+/// tagged `#x = <hex>`, newest first (spec §8.4 step 3).
+///
+/// No author filter: a bare digest names no publisher, so every signer's
+/// record is a candidate. What makes one usable is its bytes, not its key
+/// — the caller checks each part against its recorded sha256 and the whole
+/// blob against the digest (ADR 0006).
+async fn fetch_blob_records(relay_set: &[String], digest: &str) -> Result<Vec<Event>> {
+    if relay_set.is_empty() {
+        return Ok(Vec::new());
+    }
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+
+    let client = Client::default();
+    for relay in relay_set {
+        if let Err(e) = client.add_relay(relay).await {
+            warn!("relay {} is not a usable relay URL: {}", relay, e);
+        }
+    }
+    client.connect().await;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(K_BLOB))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::X), hex);
+    let events = client.fetch_events(filter, QUERY_TIMEOUT).await;
+    client.disconnect().await;
+
+    let events = events
+        .with_context(|| format!("reading Blob Records for {} from the Relay Set", digest))?;
+    // Newest first is a hint, not a rule: the fetcher tries them in order
+    // and stops at the first whose bytes verify, so the only thing this
+    // order buys is that a republished record is tried before the one it
+    // replaced.
+    let mut events: Vec<Event> = events.into_iter().collect();
+    events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
+    Ok(events)
 }
 
 /// One free NIP-01 REQ to `relay` for the addressable event at `address`,
@@ -320,36 +372,6 @@ impl Directory for ConnectorDirectory {
     }
 
     async fn find_blob_records(&self, digest: &str) -> Result<Vec<Event>> {
-        if self.relay_set.is_empty() {
-            return Ok(Vec::new());
-        }
-        let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
-
-        let client = Client::default();
-        for relay in &self.relay_set {
-            if let Err(e) = client.add_relay(relay).await {
-                warn!("relay {} is not a usable relay URL: {}", relay, e);
-            }
-        }
-        client.connect().await;
-
-        // No author: a bare digest names no publisher, so every signer's
-        // record is a candidate. What makes one usable is its bytes, not
-        // its key (ADR 0006).
-        let filter = Filter::new()
-            .kind(Kind::Custom(K_BLOB))
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::X), hex);
-        let events = client.fetch_events(filter, QUERY_TIMEOUT).await;
-        client.disconnect().await;
-
-        let events = events
-            .with_context(|| format!("reading Blob Records for {} from the Relay Set", digest))?;
-        // Newest first is a hint, not a rule: the fetcher tries them in
-        // order and stops at the first whose bytes verify, so the only
-        // thing this order buys is that a republished record is tried
-        // before the one it replaced.
-        let mut events: Vec<Event> = events.into_iter().collect();
-        events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
-        Ok(events)
+        fetch_blob_records(&self.relay_set, digest).await
     }
 }

@@ -21,9 +21,9 @@ nostr_private_key = "nsec1..."
 # The Relay Set: every relay this provider publishes its Profile, Listings and
 # Liveness to, and the list the Profile itself carries. It is ALSO what it
 # searches for Blob Records by digest (spec §8.4 step 3), which is how an
-# image named by `{ digest }` alone is resolved — so a provider that wants to
-# serve bare digests needs both this and publish_url below. Reads are free;
-# only the writes are paid.
+# image named by `{ digest }` alone is resolved. Reads are free, so that
+# search needs no publish_url below — only relays; a provider with none
+# configured refuses every bare digest.
 relay_set = ["wss://relay.toon.network"]
 
 # ── The Provider Directory (spec §4) ─────────────────────────────────────────
