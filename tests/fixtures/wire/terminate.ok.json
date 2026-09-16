@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "ok",
-    "description": "Termination (spec §6.6) by the tenant with `lease_request.terminate` as its body. The answer echoes the ended state so no second call is needed.",
+    "description": "Termination (spec §6.6) by the tenant with `lease_request.terminate` as its body. The answer is `{ workload_id, state }` with the ended state, so no second call is needed.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "terminate"
   },

@@ -247,8 +247,9 @@ pub enum LeaseEnd {
 /// `Provisioning → Running → Ended(…)` for a standalone or primary lease
 /// (spec §6.7). A standby's `Reserved` state is a later milestone.
 ///
-/// On the wire and on disk this is serde's externally tagged form, which is
-/// what `status` answers and what the lease table holds:
+/// On the wire and on disk this is serde's externally tagged form — the
+/// encoding spec §6.7 fixes — which is what `status` and `terminate` answer
+/// and what the lease table holds:
 ///
 /// ```json
 /// "provisioning" | "running" | { "ended": "expiry" | "termination" | "eviction" }
@@ -300,10 +301,11 @@ pub struct TerminateResponse {
     pub state: LeaseState,
 }
 
-/// Body of the free `<addr>.availability` route (spec §6.4; ticket M1-5 uses
-/// this shape rather than the spec draft's `image_digest`, so a mis-shaped
-/// spec-style body is refused as `invalid_request` like any other unknown
-/// field).
+/// Body of the free `<addr>.availability` route (spec §6.4, ADR 0015): the
+/// listing version and the same three-form `image` object a spawn carries,
+/// so the same policy answers both. There is no `role` until Milestone 3
+/// decides what a standby check is; it, like any other unknown field, is
+/// refused as `invalid_request`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AvailabilityRequest {
@@ -354,13 +356,12 @@ pub struct ExtendResponse {
     pub expires_at: u64,
 }
 
-/// Why a provider evicted a lease (spec §6.7: "a reason code"). Serialised in
-/// snake_case and carried, as a plain string, in an Eviction Notice's content.
-///
-/// The spec names no fixed vocabulary beyond "a reason code", so these four
-/// are this provider's own choice, documented in the README: broad enough to
-/// cover the cases spec §6.7 gives as examples (abuse, policy, maintenance)
-/// plus a catch-all that pushes the provider to explain itself in `message`.
+/// Why a provider evicted a lease: spec §6.7's four reason codes, serialised
+/// in snake_case and carried, as a plain string, in an Eviction Notice's
+/// content. Broad enough to cover the cases §6.7 names (abuse, policy,
+/// maintenance) plus a catch-all that requires the provider to explain itself
+/// in `message`. A READER of notices must not refuse a code it does not know
+/// (§6.7); this enum is only what this provider's operator may send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EvictionReason {

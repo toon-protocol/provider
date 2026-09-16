@@ -24,7 +24,7 @@
   },
   "fixture": {
     "case": "eviction",
-    "description": "An Eviction Notice (spec §6.7): a regular event with the workload id in an `x` tag and `{ workload_id, reason, message }` as content. `reason` is this provider's own vocabulary (abuse | policy | maintenance | other).",
+    "description": "An Eviction Notice (spec §6.7): a regular event with the workload id in an `x` tag, the `L toon.network` label, and `{ workload_id, reason, message }` as content. `reason` is one of §6.7's codes (abuse | policy | maintenance | other).",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "directory"
   },

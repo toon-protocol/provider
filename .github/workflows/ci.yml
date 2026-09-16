@@ -37,5 +37,8 @@ jobs:
       - run: cargo fmt --all -- --check
       # --all-targets is deliberately absent: it silently drops doc tests.
       # The Docker integration tests are #[ignore] and do not run here.
+      # This includes `--test wire_fixtures`, which verifies every file under
+      # tests/fixtures/wire/ byte-for-byte against the code (TOON_Network #16);
+      # the spec repository's copy is synced by hand (README, "Wire fixtures").
       - run: cargo test --locked --no-fail-fast
       - run: cargo clippy --locked --all-targets -- -D warnings

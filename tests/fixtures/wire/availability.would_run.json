@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "would_run",
-    "description": "The free availability route (spec §6.4) for a listing version on sale, a runnable image and free capacity. Unsigned; always HTTP 200.",
+    "description": "The free availability route (spec §6.4) for a listing version on sale, a runnable image and free capacity. Unsigned; always HTTP 200. `image` is the same three-form object a spawn carries (ADR 0015).",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "availability"
   },
