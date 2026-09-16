@@ -1,0 +1,77 @@
+{
+  "fixture": {
+    "case": "digest_only",
+    "description": "Form 3: `{ digest }` alone, and it runs. The image names no entry and no relay, so every blob — the manifest, the config and both layers — is found by asking this provider's own Relay Set for the Blob Records tagged `#x = <hex>`, whoever signed them (§8.4 step 3). Signers are not trusted: each part is checked against its recorded sha256 and size and each blob against the digest that was asked for, so a wrong record is discarded and the next is tried (ADR 0006). Anyone who knows a digest someone has uploaded can spawn it. Same success shape as forms 1 and 2.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "spawn_image"
+  },
+  "http_path": "/listings/basic/v1/spawn",
+  "image": {
+    "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126"
+  },
+  "request_body": {
+    "request": {
+      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"volume_gb\":2,\"workload_id\":\"d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3\"}",
+      "created_at": 1700000000,
+      "id": "d4a16f2e14fb9033fc4f1f9fcf1078692e9b90b4b84b583489b85c1bfefa60fe",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "4be35e8444f93b56064fb2e3064838c8ec05d1dc7acdb2c68e4b88c60cc6d6e17b34aab4e7aff7d92d7a3efbfb300d21ffa9be4929c41e9ade1cd856375b653c",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "spawn"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "access": {
+      "host": "203.0.113.7",
+      "ports": [
+        {
+          "container_port": 443,
+          "host_port": 41000
+        }
+      ],
+      "ssh_port": 40000
+    },
+    "expires_at": 1700003600,
+    "role": "standalone",
+    "workload_id": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3"
+  },
+  "response_status": 200,
+  "route": "g.fixture.basic.v1.spawn",
+  "spawn_content": {
+    "args": [
+      "-c",
+      "sleep 300"
+    ],
+    "entrypoint": [
+      "/bin/sh"
+    ],
+    "env": {
+      "GREETING": "hello"
+    },
+    "image": {
+      "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126"
+    },
+    "ports": [
+      {
+        "container_port": 443,
+        "protocol": "tcp"
+      }
+    ],
+    "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
+    "volume_gb": 2,
+    "workload_id": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3"
+  }
+}

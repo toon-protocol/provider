@@ -17,6 +17,7 @@ use common::harness::{
 };
 use common::{BackendCall, FakeBackend, FakeClock, FakeDirectory};
 use std::sync::Arc;
+use toon_provider::nostr::wire::SpawnContent;
 use toon_provider::Clock;
 
 /// A lease that exists, and the tenant that owns it.
@@ -27,7 +28,10 @@ struct Lease {
 }
 
 async fn spawn_lease(h: &Harness, seed: u8) -> Lease {
-    let content = spawn_content(seed);
+    spawn_lease_from(h, spawn_content(seed)).await
+}
+
+async fn spawn_lease_from(h: &Harness, content: SpawnContent) -> Lease {
     let spec = RequestSpec::spawn(h, &content);
     let tenant = Keys::parse(&spec.tenant.secret_key().to_secret_hex()).unwrap();
     let (status, body) = spawn(h, spec.sign()).await;
@@ -207,6 +211,77 @@ async fn status_reports_the_state_the_expiry_and_the_access_details() {
         body["access"]["ports"],
         json!([{ "container_port": 443, "host_port": 41000 }])
     );
+}
+
+/// The `30436:<pubkey>:<d>` a tenant that expanded a Template puts in its
+/// spawn (spec §6.2). Nothing here reads it — that is the point.
+const TEMPLATE: &str =
+    "30436:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:static-site";
+
+/// A spawn a tenant made by expanding `TEMPLATE`, rather than by hand.
+fn from_template(seed: u8) -> SpawnContent {
+    SpawnContent {
+        template: Some(TEMPLATE.to_string()),
+        ..spawn_content(seed)
+    }
+}
+
+#[tokio::test]
+async fn status_reports_the_template_a_spawn_carried_and_says_nothing_when_it_carried_none() {
+    // Spec §6.2, ADR 0004: `template` is INFORMATIONAL. The provider keeps it
+    // with the lease and hands it back so tooling can show where a spawn's
+    // values came from, and never acts on it.
+    let h = harness().await;
+    let expanded = spawn_lease_from(&h, from_template(1)).await;
+    let by_hand = spawn_lease(&h, 2).await;
+
+    let (status, body) = status_signed_by(&h, &expanded.tenant, &expanded.workload_id).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["template"], TEMPLATE);
+
+    let (status, body) = status_signed_by(&h, &by_hand.tenant, &by_hand.workload_id).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(
+        body.get("template"),
+        None,
+        "a spawn that named no Template reports none"
+    );
+}
+
+#[tokio::test]
+async fn a_spawns_template_is_never_looked_up() {
+    // The provider NEVER reads a Template (spec §8.3): a tenant expands one
+    // and signs the result. `Directory` is the provider's whole relay
+    // surface — `publish` and `query_liveness`, and nothing else
+    // (src/directory.rs) — so a spawn that names a Template leaving both
+    // journals empty is the whole of "it looked nothing up". What it RUNS is
+    // unchanged too; tests/spawn.rs compares the two container configs.
+    let h = harness().await;
+    spawn_lease_from(&h, from_template(1)).await;
+
+    assert!(
+        h.directory.reads().is_empty(),
+        "the Directory was asked {:?}",
+        h.directory.reads()
+    );
+    assert!(h.directory.published().is_empty());
+}
+
+#[tokio::test]
+async fn a_restart_keeps_the_template_a_lease_was_spawned_from() {
+    // It is part of the lease record, so it survives exactly as the tenant,
+    // the expiry and the access details do.
+    let h = harness().await;
+    let lease = spawn_lease_from(&h, from_template(1)).await;
+
+    let backend = FakeBackend::new();
+    backend.seed_running(1000);
+    let h2 = restarted(&h, NOW + 10, backend).await;
+    h2.service.restore_leases().await;
+
+    let (status, body) = status_signed_by(&h2, &lease.tenant, &lease.workload_id).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["template"], TEMPLATE);
 }
 
 #[tokio::test]

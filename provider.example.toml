@@ -19,7 +19,11 @@ public_ip = "203.0.113.7"
 nostr_private_key = "nsec1..."
 
 # The Relay Set: every relay this provider publishes its Profile, Listings and
-# Liveness to, and the list the Profile itself carries.
+# Liveness to, and the list the Profile itself carries. It is ALSO what it
+# searches for Blob Records by digest (spec §8.4 step 3), which is how an
+# image named by `{ digest }` alone is resolved. Reads are free, so that
+# search needs no publish_url below — only relays; a provider with none
+# configured refuses every bare digest.
 relay_set = ["wss://relay.toon.network"]
 
 # ── The Provider Directory (spec §4) ─────────────────────────────────────────
@@ -100,6 +104,25 @@ ended_retention_s = 86400
 # Where the lease table is mirrored. It is the only record that a lease
 # exists, so a restart without it strands every paid workload.
 lease_state_path = "/var/lib/toon-provider/leases.json"
+
+# Where the TOON store's uploads are read from (spec §8.4): a Blob Record by
+# the txid of its own upload, and each of a blob's parts by its txid, with
+# `{txid}` standing for the id. Any Arweave gateway's `/raw/` path works;
+# the sandbox reads its local gateway. Unset, an image whose bytes are in
+# the TOON store is `refused_image` — this provider then serves only images
+# whose bytes are upstream, whether the Blob Record came from an entry or
+# from the Relay Set.
+# gateway_url_pattern = "https://arweave.net/raw/{txid}"
+
+# Where verified image blobs are kept, by digest, across leases and restarts
+# (spec §8.4), so a popular layer is fetched once. Only bytes that hashed to
+# their digest are written here, and every read checks them again. Default:
+# `blobs/` beside lease_state_path. There is no eviction yet: give it room
+# for every image this provider will run, or cap it — a blob that would
+# cross blob_cache_max_bytes is not kept and the spawn is `no_capacity`,
+# the same answer a full disk gives.
+# blob_cache_dir = "/var/lib/toon-provider/blobs"
+# blob_cache_max_bytes = 53687091200
 
 # What this provider's connector settles in, published in the Profile so a
 # tenant knows what it can pay with. `token` is a mint (Solana) or a contract

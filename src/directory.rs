@@ -11,18 +11,40 @@
 // how money reaches a relay.
 //
 // Reads are free — a NIP-01 REQ over a relay's websocket costs nothing — so
-// `query_liveness` speaks to the Relay Set directly and needs no payer.
+// `query_liveness`, `get_image_entry` and `find_blob_records` speak to
+// relays directly and need no payer. `get_image_entry` reads from the ONE
+// relay a spawn hinted at (spec §6.2), not the Relay Set: an Image Registry
+// entry is a publisher's event, and the tenant says where it can be found.
+// `find_blob_records` is the other way round: it asks the provider's OWN
+// Relay Set, because a bare digest names no relay and no signer (spec
+// §8.4 step 3).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
-use nostr_sdk::{Client, Event, Filter, Kind, PublicKey};
+use nostr_sdk::{Alphabet, Client, Event, Filter, Kind, PublicKey, SingleLetterTag};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::nostr::kinds::K_LIVENESS;
+use crate::nostr::kinds::{K_BLOB, K_LIVENESS};
+
+/// The `<kind>:<pubkey>:<d>` coordinate of an addressable event, as a
+/// spawn's `registry_entry.address` carries it (spec §6.2). `d` may itself
+/// contain colons (`web:1.0`), so only the first two are separators.
+pub fn parse_coordinate(address: &str) -> Result<(u16, PublicKey, String)> {
+    let mut parts = address.splitn(3, ':');
+    let (Some(kind), Some(pubkey), Some(d)) = (parts.next(), parts.next(), parts.next()) else {
+        bail!("{:?} is not a `<kind>:<pubkey>:<d>` address", address);
+    };
+    let kind: u16 = kind
+        .parse()
+        .with_context(|| format!("{:?}: the kind is not a number", address))?;
+    let pubkey = PublicKey::from_hex(pubkey)
+        .with_context(|| format!("{:?}: the pubkey is not 32 bytes of hex", address))?;
+    Ok((kind, pubkey, d.to_string()))
+}
 
 /// Which relays of the Relay Set took an event, and why the rest did not.
 ///
@@ -84,6 +106,25 @@ pub trait Directory: Send + Sync {
     /// `provider`, or `None` when it holds none — which is what "not live"
     /// means (spec §4.3). Reads are free.
     async fn query_liveness(&self, provider: PublicKey) -> Result<Option<Event>>;
+
+    /// The Image Registry entry at `address` (`30434:<pubkey>:<name>:<tag>`)
+    /// as `relay` holds it, or `None` when it holds none (spec §6.2, §8.1).
+    /// The relay is the one the spawn hinted at, not the Relay Set. Reads
+    /// are free. The caller checks that what came back IS the entry named:
+    /// signed by the address's pubkey, under its `d`.
+    async fn get_image_entry(&self, address: &str, relay: &str) -> Result<Option<Event>>;
+
+    /// Every Blob Record the provider's Relay Set holds for `digest`, found
+    /// by `#x = <hex>` (spec §8.4 step 3), newest first. Reads are free.
+    ///
+    /// EVERY signer's: a bare digest names no publisher, and a Blob Record
+    /// from any signer is safe to try because the caller checks each part
+    /// against its recorded sha256 and the whole blob against `digest` — a
+    /// wrong record fails verification and the next one is tried (ADR
+    /// 0006). An empty answer is "this Relay Set knows of none", which is
+    /// the same thing a relay that is down says; it is the fetcher, having
+    /// exhausted every source, that turns that into `refused_image`.
+    async fn find_blob_records(&self, digest: &str) -> Result<Vec<Event>>;
 }
 
 /// The Directory of a provider that publishes nothing: no `publish_url` is
@@ -92,7 +133,24 @@ pub trait Directory: Send + Sync {
 /// It is not an error. A provider whose tenants already know its address is
 /// reachable without ever appearing in the directory, and an unconfigured
 /// sandbox should not fail to start.
-pub struct NullDirectory;
+///
+/// It still READS. Relay reads are free (§8.4, §6.2), so not having a payer
+/// costs a provider nothing it needs to resolve an image: it keeps its
+/// Relay Set here purely to search it for Blob Records. A provider with no
+/// relays configured at all finds none, which is the honest answer rather
+/// than an error.
+#[derive(Default)]
+pub struct NullDirectory {
+    relay_set: Vec<String>,
+}
+
+impl NullDirectory {
+    /// A publisher-less Directory that still searches `relay_set` for Blob
+    /// Records.
+    pub fn new(relay_set: Vec<String>) -> Self {
+        Self { relay_set }
+    }
+}
 
 #[async_trait]
 impl Directory for NullDirectory {
@@ -108,6 +166,78 @@ impl Directory for NullDirectory {
     async fn query_liveness(&self, _provider: PublicKey) -> Result<Option<Event>> {
         Ok(None)
     }
+
+    /// A provider with no publisher can still READ: an Image Registry
+    /// entry lives on whatever relay the spawn named, which needs no money.
+    async fn get_image_entry(&self, address: &str, relay: &str) -> Result<Option<Event>> {
+        fetch_addressable(address, relay).await
+    }
+
+    /// The same free search of the Relay Set the publishing Directory does:
+    /// paying for writes has nothing to do with reading.
+    async fn find_blob_records(&self, digest: &str) -> Result<Vec<Event>> {
+        fetch_blob_records(&self.relay_set, digest).await
+    }
+}
+
+/// One free NIP-01 REQ to every relay in `relay_set` for the Blob Records
+/// tagged `#x = <hex>`, newest first (spec §8.4 step 3).
+///
+/// No author filter: a bare digest names no publisher, so every signer's
+/// record is a candidate. What makes one usable is its bytes, not its key
+/// — the caller checks each part against its recorded sha256 and the whole
+/// blob against the digest (ADR 0006).
+async fn fetch_blob_records(relay_set: &[String], digest: &str) -> Result<Vec<Event>> {
+    if relay_set.is_empty() {
+        return Ok(Vec::new());
+    }
+    let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+
+    let client = Client::default();
+    for relay in relay_set {
+        if let Err(e) = client.add_relay(relay).await {
+            warn!("relay {} is not a usable relay URL: {}", relay, e);
+        }
+    }
+    client.connect().await;
+
+    let filter = Filter::new()
+        .kind(Kind::Custom(K_BLOB))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::X), hex);
+    let events = client.fetch_events(filter, QUERY_TIMEOUT).await;
+    client.disconnect().await;
+
+    let events = events
+        .with_context(|| format!("reading Blob Records for {} from the Relay Set", digest))?;
+    // Newest first is a hint, not a rule: the fetcher tries them in order
+    // and stops at the first whose bytes verify, so the only thing this
+    // order buys is that a republished record is tried before the one it
+    // replaced.
+    let mut events: Vec<Event> = events.into_iter().collect();
+    events.sort_by_key(|e| std::cmp::Reverse(e.created_at));
+    Ok(events)
+}
+
+/// One free NIP-01 REQ to `relay` for the addressable event at `address`,
+/// newest publication first — two publications of one `d` may both be on
+/// the wire while the older one is being replaced.
+async fn fetch_addressable(address: &str, relay: &str) -> Result<Option<Event>> {
+    let (kind, pubkey, d) = parse_coordinate(address)?;
+    let client = Client::default();
+    client
+        .add_relay(relay)
+        .await
+        .with_context(|| format!("{} is not a usable relay URL", relay))?;
+    client.connect().await;
+    let filter = Filter::new()
+        .kind(Kind::Custom(kind))
+        .author(pubkey)
+        .identifier(d)
+        .limit(1);
+    let events = client.fetch_events(filter, QUERY_TIMEOUT).await;
+    client.disconnect().await;
+    let events = events.with_context(|| format!("reading {} from {}", address, relay))?;
+    Ok(events.into_iter().max_by_key(|e| e.created_at))
 }
 
 /// What `ConnectorDirectory` hands the directory publisher.
@@ -235,5 +365,13 @@ impl Directory for ConnectorDirectory {
         // Newest wins: two relays may hold different publications of a
         // replaceable event while the older one is still propagating.
         Ok(events.into_iter().max_by_key(|e| e.created_at))
+    }
+
+    async fn get_image_entry(&self, address: &str, relay: &str) -> Result<Option<Event>> {
+        fetch_addressable(address, relay).await
+    }
+
+    async fn find_blob_records(&self, digest: &str) -> Result<Vec<Event>> {
+        fetch_blob_records(&self.relay_set, digest).await
     }
 }

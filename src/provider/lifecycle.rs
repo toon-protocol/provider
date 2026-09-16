@@ -148,6 +148,7 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
             .state
             .is_live()
             .then(|| lease.access(&state.config.public_ip)),
+        template: lease.template.clone(),
     })
 }
 

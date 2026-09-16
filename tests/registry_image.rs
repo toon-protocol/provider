@@ -1,0 +1,329 @@
+//! An image named `{ digest, registry_entry }` (spec §6.2), resolved through
+//! its Image Registry entry (§8.1, §8.4) on the free `availability` route.
+//!
+//! The world is `common::store`'s: a faked `Directory` holding the entry, a
+//! `wiremock` gateway serving Blob Records and parts at `/raw/<txid>` (the
+//! TOON store as a provider reads it), and a `wiremock` upstream registry.
+//! Every assertion is on the HTTP answer and on the requests those two
+//! servers saw: never on the provider's state. What a paid spawn does with
+//! such an image is `tests/registry_spawn.rs`.
+
+mod common;
+
+use std::collections::BTreeSet;
+
+use serde_json::json;
+
+use common::harness::listing;
+use common::store::*;
+use common::{FakeBackend, FakeClock, FakeDirectory};
+use toon_provider::provider::ImagePolicyConfig;
+use toon_provider::{router, ProviderConfig, ProviderService};
+
+// ── availability through the entry ─────────────────────────────────────────
+
+#[tokio::test]
+async fn availability_resolves_an_all_store_image_fetching_only_what_resolution_needs() {
+    let mut w = World::new().await;
+    let (index, manifest, config, layer) = store_whole_image(&mut w).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory.seed_image_entry(w.entry(&index, INDEX));
+
+    let body = availability(&h, registry_image(&w, &index)).await;
+
+    assert_eq!(body, json!({ "would_run": true }));
+    // The index, the manifest and the config came from the store — each as
+    // its record plus every part — and the layer was never touched.
+    let mut expected = BTreeSet::new();
+    expected.extend(w.raw_paths(&index));
+    expected.extend(w.raw_paths(&manifest));
+    expected.extend(w.raw_paths(&config));
+    assert_eq!(w.gateway_paths().await, expected);
+    assert!(
+        !w.gateway_paths()
+            .await
+            .iter()
+            .any(|p| p.contains(&layer.strip_prefix("sha256:").unwrap()[..12])),
+        "a layer is never fetched for availability"
+    );
+    assert!(
+        w.registry_paths().await.is_empty(),
+        "no upstream was needed"
+    );
+    assert_eq!(
+        h.directory.entry_lookups(),
+        vec![(w.address(), RELAY.to_string())],
+        "the entry was read from the relay the spawn hinted at"
+    );
+    assert!(h.backend.calls().is_empty(), "availability starts nothing");
+}
+
+#[tokio::test]
+async fn a_repeated_availability_is_served_from_the_cache() {
+    let mut w = World::new().await;
+    let (index, ..) = store_whole_image(&mut w).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory.seed_image_entry(w.entry(&index, INDEX));
+
+    availability(&h, registry_image(&w, &index)).await;
+    let after_first = w.gateway_request_count().await;
+    let body = availability(&h, registry_image(&w, &index)).await;
+
+    assert_eq!(body, json!({ "would_run": true }));
+    assert_eq!(
+        w.gateway_request_count().await,
+        after_first,
+        "verified blobs are cached; the second check reads nothing from the store"
+    );
+}
+
+#[tokio::test]
+async fn an_oci_sourced_manifest_is_fetched_by_digest_from_the_upstream_registry() {
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let layer = layer_bytes(3);
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let layer_digest = w.store(&layer, LAYER, 1024).await;
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest, layer.len())],
+    );
+    // The manifest is public upstream: the entry says so, and the provider
+    // pulls it by digest from the registry the entry names.
+    let manifest_digest = w.upstream(&manifest, MANIFEST).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory
+        .seed_image_entry(w.entry(&manifest_digest, MANIFEST));
+
+    let body = availability(&h, registry_image(&w, &manifest_digest)).await;
+
+    assert_eq!(body, json!({ "would_run": true }));
+    assert_eq!(
+        w.registry_paths().await,
+        vec![format!("/v2/{}/manifests/{}", REPOSITORY, manifest_digest)]
+    );
+    let expected: BTreeSet<String> = w.raw_paths(&config_digest).into_iter().collect();
+    assert_eq!(
+        w.gateway_paths().await,
+        expected,
+        "only the config came from the store"
+    );
+}
+
+#[tokio::test]
+async fn a_part_that_does_not_hash_to_its_record_is_refused_image() {
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = digest_of(&config);
+    w.store_as(&config_digest, &config, CONFIG, 64, Tamper::CorruptPart(1))
+        .await;
+    let layer = layer_bytes(5);
+    let layer_digest = w.store(&layer, LAYER, 1024).await;
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest, layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory
+        .seed_image_entry(w.entry(&manifest_digest, MANIFEST));
+
+    let body = availability(&h, registry_image(&w, &manifest_digest)).await;
+
+    assert_refused(&body, "hashes to");
+    assert!(h.backend.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_part_whose_size_differs_from_its_record_is_refused_image() {
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = digest_of(&config);
+    w.store_as(
+        &config_digest,
+        &config,
+        CONFIG,
+        64,
+        Tamper::WrongPartSize(0),
+    )
+    .await;
+    let layer = layer_bytes(5);
+    let layer_digest = w.store(&layer, LAYER, 1024).await;
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest, layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory
+        .seed_image_entry(w.entry(&manifest_digest, MANIFEST));
+
+    let body = availability(&h, registry_image(&w, &manifest_digest)).await;
+
+    assert_refused(&body, "bytes, not the");
+}
+
+#[tokio::test]
+async fn a_reassembled_blob_that_does_not_hash_to_its_digest_is_refused_image() {
+    // Every part is exactly what the record says, and the record still
+    // lies: the whole does not hash to the digest the entry (and the
+    // record) claim. The blob is discarded on the whole-blob check.
+    let mut w = World::new().await;
+    let real_config = config_bytes();
+    let claimed = digest_of(b"a config that was never uploaded");
+    w.store_as(&claimed, &real_config, CONFIG, 64, Tamper::None)
+        .await;
+    let layer = layer_bytes(5);
+    let layer_digest = w.store(&layer, LAYER, 1024).await;
+    let manifest = manifest_bytes(
+        (&claimed, real_config.len()),
+        &[(layer_digest, layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory
+        .seed_image_entry(w.entry(&manifest_digest, MANIFEST));
+
+    let body = availability(&h, registry_image(&w, &manifest_digest)).await;
+
+    assert_refused(&body, "digest mismatch");
+}
+
+#[tokio::test]
+async fn an_index_with_no_manifest_for_the_listings_arch_is_no_matching_arch() {
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let manifest = manifest_bytes((&config_digest, config.len()), &[]);
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let index = index_bytes(&[("arm64", &manifest_digest, manifest.len())]);
+    let index_digest = w.store(&index, INDEX, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory.seed_image_entry(w.entry(&index_digest, INDEX));
+
+    let body = availability(&h, registry_image(&w, &index_digest)).await;
+
+    assert_eq!(body["would_run"], false);
+    assert_eq!(body["error"], "no_matching_arch", "{}", body);
+    // Only the index was needed to know.
+    let expected: BTreeSet<String> = w.raw_paths(&index_digest).into_iter().collect();
+    assert_eq!(w.gateway_paths().await, expected);
+}
+
+#[tokio::test]
+async fn an_entry_that_omits_a_blob_the_manifest_needs_is_refused_image() {
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    // The layer exists nowhere at all: the manifest names it, the entry
+    // does not list it (§8.1 says it must) and no relay in this provider's
+    // Relay Set holds a Blob Record for it either. Refused on the free
+    // route, before a tenant pays to find out.
+    let layer = layer_bytes(9);
+    let layer_digest = digest_of(&layer);
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest.clone(), layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory
+        .seed_image_entry(w.entry(&manifest_digest, MANIFEST));
+
+    let body = availability(&h, registry_image(&w, &manifest_digest)).await;
+
+    assert_refused(
+        &body,
+        &format!("no source is known for blob {}", layer_digest),
+    );
+    assert_refused(&body, "the Image Registry entry web:1.0 does not list it");
+    assert_eq!(
+        h.directory.blob_record_lookups(),
+        vec![layer_digest],
+        "the entry named no source for it, so the Relay Set was asked — and had none"
+    );
+}
+
+#[tokio::test]
+async fn a_relay_hint_that_holds_no_entry_is_refused_image() {
+    let mut w = World::new().await;
+    let (index, ..) = store_whole_image(&mut w).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    // Nothing seeded: the relay the spawn named has never seen the entry.
+
+    let body = availability(&h, registry_image(&w, &index)).await;
+
+    assert_refused(&body, "no Image Registry entry");
+    assert_eq!(
+        h.directory.entry_lookups(),
+        vec![(w.address(), RELAY.to_string())]
+    );
+    assert_eq!(
+        w.gateway_request_count().await,
+        0,
+        "nothing was fetched without an entry"
+    );
+}
+
+#[tokio::test]
+async fn an_entry_naming_a_different_image_is_refused_image() {
+    let mut w = World::new().await;
+    let (index, manifest, ..) = store_whole_image(&mut w).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    // The entry at the address is for the index; the spawn names the
+    // manifest with it. The entry is not a description of that image.
+    h.directory.seed_image_entry(w.entry(&index, INDEX));
+
+    let body = availability(&h, registry_image(&w, &manifest)).await;
+
+    assert_refused(&body, &format!("names image {}, not {}", index, manifest));
+    assert_eq!(w.gateway_request_count().await, 0);
+}
+
+#[tokio::test]
+async fn the_image_policy_applies_to_what_the_entry_resolved() {
+    let mut w = World::new().await;
+    let (index, manifest, ..) = store_whole_image(&mut w).await;
+    // The same harness with a policy denying the per-arch manifest the
+    // index resolves to, and a size cap smaller than the layer.
+    let mut config = ProviderConfig {
+        image_policy: ImagePolicyConfig {
+            deny_digests: vec![manifest.clone()],
+            registry_url_override: Some(w.registry.uri()),
+            ..Default::default()
+        },
+        ..store_config(&w, vec![listing("basic", 1, 2)])
+    };
+    let directory = FakeDirectory::new();
+    directory.seed_image_entry(w.entry(&index, INDEX));
+    let app = |config: ProviderConfig| {
+        router(
+            ProviderService::with_backend_clock_and_directory(
+                config,
+                FakeBackend::new(),
+                FakeClock::at(NOW),
+                directory.clone(),
+            )
+            .unwrap()
+            .app_state(),
+        )
+    };
+
+    let (_, body) = post(
+        &app(config.clone()),
+        "/availability",
+        json!({ "listing": "basic", "version": 1, "image": registry_image(&w, &index) }),
+    )
+    .await;
+    assert_refused(&body, "denied by this provider's image policy");
+
+    config.image_policy.deny_digests.clear();
+    config.image_policy.max_image_bytes = Some(1000);
+    let (_, body) = post(
+        &app(config),
+        "/availability",
+        json!({ "listing": "basic", "version": 1, "image": registry_image(&w, &index) }),
+    )
+    .await;
+    assert_refused(&body, "max_image_bytes");
+}

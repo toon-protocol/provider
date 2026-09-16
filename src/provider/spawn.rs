@@ -5,22 +5,38 @@
 // code: (1) the Lease Request — signature, addressee, freshness, replay;
 // (2) the listing version — it must exist AND be the one on sale
 // (`ProviderConfig::sellable_listing`, shared with `availability`) — and
-// whether the volume and ports fit it; (3) the role; (4) the workload id; (5) the image; (6) capacity. Then the workload
-// is started. A refusal on this route is still billed (ADR 0003), so the
-// order is the whole of what a tenant can rely on: the first reason is the
-// one reported.
+// whether the volume and ports fit it; (3) the role; (4) the workload id;
+// (5) the image; (6) capacity. Then the workload is started. A refusal on
+// this route is still billed (ADR 0003), so the order is the whole of what
+// a tenant can rely on: the first reason is the one reported.
+//
+// Step 5 is the resolution `availability` also does (`image_policy::check`:
+// the entry if there is one, the index, the manifest for the listing's
+// arch, its config). For an image named by content address — through its
+// Image Registry entry or by digest alone — the bytes then have to be
+// FETCHED — every layer down §8.4's chain, verified,
+// cached, assembled into an OCI layout and loaded into the backend — and
+// that happens after the slot is reserved and outside the lease-table lock,
+// since a layer can take minutes and nothing else should wait on it. A
+// fetch that fails releases the slot again and is answered `refused_image`
+// (no source could serve a blob) or `no_capacity` (the cache is full); no
+// container exists after either. Milestone 1's `reference` form keeps its
+// own path: the backend pulls `reference@digest` itself.
 
 use std::collections::HashMap;
 
 use tracing::{error, info, warn};
 
 use super::config::{Listing, MAX_PORTS_PER_WORKLOAD};
-use super::image_policy;
+use super::image_policy::{self, ResolvedImage};
+use super::oci_layout::write_layout_tar;
 use super::persistence::{count_live, persist_leases, LeaseRecord, LeaseState};
 use crate::compute::{container_name, ContainerConfig, PortMapping};
+use crate::nostr::image_events::SpawnImage;
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
-    Access, ErrorCode, ErrorResponse, PortAccess, PortRequest, Role, SpawnContent, SpawnResponse,
+    is_lower_hex, Access, ErrorCode, ErrorResponse, PortAccess, PortRequest, Role, SpawnContent,
+    SpawnResponse,
 };
 use crate::provider_http::AppState;
 
@@ -83,6 +99,10 @@ pub async fn spawn(
     let ssh_port;
     let ports;
     let id;
+    // Which of the three forms §6.2 allows the `image` is, and what it
+    // resolved to.
+    let image;
+    let resolved;
     {
         let mut leases = state.leases.lock().await;
         if leases
@@ -96,21 +116,26 @@ pub async fn spawn(
                 "a lease with this workload_id is already held on this provider",
             ));
         }
-        check_image(&content)?;
-        // Step 5 continued: the provider's own image policy — a deny list
-        // and a size cap, resolved against the upstream registry. The same
-        // check `availability` applies, so a positive `availability` answer
-        // and a paid spawn's outcome never disagree (spec §9). This holds
-        // the lease-table lock across a network fetch; deliberately so, to
-        // keep the same atomicity `workload_id_taken`/capacity/insert
-        // already relied on, at the cost of serialising spawns behind an
-        // uncached image lookup (a repeat digest is served from
-        // `OciRegistry`'s in-memory cache without another fetch).
-        image_policy::check(
-            &state.image_registry,
+        // Step 5: which of the three forms §6.2 allows the `image` is — a
+        // fourth shape is `invalid_request` — and then whether this
+        // provider will run it: the provider's own image policy — a deny
+        // list and a size cap — applied to what the image resolves to
+        // (spec §8.4). The same check `availability` applies, so a
+        // positive `availability` answer and a paid spawn's outcome never
+        // disagree (spec §9). This holds the lease-table lock across the
+        // resolution's network reads; deliberately so, to keep the same
+        // atomicity `workload_id_taken`/capacity/insert already relied on,
+        // at the cost of serialising spawns behind an uncached image lookup
+        // (a repeat digest is served from the blob cache without another
+        // fetch). Only resolution happens here; the layers are fetched
+        // below, after the slot is taken and the lock released.
+        image = SpawnImage::parse(&content.image)?;
+        resolved = image_policy::check(
+            &state.fetcher,
+            state.directory.clone(),
             &state.image_policy,
             &listing,
-            &content.image,
+            &image,
         )
         .await?;
         let running = count_live(&leases, &listing.name);
@@ -159,6 +184,9 @@ pub async fn spawn(
                 expires_at: now + listing.lease_interval_s,
                 ended_at: None,
                 destroyed: false,
+                // Kept, never read: `status` hands it back so tooling can
+                // show which Template the tenant expanded (spec §6.2).
+                template: content.template.clone(),
                 ssh_port,
                 ports: ports.clone(),
             },
@@ -166,8 +194,34 @@ pub async fn spawn(
         persist_leases(&leases, &state.config.lease_state_path);
     }
 
+    // ── fetch it ────────────────────────────────────────────────────────
+    // What the backend is told to run: `<reference>@<digest>` for the form
+    // the backend pulls itself, or the id the backend gave the image this
+    // provider fetched, verified and loaded.
+    let run_image = match image.upstream_pull() {
+        Some(pull) => pull,
+        None => match materialise(state, &resolved).await {
+            Ok(image_id) => image_id,
+            Err(e) => {
+                // Nothing was started, so there is nothing to destroy: just
+                // give the slot and the id back. The refusal is still
+                // billed (ADR 0003), which is why `availability` resolves
+                // the image for free first — but a layer that fails only on
+                // the full fetch can only be found out here.
+                warn!(
+                    "image {} for workload {} could not be fetched: {}",
+                    resolved.manifest_digest, content.workload_id, e.message
+                );
+                let mut leases = state.leases.lock().await;
+                leases.remove(&id);
+                persist_leases(&leases, &state.config.lease_state_path);
+                return Err(e);
+            }
+        },
+    };
+
     // ── start it ────────────────────────────────────────────────────────
-    let config = container_config(id, &listing, &content, ssh_port, &ports);
+    let config = container_config(id, &listing, &content, &run_image, ssh_port, &ports);
     info!(
         "spawning workload {} ({} v{}) for tenant {} as {}",
         content.workload_id, listing.name, listing.version, tenant_hex, config.name
@@ -226,6 +280,63 @@ pub async fn spawn(
             ))
         }
     }
+}
+
+/// Fetch every layer of an image whose bytes THIS PROVIDER holds — the two
+/// content-address forms, through an Image Registry entry or by digest
+/// alone — assemble the verified blobs into an OCI layout and load it into
+/// the backend; answer the image id the backend runs it by (spec §8.4).
+///
+/// Each layer goes down the same chain resolution came down, and down the
+/// same `BlobSources` value, so a Blob Record the Relay Set already
+/// answered for is not looked up twice.
+///
+/// The manifest and the config are already in the cache — resolution put
+/// them there — so the layout is written straight out of the cache once
+/// every layer has joined them. A layer no source can serve is
+/// `refused_image`; one the cache has no room for is `no_capacity`. The
+/// layout tar lives in the cache's scratch directory only for the length of
+/// the load.
+async fn materialise(state: &AppState, image: &ResolvedImage) -> Result<String, ErrorResponse> {
+    for layer in image.layer_digests() {
+        state.fetcher.fetch(layer, &image.sources).await?;
+    }
+
+    let cache = state.fetcher.cache().clone();
+    let layout = cache.scratch_dir().join(format!(
+        "{}.oci.tar",
+        image
+            .manifest_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&image.manifest_digest)
+    ));
+    let written = {
+        let cache = cache.clone();
+        let image = image.clone();
+        let layout = layout.clone();
+        tokio::task::spawn_blocking(move || write_layout_tar(&cache, &image, &layout))
+            .await
+            .map_err(|e| anyhow::anyhow!("writing the image layout panicked: {}", e))
+            .and_then(|r| r)
+    };
+    let loaded = match written {
+        Ok(()) => state.backend.load_image(&layout).await,
+        Err(e) => Err(e),
+    };
+    let _ = tokio::fs::remove_file(&layout).await;
+    loaded.map_err(|e| {
+        // The blobs are all verified and on disk; what failed is the
+        // provider's own disk or daemon, which is the provider being out of
+        // room to run this — `no_capacity`, so the tenant tries elsewhere
+        // rather than concluding the image is bad.
+        ErrorResponse::new(
+            ErrorCode::NoCapacity,
+            format!(
+                "image {} could not be loaded into the backend: {:#}",
+                image.manifest_digest, e
+            ),
+        )
+    })
 }
 
 /// The lowest workload id in range that neither the backend nor a LIVE lease
@@ -312,14 +423,6 @@ fn check_ports(ports: &[PortRequest]) -> Result<(), ErrorResponse> {
     Ok(())
 }
 
-/// Exactly `len` lowercase hex characters: the shape of a workload id and
-/// of a digest's hex.
-fn is_lower_hex(s: &str, len: usize) -> bool {
-    s.len() == len
-        && s.chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
-}
-
 fn looks_like_ssh_public_key(key: &str) -> bool {
     let key = key.trim();
     if key.is_empty() || key.contains('\n') || key.contains('\r') {
@@ -336,57 +439,11 @@ fn looks_like_ssh_public_key(key: &str) -> bool {
     known && blob.len() >= 16
 }
 
-/// Milestone 1 image checks: the shape of `reference@digest`, and no Image
-/// Registry entry. Policy (`refused_image`) and arch selection
-/// (`no_matching_arch`) are `image_policy`'s, applied straight after this.
-fn check_image(content: &SpawnContent) -> Result<(), ErrorResponse> {
-    let image = &content.image;
-    if image.registry_entry.is_some() {
-        return Err(invalid(
-            "image.registry_entry: Image Registry entries are not read in this milestone",
-        ));
-    }
-    if !is_lower_hex(image.digest.strip_prefix("sha256:").unwrap_or(""), 64) {
-        return Err(invalid("image.digest must be `sha256:<64 lowercase hex>`"));
-    }
-    if !looks_like_repository(&image.reference) {
-        return Err(invalid(
-            "image.reference must be an OCI repository (`registry/repo`), with no tag or digest",
-        ));
-    }
-    Ok(())
-}
-
-/// `[registry[:port]/]repo[/path…]` in the character set OCI references
-/// allow, with no `@digest` and no `:tag` on the last segment.
-fn looks_like_repository(reference: &str) -> bool {
-    if reference.is_empty()
-        || reference.contains('@')
-        || !reference.chars().all(|c| {
-            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-' | '/' | ':')
-        })
-    {
-        return false;
-    }
-    let mut segments = reference.split('/');
-    let first = segments.next().unwrap_or("");
-    let rest: Vec<&str> = segments.collect();
-    // A colon is only legal in the first segment as a registry port, and
-    // never in the last segment (that would be a tag).
-    let colon_ok = |seg: &str| match seg.split_once(':') {
-        None => true,
-        Some((_, port)) => !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()),
-    };
-    if rest.is_empty() {
-        return !first.contains(':') && !first.is_empty();
-    }
-    colon_ok(first) && rest.iter().all(|s| !s.is_empty() && !s.contains(':'))
-}
-
 fn container_config(
     id: u32,
     listing: &Listing,
     content: &SpawnContent,
+    pull: &str,
     ssh_port: u16,
     ports: &[PortAccess],
 ) -> ContainerConfig {
@@ -399,7 +456,7 @@ fn container_config(
     ContainerConfig {
         id,
         name: container_name(id),
-        image: format!("{}@{}", content.image.reference, content.image.digest),
+        image: pull.to_string(),
         cpu_millicores: listing.resources.cpu_millicores,
         memory_mb: listing.resources.memory_mb,
         storage_gb: listing.resources.storage_gb,
@@ -427,20 +484,6 @@ fn container_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn repositories_with_ports_and_paths_pass_and_tags_and_digests_do_not() {
-        assert!(looks_like_repository("docker.io/library/alpine"));
-        assert!(looks_like_repository("localhost:5000/team/app"));
-        assert!(looks_like_repository("lscr.io/linuxserver/openssh-server"));
-        assert!(looks_like_repository("alpine"));
-        assert!(!looks_like_repository("alpine:3.20"), "a tag is mutable");
-        assert!(!looks_like_repository("docker.io/library/alpine:latest"));
-        assert!(!looks_like_repository("alpine@sha256:abc"));
-        assert!(!looks_like_repository("Docker.io/Alpine"));
-        assert!(!looks_like_repository(""));
-        assert!(!looks_like_repository("a//b"));
-    }
 
     #[test]
     fn ssh_public_key_lines_are_recognised() {

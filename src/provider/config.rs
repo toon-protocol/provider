@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use super::fetcher::TXID_PLACEHOLDER;
 use super::persistence::LeaseRecord;
 use crate::capabilities;
 use crate::nostr::directory_events::Settlement;
@@ -236,9 +237,46 @@ pub struct ProviderConfig {
     /// `availability` and by a paid spawn's validation step 5.
     #[serde(default)]
     pub image_policy: ImagePolicyConfig,
+
+    /// Where the TOON store's uploads are read from, with `{txid}` standing
+    /// for the transaction id of the part or Blob Record being read — e.g.
+    /// `https://arweave.net/raw/{txid}`, or the sandbox gateway's
+    /// `http://envoy:3000/raw/{txid}` (spec §8.4). Unset, every `toon-store`
+    /// blob source is refused: this provider then serves only images whose
+    /// bytes are upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_url_pattern: Option<String>,
+
+    /// Where verified image blobs are kept, by digest, across leases and
+    /// restarts (spec §8.4). Unset, it is `blobs/` beside
+    /// `lease_state_path`, so the one directory an operator already keeps
+    /// holds both. Only bytes that hashed to their digest are written here,
+    /// and every read is verified again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_cache_dir: Option<String>,
+
+    /// The most the blob cache may hold, in bytes. A blob that would take
+    /// it past this is not kept and the spawn is `no_capacity` — the same
+    /// answer a full disk gives. Unset, the disk is the only bound; there
+    /// is no eviction yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_cache_max_bytes: Option<u64>,
 }
 
 impl ProviderConfig {
+    /// The blob cache directory: `blob_cache_dir`, or `blobs/` beside the
+    /// lease table.
+    pub fn blob_cache_dir(&self) -> std::path::PathBuf {
+        match &self.blob_cache_dir {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => std::path::Path::new(&self.lease_state_path)
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default()
+                .join("blobs"),
+        }
+    }
+
     /// Host port forwarded to a workload's SSH. Derived rather than stored, so
     /// every answer that names a port for a given id names the same one.
     ///
@@ -474,6 +512,17 @@ impl ProviderConfig {
                 bail!("capabilities: {}", why);
             }
         }
+        // A pattern with nothing to fill in would read the same URL for
+        // every part; refused at load, where the operator is looking.
+        if let Some(pattern) = &self.gateway_url_pattern {
+            if !pattern.contains(TXID_PLACEHOLDER) {
+                bail!(
+                    "gateway_url_pattern {:?} must contain {} where the transaction id goes",
+                    pattern,
+                    TXID_PLACEHOLDER
+                );
+            }
+        }
         for listing in &self.listings {
             for capability in &listing.capabilities {
                 if let Some(why) = capabilities::grant_refusal(capability) {
@@ -642,6 +691,9 @@ impl Default for ProviderConfig {
             ended_retention_s: default_ended_retention_s(),
             lease_state_path: default_lease_state_path(),
             image_policy: ImagePolicyConfig::default(),
+            gateway_url_pattern: None,
+            blob_cache_dir: None,
+            blob_cache_max_bytes: None,
         }
     }
 }
@@ -676,6 +728,7 @@ mod tests {
             expires_at: 3600,
             ended_at: None,
             destroyed: false,
+            template: None,
             ssh_port: 40000,
             ports: vec![],
         }

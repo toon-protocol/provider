@@ -25,14 +25,16 @@ pub const K_LISTING: u16 = 30_432;
 /// Addressable with `d` = the workload id. Not used in Milestone 1.
 pub const K_TAKEOVER: u16 = 30_433;
 
-/// Image Registry entry. Addressable with `d` = `<name>:<tag>`. Not used in
-/// Milestone 1.
+/// Image Registry entry. Addressable with `d` = `<name>:<tag>`. Signed by a
+/// PUBLISHER, never by a provider (`nostr::image_events`).
 pub const K_IMAGE: u16 = 30_434;
 
-/// Blob Record. Addressable with `d` = `sha256:<hex>`. Not used in Milestone 1.
+/// Blob Record. Addressable with `d` = `sha256:<hex>`. Signed by whoever
+/// uploaded the parts (`nostr::image_events`).
 pub const K_BLOB: u16 = 30_435;
 
-/// Template. Addressable with `d` = the template name. Not used in Milestone 1.
+/// Template. Addressable with `d` = the template name. Signed by its author,
+/// expanded by the TENANT: a provider never reads one (ADR 0004).
 pub const K_TEMPLATE: u16 = 30_436;
 
 /// Deployment: a TENANT-signed statement that a repo's environment is served

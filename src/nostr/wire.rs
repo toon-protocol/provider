@@ -61,22 +61,91 @@ pub struct PortRequest {
     pub protocol: Protocol,
 }
 
-/// The image a spawn names.
+/// Exactly `len` lowercase hex characters: the one shape check a workload
+/// id (64 of them) and a digest's hex (also 64) share, so there is one
+/// answer to "is this hex?" rather than one per caller.
+pub fn is_lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len
+        && s.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+}
+
+/// The Image Registry entry a spawn or a Template points at: the NIP-01
+/// coordinate `30434:<publisher pubkey>:<name>:<tag>` and a relay to look it
+/// up on (spec §6.2, §8.3).
 ///
-/// Milestone 1: `reference` is an upstream OCI repository (e.g.
-/// `docker.io/library/alpine`) and the workload is pulled by
-/// `reference@digest`, so the backend verifies the digest and picks the
-/// manifest for the host's architecture. The Image Registry replaces
-/// `reference` in a later milestone; `registry_entry` is parsed so that it
-/// can be refused by name rather than as an unknown field.
+/// The relay is a HINT, not an authority: the entry is addressed by its
+/// signer, so an entry fetched anywhere else is as good, and one served by
+/// this relay under another signer is not the entry that was named.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryEntryRef {
+    pub address: String,
+    pub relay: String,
+}
+
+/// The image a spawn (or an availability) names, in any of the three forms
+/// spec §6.2 allows:
+///
+/// - `{ reference, digest }` — pull `reference@digest` from an upstream OCI
+///   registry (Milestone 1's only form);
+/// - `{ digest, registry_entry }` — the Image Registry entry lists the blobs
+///   and where their bytes are (§8.1);
+/// - `{ digest }` — the blobs are found by Blob Record lookup on the
+///   provider's Relay Set (§8.4).
+///
+/// This struct is only the PARSE: which form was given, and whether it is
+/// one of the three at all, is `image_events::SpawnImage`, which every
+/// caller goes through. Both optional fields present, or neither plus a
+/// malformed digest, is a fourth shape and `invalid_request`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageRef {
-    pub reference: String,
-    /// `sha256:<64 hex>`, naming an OCI index or manifest.
+    /// An upstream OCI repository, e.g. `docker.io/library/alpine`. Absent
+    /// for the two Image Registry forms.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<String>,
+    /// `sha256:<64 hex>`, naming an OCI index or manifest. The one field
+    /// every form carries.
     pub digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub registry_entry: Option<serde_json::Value>,
+    pub registry_entry: Option<RegistryEntryRef>,
+}
+
+impl ImageRef {
+    /// `{ reference, digest }`: pulled from an upstream OCI registry.
+    pub fn upstream(reference: impl Into<String>, digest: impl Into<String>) -> Self {
+        Self {
+            reference: Some(reference.into()),
+            digest: digest.into(),
+            registry_entry: None,
+        }
+    }
+
+    /// `{ digest, registry_entry }`: resolved through the Image Registry.
+    pub fn from_registry(
+        digest: impl Into<String>,
+        address: impl Into<String>,
+        relay: impl Into<String>,
+    ) -> Self {
+        Self {
+            reference: None,
+            digest: digest.into(),
+            registry_entry: Some(RegistryEntryRef {
+                address: address.into(),
+                relay: relay.into(),
+            }),
+        }
+    }
+
+    /// `{ digest }` alone: resolved by Blob Record lookup.
+    pub fn by_digest(digest: impl Into<String>) -> Self {
+        Self {
+            reference: None,
+            digest: digest.into(),
+            registry_entry: None,
+        }
+    }
 }
 
 /// Content of a Lease Request with `op = spawn` (spec §6.2).
@@ -214,6 +283,11 @@ pub struct StatusResponse {
     /// host and port that no longer reach it would be a lie.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<Access>,
+    /// The Template the spawn said its values came from, echoed back for
+    /// tooling. Absent when the spawn named none. The provider never read it
+    /// (spec §8.3, ADR 0004).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
 }
 
 /// The answer to a successful termination (spec §6.6). The state is always

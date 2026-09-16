@@ -12,13 +12,18 @@
 // spawn would run without starting anything, and `cleanup` is where every
 // ending — Expiry or Termination — actually destroys the workload.
 // `image_policy` is the rule both `spawn` and `availability` apply, so the
-// two can never disagree.
+// two can never disagree; `fetcher` (over `oci` and the TOON store gateway)
+// is how every image byte they read arrives, verified.
 
 mod availability;
+pub mod blob_cache;
 mod cleanup;
 mod config;
+pub mod fetcher;
 pub mod image_policy;
 mod lifecycle;
+pub mod oci;
+pub mod oci_layout;
 mod persistence;
 mod publish;
 pub mod routes;
@@ -26,11 +31,13 @@ mod spawn;
 mod standby;
 
 pub use availability::availability;
+pub use blob_cache::BlobCache;
 pub use cleanup::SWEEP_INTERVAL_SECS;
 pub use config::{
     load_config, BackendKind, ImagePolicyConfig, Listing, ProviderConfig, MAX_PORTS_PER_WORKLOAD,
 };
-pub use image_policy::{ImagePolicy, OciRegistry};
+pub use fetcher::BlobFetcher;
+pub use image_policy::{ImagePolicy, ResolvedImage};
 pub use lifecycle::{evict, extend, status, terminate};
 pub use persistence::persisted_leases;
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
