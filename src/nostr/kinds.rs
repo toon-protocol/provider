@@ -1,11 +1,11 @@
 // Event kinds of the TOON Network protocol.
 //
-// EVERY NUMBER HERE IS A PLACEHOLDER, NOT AN ALLOCATION (spec §11, item 1).
-// What is normative is each kind's NIP-01 class — regular (1000..=9999),
-// replaceable (10000..=19999) or addressable (30000..=39999) — because the
-// class decides how a relay stores and replaces the event. The numbers will
-// change when kinds are allocated; nothing may depend on their values beyond
-// "distinct from each other and in the right class".
+// These numbers are ALLOCATED (spec §3.1, ADR 0012): one contiguous block of
+// ten per NIP-01 class, all sharing the `432` suffix — regular 4432..=4441,
+// replaceable 10432..=10441, addressable 30432..=30441. The class decides how
+// a relay stores and replaces the event; the block keeps a relay filter on
+// all TOON Network kinds cheap. New kinds take the next free number in their
+// class's block; the spec's kind table is the register.
 //
 // None of Paygress's kinds (38383..=38386, 20384) is reused: 38383 collides
 // with NIP-69, and the rest name events this protocol does not have.
@@ -35,6 +35,11 @@ pub const K_BLOB: u16 = 30_435;
 /// Template. Addressable with `d` = the template name. Not used in Milestone 1.
 pub const K_TEMPLATE: u16 = 30_436;
 
+/// Deployment: a TENANT-signed statement that a repo's environment is served
+/// by a lease. Addressable with `d` = the environment. Reserved in the
+/// TOON Network block (spec §3.1.2) but never published by a provider.
+pub const K_DEPLOYMENT: u16 = 30_437;
+
 /// Lease Request: a tenant-signed event carried inside request bodies. It is
 /// a regular kind that is NEVER PUBLISHED — the provider validates it and
 /// must not forward it to any relay.
@@ -53,11 +58,18 @@ mod tests {
 
     #[test]
     fn kinds_are_in_their_nip01_classes() {
-        // The class is normative even though the number is not.
+        // The class is normative; the numbers are the allocation in spec §3.1.
         for replaceable in [K_PROFILE, K_LIVENESS] {
             assert!((10_000..=19_999).contains(&replaceable));
         }
-        for addressable in [K_LISTING, K_TAKEOVER, K_IMAGE, K_BLOB, K_TEMPLATE] {
+        for addressable in [
+            K_LISTING,
+            K_TAKEOVER,
+            K_IMAGE,
+            K_BLOB,
+            K_TEMPLATE,
+            K_DEPLOYMENT,
+        ] {
             assert!((30_000..=39_999).contains(&addressable));
         }
         for regular in [K_LEASE_REQUEST, K_EVICTION] {
@@ -75,6 +87,7 @@ mod tests {
             K_IMAGE,
             K_BLOB,
             K_TEMPLATE,
+            K_DEPLOYMENT,
             K_LEASE_REQUEST,
             K_EVICTION,
         ];
