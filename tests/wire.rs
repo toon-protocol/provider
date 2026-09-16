@@ -265,6 +265,7 @@ fn every_error_code_serialises_as_the_spec_writes_it() {
         (ErrorCode::InvalidRequest, "invalid_request"),
         (ErrorCode::Expired, "expired"),
         (ErrorCode::NotStandby, "not_standby"),
+        (ErrorCode::NotRunning, "not_running"),
         (ErrorCode::BadSignature, "bad_signature"),
         (ErrorCode::StaleRequest, "stale_request"),
     ];

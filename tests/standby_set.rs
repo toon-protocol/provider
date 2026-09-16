@@ -19,8 +19,8 @@ use nostr_sdk::{Keys, PublicKey};
 use serde_json::{json, Value};
 
 use common::harness::{
-    digest, error_of, harness_with, listing, post, restart, spawn_content, Harness, RequestSpec,
-    INTERVAL, NOW,
+    digest, error_of, harness_with, listing, post, restart, spawn_content, workload_id, Harness,
+    RequestSpec, INTERVAL, NOW,
 };
 use common::{stub_registry, BackendCall, FakeBackend, FakeDirectory};
 use toon_provider::nostr::wire::SpawnContent;
@@ -456,76 +456,214 @@ async fn a_tenant_terminates_a_reservation() {
     assert!(h.backend.calls().is_empty());
 }
 
-// ── what paying a reservation still answers ──────────────────────────────
+// ── paying a reservation (TOON_Network #30) ───────────────────────────────
 
-/// Neither extension route buys a reservation an interval yet — that is the
-/// next ticket of this milestone — and until one does, `.extend` must not
-/// sell a reservation a RUNNING lease's interval at the running price.
+const STANDBY_EXTEND: &str = "/listings/warm/v1/standby/extend";
+const EXTEND: &str = "/listings/warm/v1/extend";
+
+async fn standby_extend_workload(h: &Harness, id: &str) -> (StatusCode, Value) {
+    post(&h.app, STANDBY_EXTEND, json!({ "workload_id": id })).await
+}
+
+/// The heart of the ticket: `.standby.extend` adds ONE `lease_interval_s` to
+/// a reservation's `expires_at`, exactly as `.extend` does for a running
+/// lease (spec §6.3) — a second call adds another — and never touches the
+/// backend, because nothing is running to reach either way.
 #[tokio::test]
-async fn extending_a_reservation_is_refused_on_both_routes() {
+async fn standby_extend_pays_a_reservation_by_one_interval_each_call() {
     let h = warm_harness().await;
-    let spawn = reserve(&h, 33).await;
+    let spawn = reserve(&h, 40).await;
+    let id = spawn.content.workload_id.clone();
 
-    for path in [
-        "/listings/warm/v1/extend",
-        "/listings/warm/v1/standby/extend",
-    ] {
-        let (status, body) = post(
-            &h.app,
-            path,
-            json!({ "workload_id": spawn.content.workload_id }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
-        assert_eq!(error_of(&body), "invalid_request");
-        assert!(
-            body["message"].as_str().unwrap().contains("Milestone 3"),
-            "the message says to come back, not to fix the request: {}",
-            body
-        );
-    }
+    let (status, body) = standby_extend_workload(&h, &id).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["workload_id"], spawn.content.workload_id);
+    assert_eq!(body["expires_at"].as_u64().unwrap(), NOW + 2 * INTERVAL);
 
-    // And the reservation is exactly where it was.
+    let (status, body) = standby_extend_workload(&h, &id).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["expires_at"].as_u64().unwrap(), NOW + 3 * INTERVAL);
+
+    let status_body = status_of(&h, &spawn).await;
+    assert_eq!(status_body["state"], "reserved");
+    assert_eq!(
+        status_body["expires_at"].as_u64().unwrap(),
+        NOW + 3 * INTERVAL
+    );
+    assert!(
+        h.backend.calls().is_empty(),
+        "paying a reservation touches no backend: {:?}",
+        h.backend.calls()
+    );
+}
+
+/// `.standby.extend` on a running lease of ANY role — standalone or a Standby
+/// Set's primary — is `not_standby`: that lease is billed at its own price
+/// on `.extend`, not here.
+#[tokio::test]
+async fn standby_extend_refuses_a_running_lease_of_any_role() {
+    let h = warm_harness().await;
+
+    let standalone = spawn_content(41);
+    let (status, body) = post_spawn(&h, SPAWN, &RequestSpec::spawn(&h, &standalone).sign()).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["role"], "standalone");
+
+    let (status, body) = standby_extend_workload(&h, &standalone.workload_id).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{}", body);
+    assert_eq!(error_of(&body), "not_standby");
+
+    let peer = Keys::generate().public_key();
+    let primary = set_spawn(&h, 42, &[h.provider, peer]);
+    let (status, body) = post_spawn(&h, SPAWN, &primary.event).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["role"], "primary");
+
+    let (status, body) = standby_extend_workload(&h, &primary.content.workload_id).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{}", body);
+    assert_eq!(error_of(&body), "not_standby");
+
+    // Neither running lease was touched: `.extend` still buys them their
+    // running-price interval.
+    let (status, body) = post(
+        &h.app,
+        EXTEND,
+        json!({ "workload_id": standalone.workload_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["expires_at"].as_u64().unwrap(), NOW + 2 * INTERVAL);
+    assert!(matches!(
+        h.backend.calls().as_slice(),
+        [
+            BackendCall::Create(_),
+            BackendCall::Start(_),
+            BackendCall::Create(_),
+            BackendCall::Start(_)
+        ]
+    ));
+}
+
+/// `.extend` met a reservation is the mirror refusal: `not_running`, the code
+/// this ticket picked because none of §6.3's other three named codes fit — a
+/// reservation is not unknown, not on the wrong version and not ended.
+#[tokio::test]
+async fn extend_refuses_a_reservation_with_not_running() {
+    let h = warm_harness().await;
+    let spawn = reserve(&h, 43).await;
+
+    let (status, body) = post(
+        &h.app,
+        EXTEND,
+        json!({ "workload_id": spawn.content.workload_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{}", body);
+    assert_eq!(error_of(&body), "not_running");
+
+    // The reservation is exactly where it was: nothing was bought.
     let body = status_of(&h, &spawn).await;
     assert_eq!(body["state"], "reserved");
     assert_eq!(body["expires_at"].as_u64().unwrap(), NOW + INTERVAL);
 }
 
-/// A running lease is untouched by any of this: `.standby.extend` refuses it,
-/// and `.extend` still buys it one interval at the running price.
+/// A reservation on another listing version cannot be extended there, on
+/// either route — same rule as a running lease (ADR 0009): a lease keeps the
+/// price it started at. v1 is retired (ADR 0009: its route stays only to
+/// extend leases already on it) and v2 is the version on sale, so the
+/// reservation is bought on v2 and v1's `.standby.extend` is the wrong one.
 #[tokio::test]
-async fn a_running_lease_still_extends_at_the_running_price() {
-    let h = warm_harness().await;
-    let content = spawn_content(34);
-    let (status, body) = post_spawn(&h, SPAWN, &RequestSpec::spawn(&h, &content).sign()).await;
+async fn standby_extend_refuses_a_reservation_through_the_wrong_listing_version() {
+    let h = harness_with(vec![
+        warm(),
+        Listing {
+            version: 2,
+            ..warm()
+        },
+    ])
+    .await;
+    let spawn = standby_spawn(&h, 44);
+    let (status, body) = post_spawn(&h, "/listings/warm/v2/standby", &spawn.event).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
-    assert_eq!(body["role"], "standalone", "no set, no role");
-    let expires_at = body["expires_at"].as_u64().unwrap();
 
     let (status, body) = post(
         &h.app,
         "/listings/warm/v1/standby/extend",
-        json!({ "workload_id": content.workload_id }),
+        json!({ "workload_id": spawn.content.workload_id }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+    assert_eq!(status, StatusCode::NOT_FOUND, "{}", body);
+    assert_eq!(error_of(&body), "wrong_listing_version");
 
+    // The right version still pays it.
     let (status, body) = post(
         &h.app,
-        "/listings/warm/v1/extend",
-        json!({ "workload_id": content.workload_id }),
+        "/listings/warm/v2/standby/extend",
+        json!({ "workload_id": spawn.content.workload_id }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", body);
-    assert_eq!(
-        body["expires_at"].as_u64().unwrap(),
-        expires_at + INTERVAL,
-        "the standby route bought nothing"
-    );
-    assert!(matches!(
-        h.backend.calls().as_slice(),
-        [BackendCall::Create(_), BackendCall::Start(_)]
-    ));
+    assert_eq!(body["expires_at"].as_u64().unwrap(), NOW + 2 * INTERVAL);
+}
+
+/// An ended reservation — here, terminated — cannot be paid on either
+/// extension route: `expired` covers every ending (spec §6.3), same as a
+/// running lease.
+#[tokio::test]
+async fn standby_extend_refuses_an_ended_reservation() {
+    let h = warm_harness().await;
+    let spawn = reserve(&h, 45).await;
+
+    let terminate = RequestSpec {
+        tenant: Keys::parse(&spawn.tenant.secret_key().to_secret_hex()).unwrap(),
+        ..RequestSpec::about(&h, "terminate", &spawn.content.workload_id)
+    };
+    let (status, body) = post(&h.app, "/terminate", json!({ "request": terminate.sign() })).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+
+    let (status, body) = standby_extend_workload(&h, &spawn.content.workload_id).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{}", body);
+    assert_eq!(error_of(&body), "expired");
+}
+
+/// A `workload_id` this provider holds no lease for at all.
+#[tokio::test]
+async fn standby_extend_refuses_an_unknown_workload() {
+    let h = warm_harness().await;
+    let (status, body) = standby_extend_workload(&h, &workload_id(0xff)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{}", body);
+    assert_eq!(error_of(&body), "unknown_workload");
+}
+
+/// A reservation extended past a sweep instant survives that sweep; one not
+/// extended is ended by it (spec §6.7) — the other half of
+/// `an_unpaid_reservation_expires_on_the_sweep` above.
+#[tokio::test]
+async fn a_reservation_extended_past_a_sweep_instant_survives_it() {
+    let h = warm_harness().await;
+    let spawn = reserve(&h, 46).await;
+
+    // Pay one more interval before the first would have ended it.
+    let (status, body) = standby_extend_workload(&h, &spawn.content.workload_id).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["expires_at"].as_u64().unwrap(), NOW + 2 * INTERVAL);
+
+    // The sweep at the ORIGINAL expiry instant does nothing: the reservation
+    // is paid past it now.
+    h.clock.set(NOW + INTERVAL);
+    h.service.sweep_expired_leases(h.clock.now()).await;
+    let body = status_of(&h, &spawn).await;
+    assert_eq!(body["state"], "reserved", "{}", body);
+    assert_eq!(available(&h).await, 1, "still held");
+
+    // The sweep at the NEW expiry instant ends it, exactly like an unpaid
+    // one.
+    h.clock.set(NOW + 2 * INTERVAL);
+    h.service.sweep_expired_leases(h.clock.now()).await;
+    let body = status_of(&h, &spawn).await;
+    assert_eq!(body["state"], json!({ "ended": "expiry" }), "{}", body);
+    assert_eq!(available(&h).await, 2, "the capacity is back");
+    assert!(h.backend.calls().is_empty());
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────

@@ -46,11 +46,9 @@ use toon_provider::nostr::kinds::{
     K_TEMPLATE, TOON_LABEL,
 };
 use toon_provider::nostr::wire::{
-    ErrorCode, ErrorResponse, EvictionReason, ImageRef, PortRequest, Protocol, RegistryEntryRef,
-    Resources, SpawnContent,
+    EvictionReason, ImageRef, PortRequest, Protocol, RegistryEntryRef, Resources, SpawnContent,
 };
 use toon_provider::provider::{evict, route_table, ImagePolicyConfig};
-use toon_provider::provider_http::refuse;
 use toon_provider::{router, Listing, ProviderConfig, ProviderService};
 
 // ── the fixed world every fixture is generated in ────────────────────────────
@@ -1305,39 +1303,135 @@ async fn one_refusal_per_spawn_validation_step() {
         "error.no_matching_arch.json",
         with_validation_step(doc, "§6.2 step 5: pick the manifest for the listing's arch"),
     );
+}
 
-    // `not_standby` has no route to produce it until the rest of Milestone 3
-    // reserves and pays a standby, so its fixture is the error shape as
-    // `provider_http::refuse` renders it — the same serialiser and status
-    // mapping every other refusal above went through — with no request to
-    // show.
-    let (status, body) = rendered(refuse(ErrorResponse::new(
-        ErrorCode::NotStandby,
-        "this lease is not a Warm Standby; extend it on .extend",
-    )))
+/// Paying a reservation (spec §6.3, TOON_Network #30): `.standby.extend`'s
+/// response, and the two refusals that turn on a lease's ROLE rather than on
+/// its workload id, its listing version or whether it has ended — those three
+/// are the same codes `error.wrong_listing_version`, `error.expired` and
+/// `error.unknown_workload` already show, on `.extend`. Each scenario gets
+/// its own fixture provider: `warm` sells one slot, and a role refusal must
+/// not be confused with a capacity one.
+#[tokio::test]
+async fn a_standby_extend_response_and_its_role_refusals() {
+    let warm_standby_extend_route = route("warm.v1.standby.extend");
+    let warm_extend_route = route("warm.v1.extend");
+
+    // ── the response: one lease_interval_s on a reservation ──────────────
+    let f = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let seed = 0xb0;
+    let set = [keys(PRIMARY_SECRET).public_key(), f.provider_pubkey()];
+    let reserve_event = lease_request(
+        &f.tenant,
+        &set,
+        "spawn",
+        &standby_set_content(seed, &set),
+        NOW,
+        NOW + TTL,
+    );
+    let (status, response) = post(
+        &f.app,
+        "/listings/warm/v1/standby",
+        envelope(&reserve_event),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "standby_extend",
+            "ok",
+            "A paid extension of a reservation (spec §6.3): unsigned, `{ workload_id }` \
+             only, exactly like `.extend`. `expires_at` grows by one lease interval at the \
+             listing's `standby_price`, and the fake backend is never asked for anything — \
+             a reservation runs nothing to extend.",
+        ),
+        &warm_standby_extend_route,
+        "/listings/warm/v1/standby/extend",
+        about(seed),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["expires_at"], NOW + 2 * INTERVAL);
+    golden("standby_extend.ok.json", doc);
+
+    // ── `not_standby`: `.standby.extend` meets a RUNNING lease ───────────
+    // Bought on `.spawn` rather than `.standby`, so it is running rather than
+    // reserved, but still on `warm` — the same listing and version
+    // `.standby.extend` is paid on, so the role is the only thing wrong.
+    let g = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let running_seed = 0xb1;
+    let running_event = g.spawn_request(running_seed, TTL);
+    let (status, response) =
+        post(&g.app, "/listings/warm/v1/spawn", envelope(&running_event)).await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["role"], "standalone");
+
+    let (status, response, doc) = exchange(
+        &g,
+        (
+            "error",
+            "not_standby",
+            "`.standby.extend` paid for a RUNNING lease — standalone here, and the same for \
+             a Standby Set's primary or a standby after Takeover. It is billed at its own \
+             price on `.extend` instead; nothing here is a role a tenant can fix by \
+             retrying, so the message points at the route that will take the payment.",
+        ),
+        &warm_standby_extend_route,
+        "/listings/warm/v1/standby/extend",
+        about(running_seed),
+    )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(error_of(&body), "not_standby");
+    assert_eq!(error_of(&response), "not_standby");
     golden(
         "error.not_standby.json",
-        with_validation_step(
-            shape_only(
-                header(
-                    "error",
-                    "not_standby",
-                    "The `not_standby` refusal as this provider renders it. No route can \
-                     produce it yet: it belongs to `.standby.extend` (spec §6.3), which \
-                     pays a reservation once the next ticket of Milestone 3 lands. \
-                     Reservations themselves are real — `spawn.standby` makes one — but \
-                     nothing buys one an interval yet, so both extension routes still \
-                     refuse a reserved lease with `invalid_request`. Shape and status \
-                     only.",
-                ),
-                status,
-                body,
-            ),
-            "§6.3: on `.standby.extend` the lease MUST be a standby before Takeover",
+        with_validation_step(doc, "§6.3: on .standby.extend the lease MUST be Reserved"),
+    );
+
+    // ── `not_running`: `.extend` meets a RESERVATION ──────────────────────
+    // The mirror refusal, this ticket's own choice of code: none of §6.3's
+    // other three named codes fit a lease that is known, on the right
+    // version and not yet ended, just not RUNNING.
+    let h = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let reserved_seed = 0xb2;
+    let reserved_set = [keys(PRIMARY_SECRET).public_key(), h.provider_pubkey()];
+    let reserved_event = lease_request(
+        &h.tenant,
+        &reserved_set,
+        "spawn",
+        &standby_set_content(reserved_seed, &reserved_set),
+        NOW,
+        NOW + TTL,
+    );
+    let (status, response) = post(
+        &h.app,
+        "/listings/warm/v1/standby",
+        envelope(&reserved_event),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+
+    let (status, response, doc) = exchange(
+        &h,
+        (
+            "error",
+            "not_running",
+            "`.extend` paid for a Warm Standby RESERVATION rather than a running lease \
+             (spec §6.3). A reservation is billed at `standby_price` on `.standby.extend`; \
+             a lease is always billed at the price for what it is doing.",
         ),
+        &warm_extend_route,
+        "/listings/warm/v1/extend",
+        about(reserved_seed),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_of(&response), "not_running");
+    golden(
+        "error.not_running.json",
+        with_validation_step(doc, "§6.3: on .extend the lease MUST be Running"),
     );
 }
 
@@ -1450,30 +1544,6 @@ async fn a_spawn_and_a_status_per_standby_set_role() {
     assert_eq!(response["role"], "standby");
     assert!(response.get("access").is_none(), "{}", response);
     golden("status.reserved.json", doc);
-}
-
-/// A response the app builds, rendered the way a route would answer it:
-/// through the same serialiser and the same status mapping.
-async fn rendered(response: axum::response::Response) -> (StatusCode, Value) {
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap())
-}
-
-/// A fixture for an answer no route can produce yet: the same document an
-/// `exchange` writes, with `route`, `http_path` and `request_body` null
-/// because there is no request to show.
-fn shape_only(header: Value, status: StatusCode, body: Value) -> Value {
-    json!({
-        "fixture": header,
-        "route": Value::Null,
-        "http_path": Value::Null,
-        "request_body": Value::Null,
-        "response_status": status.as_u16(),
-        "response_body": body,
-    })
 }
 
 // ── Milestone 2: what a publisher signs, and the three forms of `image` ──────

@@ -461,6 +461,11 @@ pub enum ErrorCode {
     InvalidRequest,
     Expired,
     NotStandby,
+    /// `.extend` on a Warm Standby reservation (spec §6.3): the mirror of
+    /// `NotStandby`, which `.standby.extend` answers a running lease with.
+    /// A lease is always billed at the price for what it is doing, and a
+    /// reservation is not running — it is paid on `.standby.extend` instead.
+    NotRunning,
     BadSignature,
     StaleRequest,
 }
