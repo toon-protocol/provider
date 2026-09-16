@@ -86,6 +86,12 @@ pub struct ContainerConfig {
     pub args: Vec<String>,
     /// In-container path for persistent state. `None` = stateless.
     pub data_path: Option<String>,
+    /// What the listing grants this workload (spec §4.4): `docker` obliges
+    /// the backend to give it a daemon of the lease's own. Copied from the
+    /// listing rather than read back from it, so the backend decides from
+    /// the one struct it is handed.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 #[async_trait]

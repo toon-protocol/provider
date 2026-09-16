@@ -178,6 +178,14 @@ impl ProviderService {
             match self.state.backend.get_container_status(id).await {
                 Ok(ContainerStatus::Absent) => {
                     info!("workload {} no longer exists on the backend; dropping", id);
+                    // The workload is gone, but what was built around it may
+                    // not be: a `docker` lease's sidecar, volumes and network
+                    // are made before its workload, and a provider that died
+                    // between the two left them running. Delete is
+                    // idempotent, so asking is free when there is nothing.
+                    if let Err(e) = self.state.backend.delete_container(id).await {
+                        warn!("could not clear what workload {} left behind: {}", id, e);
+                    }
                     dropped += 1;
                     continue;
                 }

@@ -883,25 +883,34 @@ storage_gb = 1
 
     #[test]
     fn a_capability_this_backend_cannot_deliver_is_refused_at_load() {
-        // Spec §4.4: a tier that publishes `t docker` owes its tenant a Docker
-        // daemon of the lease's own. This backend supplies none, so the tier
-        // must not load — a tenant picks a listing by that tag alone and has
-        // no way to find out it was empty until it has paid.
-        for granted in [vec!["docker".to_string()], vec!["nesting".to_string()]] {
-            let cfg = ProviderConfig {
-                listings: vec![Listing {
-                    capabilities: granted.clone(),
-                    ..listing("ci", 1)
-                }],
-                ..ProviderConfig::default()
-            };
-            let err = cfg.validate().expect_err("granted but not built");
-            assert!(err.to_string().contains("ci"), "{}", err);
-        }
+        // Spec §4.4: a tier that publishes a `t` tag owes its tenant what
+        // the tag means, and a tenant picks a listing by that tag alone with
+        // no way to find out it was empty until it has paid. `nesting` is
+        // not built, so the tier must not load; `docker` is (a per-lease
+        // daemon, `docker.rs`), so the `ci` tier of spec Appendix A.1 loads.
+        let cfg = ProviderConfig {
+            listings: vec![Listing {
+                capabilities: vec!["nesting".to_string()],
+                ..listing("ci", 1)
+            }],
+            ..ProviderConfig::default()
+        };
+        let err = cfg.validate().expect_err("granted but not built");
+        assert!(err.to_string().contains("ci"), "{}", err);
+
+        let ci = ProviderConfig {
+            listings: vec![Listing {
+                capabilities: vec!["docker".to_string()],
+                ..listing("ci", 1)
+            }],
+            ..ProviderConfig::default()
+        };
+        ci.validate()
+            .expect("docker is grantable on the Docker backend");
 
         // The provider-wide list is the same promise, so it fails the same way.
         let cfg = ProviderConfig {
-            capabilities: vec!["docker".to_string()],
+            capabilities: vec!["nesting".to_string()],
             ..ProviderConfig::default()
         };
         assert!(cfg.validate().is_err());

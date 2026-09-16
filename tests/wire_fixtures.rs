@@ -794,8 +794,8 @@ async fn one_directory_event_per_kind() {
             "directory",
             "eviction",
             "An Eviction Notice (spec §6.7): a regular event with the workload id in an `x` \
-             tag and `{ workload_id, reason, message }` as content. `reason` is this \
-             provider's own vocabulary (abuse | policy | maintenance | other).",
+             tag, the `L toon.network` label, and `{ workload_id, reason, message }` as \
+             content. `reason` is one of §6.7's codes (abuse | policy | maintenance | other).",
             "K_EVICTION",
             &one(K_EVICTION),
         ),
@@ -851,7 +851,8 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
             "availability",
             "would_run",
             "The free availability route (spec §6.4) for a listing version on sale, a \
-             runnable image and free capacity. Unsigned; always HTTP 200.",
+             runnable image and free capacity. Unsigned; always HTTP 200. `image` is the \
+             same three-form object a spawn carries (ADR 0015).",
         ),
         &route("availability"),
         "/availability",
@@ -1007,7 +1008,8 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
             "terminate",
             "ok",
             "Termination (spec §6.6) by the tenant with `lease_request.terminate` as its \
-             body. The answer echoes the ended state so no second call is needed.",
+             body. The answer is `{ workload_id, state }` with the ended state, so no \
+             second call is needed.",
         ),
         &route("terminate"),
         "/terminate",

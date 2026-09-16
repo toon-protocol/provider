@@ -247,6 +247,7 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
 /// Serve one termination on the free `<addr>.terminate`: the workload is
 /// destroyed now, and nothing is refunded (ADR 0003).
 pub async fn terminate(state: &AppState, body: &[u8]) -> Result<TerminateResponse, ErrorResponse> {
+    let received = std::time::Instant::now();
     let (tenant, workload_id) = authenticate(state, body, Op::Terminate).await?;
     let now = state.clock.now();
 
@@ -269,6 +270,14 @@ pub async fn terminate(state: &AppState, body: &[u8]) -> Result<TerminateRespons
         ));
     }
 
+    // The whole ending happens inside this request, and a connector waits
+    // only so long for it; the figure is what an operator needs when one
+    // times out.
+    tracing::info!(
+        "lease {} terminated; answering after {:.1?}",
+        id,
+        received.elapsed()
+    );
     Ok(TerminateResponse {
         workload_id,
         state: LeaseState::Ended(LeaseEnd::Termination),

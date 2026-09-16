@@ -109,9 +109,12 @@ async fn a_lease_whose_workload_vanished_while_we_were_down_is_dropped() {
         "a lease with no workload must not be re-announced as capacity"
     );
 
-    // And it must not then be swept, because there is nothing to destroy.
+    // Whatever was built around the vanished workload — a `docker` lease's
+    // sidecar, volumes and network come before its workload — is asked to
+    // go with it, once; the sweep then has nothing left to destroy.
+    assert_eq!(backend.calls(), vec![BackendCall::Delete(LIVE)]);
     provider.sweep_expired_leases(NOW + 10_000).await;
-    assert!(backend.calls().is_empty());
+    assert_eq!(backend.calls(), vec![BackendCall::Delete(LIVE)]);
 }
 
 #[tokio::test]

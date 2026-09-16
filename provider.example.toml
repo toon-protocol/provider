@@ -53,14 +53,15 @@ liveness_cadence_s = 60
 # publishes nothing — legal, it simply does not appear in the directory.
 publish_url = "http://directory-publisher:8081/publish"
 
-# Capabilities this provider grants: privileges beyond an ordinary workload
-# (spec §4.4). EMPTY on purpose, and validated at load: the two the spec
-# defines both oblige this provider to give the workload something the Docker
-# backend does not build. `docker` means a Docker daemon of the LEASE'S OWN at
-# /var/run/docker.sock — never this host's, which is the daemon the provider
-# creates workloads with — and `nesting` means tenant code holding kernel
-# privileges. Granting either here fails at startup rather than publishing a
-# `t` tag no workload can use. A capability of your own goes in prefixed `x-`.
+# Capabilities this provider grants to EVERY tier: privileges beyond an
+# ordinary workload (spec §4.4), validated at load. `docker` is grantable on
+# the Docker backend: each such lease gets a Docker daemon of the LEASE'S OWN
+# at /var/run/docker.sock — a privileged `dind` sidecar the provider runs
+# beside the workload, never this host's daemon — so grant it per tier (see
+# the `ci` listing below) rather than here. `nesting` means tenant code
+# holding kernel privileges, which this backend does not hand out: granting it
+# fails at startup rather than publishing a `t` tag no workload can use. A
+# capability of your own goes in prefixed `x-`.
 capabilities = []
 
 # Where the HTTP app listens. Only this provider's TOON connector should be
