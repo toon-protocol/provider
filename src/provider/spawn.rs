@@ -478,6 +478,7 @@ fn container_config(
             .volume_gb
             .filter(|gb| *gb > 0)
             .map(|_| VOLUME_MOUNT_PATH.to_string()),
+        capabilities: listing.capabilities.clone(),
     }
 }
 

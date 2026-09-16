@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "not_standby",
-    "description": "The `not_standby` refusal as this provider renders it. No Milestone 1 route can produce it: it belongs to `.standby.extend` (spec §6.3), which arrives with Warm Standby in Milestone 3. Shape and status only.",
+    "description": "The `not_standby` refusal as this provider renders it. No route that exists can produce it: it belongs to `.standby.extend` (spec §6.3), which arrives with Warm Standby in Milestone 3 (TOON_Network #11). Shape and status only, until #11 replaces this with a real exchange.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "error"
   },

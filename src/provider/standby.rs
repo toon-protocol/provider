@@ -127,6 +127,7 @@ mod tests {
                 entrypoint: None,
                 args: vec![],
                 data_path: None,
+                capabilities: vec![],
             },
             listing: "basic.v1".to_string(),
             expires_at,
