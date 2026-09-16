@@ -302,6 +302,15 @@ pub struct FakeDirectory {
     /// Every `(address, relay)` the provider asked for, in order — so a
     /// test can see that a relay was (or was not) consulted.
     entry_lookups: Mutex<Vec<(String, String)>>,
+    /// Blob Records `find_blob_records` answers with, as the Relay Set
+    /// holding them would: matched by kind and `#x`, in the order they were
+    /// seeded, so a test can say which of two records for one digest the
+    /// provider tries first.
+    blob_records: Mutex<Vec<nostr_sdk::Event>>,
+    /// Every digest the provider looked Blob Records up for, in order — so
+    /// a test can see that the Relay Set was (or was not) searched, and for
+    /// what.
+    blob_record_lookups: Mutex<Vec<String>>,
     /// Every READ the provider made through the Directory port, in order. A
     /// test that asserts the provider looked nothing up (a spawn's
     /// `template`, which it never resolves) needs the fake to record the
@@ -361,6 +370,20 @@ impl FakeDirectory {
     /// for, in order.
     pub fn entry_lookups(&self) -> Vec<(String, String)> {
         self.entry_lookups.lock().unwrap().clone()
+    }
+
+    /// A relay of the provider's Relay Set holds this Blob Record:
+    /// `find_blob_records` will answer with it for the digest its `x` tag
+    /// names. Seed two for one digest to choose the order they are tried
+    /// in.
+    pub fn seed_blob_record(&self, event: nostr_sdk::Event) {
+        self.blob_records.lock().unwrap().push(event);
+    }
+
+    /// Every digest the provider has asked `find_blob_records` for, in
+    /// order.
+    pub fn blob_record_lookups(&self) -> Vec<String> {
+        self.blob_record_lookups.lock().unwrap().clone()
     }
 }
 
@@ -426,5 +449,35 @@ impl Directory for FakeDirectory {
             })
             .max_by_key(|e| e.created_at)
             .cloned())
+    }
+
+    async fn find_blob_records(&self, digest: &str) -> Result<Vec<nostr_sdk::Event>> {
+        self.reads
+            .lock()
+            .unwrap()
+            .push(format!("find_blob_records({digest})"));
+        self.blob_record_lookups
+            .lock()
+            .unwrap()
+            .push(digest.to_string());
+        // What a relay answers a `#x` filter with: every kind-30435 event
+        // tagged with the hex, whoever signed it. Seeding order is the
+        // answer's order, so a test can put the record it wants tried
+        // first, first.
+        let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
+        Ok(self
+            .blob_records
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                e.kind.as_u16() == toon_provider::nostr::kinds::K_BLOB
+                    && e.tags
+                        .find(nostr_sdk::TagKind::custom("x"))
+                        .and_then(|t| t.content())
+                        == Some(hex)
+            })
+            .cloned()
+            .collect())
     }
 }
