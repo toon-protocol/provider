@@ -71,8 +71,7 @@ const OTHER_TENANT_SECRET: &str =
 /// The PUBLISHER: whoever signs an Image Registry entry, a Blob Record or a
 /// Template. Never a provider — spec §8's events are a publisher's, and the
 /// provider only reads them — so it gets a key of its own here.
-const PUBLISHER_SECRET: &str =
-    "4444444444444444444444444444444444444444444444444444444444444444";
+const PUBLISHER_SECRET: &str = "4444444444444444444444444444444444444444444444444444444444444444";
 
 const PROVIDER_NAME: &str = "Fixture Provider";
 const ILP_ADDRESS: &str = "g.fixture";
@@ -1201,10 +1200,12 @@ async fn one_refusal_per_spawn_validation_step() {
 /// by a Blob Record; the manifest is still upstream, which is the point of
 /// having two source types at all — a publisher pays only for what exists
 /// nowhere else (spec §8.1).
-const INDEX_DIGEST: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+const INDEX_DIGEST: &str =
+    "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 const MANIFEST_DIGEST: &str =
     "sha256:2222222222222222222222222222222222222222222222222222222222222222";
-const LAYER_DIGEST: &str = "sha256:3333333333333333333333333333333333333333333333333333333333333333";
+const LAYER_DIGEST: &str =
+    "sha256:3333333333333333333333333333333333333333333333333333333333333333";
 
 const IMAGE_NAME: &str = "web";
 const IMAGE_TAG: &str = "1.0";
@@ -1325,7 +1326,14 @@ fn template_address() -> String {
 fn one_publisher_event_per_milestone_2_kind() {
     let publisher = publisher();
     let entry = with_reproducible_sig(
-        &image_entry_event(IMAGE_NAME, IMAGE_TAG, &image_entry_content(), &publisher, NOW).unwrap(),
+        &image_entry_event(
+            IMAGE_NAME,
+            IMAGE_TAG,
+            &image_entry_content(),
+            &publisher,
+            NOW,
+        )
+        .unwrap(),
         &publisher,
     );
     golden(
@@ -1406,7 +1414,11 @@ async fn one_spawn_per_image_form() {
     // Form 1: `{ reference, digest }` — the only form this provider can
     // fetch today, and the one that runs. It also carries the informational
     // `template`, which the provider parses and never acts on.
-    let content = spawn_content_with(0xd1, ImageRef::upstream(REFERENCE, valid_digest()), Some(template_address()));
+    let content = spawn_content_with(
+        0xd1,
+        ImageRef::upstream(REFERENCE, valid_digest()),
+        Some(template_address()),
+    );
     let event = lease_request(
         &f.tenant,
         f.provider_pubkey(),

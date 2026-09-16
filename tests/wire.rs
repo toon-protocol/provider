@@ -17,7 +17,10 @@ use toon_provider::nostr::wire::*;
 fn spawn_content() -> SpawnContent {
     SpawnContent {
         workload_id: "ab".repeat(32),
-        image: ImageRef::upstream("docker.io/library/alpine".to_string(), format!("sha256:{}", "cd".repeat(32))),
+        image: ImageRef::upstream(
+            "docker.io/library/alpine".to_string(),
+            format!("sha256:{}", "cd".repeat(32)),
+        ),
         env: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
         ports: vec![PortRequest {
             container_port: 443,
@@ -162,7 +165,10 @@ fn the_three_spawn_image_forms_are_told_apart_and_a_fourth_is_refused() {
             "an uppercase digest",
             ImageRef::by_digest(format!("sha256:{}", "CD".repeat(32))),
         ),
-        ("a digest with no algorithm", ImageRef::by_digest("cd".repeat(32))),
+        (
+            "a digest with no algorithm",
+            ImageRef::by_digest("cd".repeat(32)),
+        ),
         (
             "an address that names another kind",
             ImageRef::from_registry(&digest, "30432:aa:basic", "wss://r"),
@@ -473,7 +479,10 @@ fn availability_request_round_trips_the_tickets_shape() {
     let request = AvailabilityRequest {
         listing: "basic".to_string(),
         version: 1,
-        image: ImageRef::upstream("docker.io/library/alpine".to_string(), format!("sha256:{}", "cd".repeat(32))),
+        image: ImageRef::upstream(
+            "docker.io/library/alpine".to_string(),
+            format!("sha256:{}", "cd".repeat(32)),
+        ),
     };
     let value = serde_json::to_value(&request).unwrap();
     assert_eq!(value["listing"], "basic");
@@ -494,7 +503,10 @@ fn an_unknown_availability_field_is_refused_at_parse() {
     let mut value = serde_json::to_value(AvailabilityRequest {
         listing: "basic".to_string(),
         version: 1,
-        image: ImageRef::upstream("docker.io/library/alpine".to_string(), format!("sha256:{}", "cd".repeat(32))),
+        image: ImageRef::upstream(
+            "docker.io/library/alpine".to_string(),
+            format!("sha256:{}", "cd".repeat(32)),
+        ),
     })
     .unwrap();
     value["image_digest"] = json!(format!("sha256:{}", "cd".repeat(32)));
@@ -741,7 +753,10 @@ fn an_image_registry_entry_round_trips_both_source_types_byte_identically() {
             repository: "library/alpine".to_string(),
         }
     );
-    assert_eq!(serde_json::to_string(&content).unwrap(), IMAGE_ENTRY_CONTENT);
+    assert_eq!(
+        serde_json::to_string(&content).unwrap(),
+        IMAGE_ENTRY_CONTENT
+    );
 }
 
 #[test]
@@ -754,11 +769,18 @@ fn a_blob_record_round_trips_its_ordered_parts_byte_identically() {
         "the parts cover the blob"
     );
     assert_eq!(
-        content.parts.iter().map(|p| p.txid.as_str()).collect::<Vec<_>>(),
+        content
+            .parts
+            .iter()
+            .map(|p| p.txid.as_str())
+            .collect::<Vec<_>>(),
         ["cGFydC1vbmU", "cGFydC10d28", "cGFydC10aHJlZQ"],
         "parts keep their order"
     );
-    assert_eq!(serde_json::to_string(&content).unwrap(), BLOB_RECORD_CONTENT);
+    assert_eq!(
+        serde_json::to_string(&content).unwrap(),
+        BLOB_RECORD_CONTENT
+    );
 }
 
 #[test]
@@ -779,12 +801,15 @@ fn an_unknown_field_in_any_milestone_2_content_is_refused() {
         value
     };
     assert!(
-        serde_json::from_value::<ImageEntryContent>(with(IMAGE_ENTRY_CONTENT, "signature")).is_err()
+        serde_json::from_value::<ImageEntryContent>(with(IMAGE_ENTRY_CONTENT, "signature"))
+            .is_err()
     );
     assert!(
         serde_json::from_value::<BlobRecordContent>(with(BLOB_RECORD_CONTENT, "gateway")).is_err()
     );
-    assert!(serde_json::from_value::<TemplateContent>(with(TEMPLATE_CONTENT, "privileged")).is_err());
+    assert!(
+        serde_json::from_value::<TemplateContent>(with(TEMPLATE_CONTENT, "privileged")).is_err()
+    );
     let mut entry: serde_json::Value = serde_json::from_str(IMAGE_ENTRY_CONTENT).unwrap();
     entry["blobs"][0]["source"]["gateway"] = json!("https://example");
     assert!(
@@ -820,9 +845,15 @@ fn an_image_registry_entry_event_round_trips_through_its_builder_and_parser() {
     // the id covers — pubkey, created_at, kind, tags and content — came back
     // unchanged. Only `sig` differs, because signing draws fresh randomness.
     assert_eq!(
-        image_entry_event(&parsed.name, &parsed.tag, &parsed.content, &keys, 1_700_000_000)
-            .unwrap()
-            .id,
+        image_entry_event(
+            &parsed.name,
+            &parsed.tag,
+            &parsed.content,
+            &keys,
+            1_700_000_000
+        )
+        .unwrap()
+        .id,
         event.id
     );
 }
@@ -843,7 +874,9 @@ fn a_blob_record_event_round_trips_through_its_builder_and_parser() {
     assert_eq!(parsed.publisher, keys.public_key());
     assert_eq!(parsed.content, content);
     assert_eq!(
-        blob_record_event(&parsed.content, &keys, 1_700_000_000).unwrap().id,
+        blob_record_event(&parsed.content, &keys, 1_700_000_000)
+            .unwrap()
+            .id,
         event.id
     );
 }
@@ -888,16 +921,14 @@ fn a_parser_refuses_an_event_of_the_wrong_kind_or_with_a_mismatched_tag() {
 
     // An `x` tag that does not match the content's digest: a relay could
     // serve this to a `#x` filter for a digest it does not describe.
-    let lying = nostr_sdk::EventBuilder::new(
-        nostr_sdk::Kind::Custom(K_BLOB),
-        record.content.clone(),
-    )
-    .tags([
-        nostr_sdk::Tag::identifier(format!("sha256:{}", BLOB_DIGEST_HEX)),
-        nostr_sdk::Tag::parse(["x", ENTRY_DIGEST_HEX]).unwrap(),
-    ])
-    .sign_with_keys(&keys)
-    .unwrap();
+    let lying =
+        nostr_sdk::EventBuilder::new(nostr_sdk::Kind::Custom(K_BLOB), record.content.clone())
+            .tags([
+                nostr_sdk::Tag::identifier(format!("sha256:{}", BLOB_DIGEST_HEX)),
+                nostr_sdk::Tag::parse(["x", ENTRY_DIGEST_HEX]).unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
     assert!(BlobRecord::from_event(&lying).is_err(), "x tag must match");
 }
 
@@ -923,5 +954,8 @@ fn carries_the_toon_label(event: &nostr_sdk::Event) -> bool {
         .tags
         .iter()
         .map(nostr_sdk::Tag::as_slice)
-        .any(|cells| cells.first().map(String::as_str) == Some("L") && cells.get(1).map(String::as_str) == Some(TOON_LABEL))
+        .any(|cells| {
+            cells.first().map(String::as_str) == Some("L")
+                && cells.get(1).map(String::as_str) == Some(TOON_LABEL)
+        })
 }

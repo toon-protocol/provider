@@ -287,7 +287,8 @@ async fn a_standby_set_is_refused_this_milestone() {
 
 /// The Image Registry entry address of a plausible publisher: spec §6.2's
 /// `30434:<pubkey>:<d>`, with the entry's `<name>:<tag>` as the `d`.
-const ENTRY_ADDRESS: &str = "30434:4444444444444444444444444444444444444444444444444444444444444444:web:1.0";
+const ENTRY_ADDRESS: &str =
+    "30434:4444444444444444444444444444444444444444444444444444444444444444:web:1.0";
 
 /// The two Image Registry forms of `image` (spec §6.2): digest with an entry
 /// to resolve it through, and digest alone.
@@ -313,7 +314,13 @@ async fn an_image_registry_form_is_refused_image_until_the_registry_is_resolved(
             ..spawn_content(1)
         };
         let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}: {}", label, body);
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}: {}",
+            label,
+            body
+        );
         assert_eq!(error_of(&body), "refused_image", "{}", label);
         assert!(
             body["message"]
@@ -381,7 +388,10 @@ async fn an_image_that_is_neither_of_the_three_forms_is_invalid_request() {
             "a registry entry missing a field altogether",
             json!({ "digest": digest(), "registry_entry": { "address": ENTRY_ADDRESS } }),
         ),
-        ("no digest at all", json!({ "reference": "docker.io/library/alpine" })),
+        (
+            "no digest at all",
+            json!({ "reference": "docker.io/library/alpine" }),
+        ),
     ];
     for (label, image) in cases {
         let mut content = serde_json::to_value(spawn_content(1)).unwrap();
@@ -400,7 +410,10 @@ async fn a_template_is_accepted_and_ignored_but_a_capability_beside_it_is_not() 
     // privilege beside it is still refused.
     let h = harness().await;
     let content = SpawnContent {
-        template: Some("30436:4444444444444444444444444444444444444444444444444444444444444444:static-site".to_string()),
+        template: Some(
+            "30436:4444444444444444444444444444444444444444444444444444444444444444:static-site"
+                .to_string(),
+        ),
         ..spawn_content(1)
     };
     let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
@@ -449,7 +462,10 @@ async fn malformed_ids_keys_images_and_ports_are_invalid() {
         (
             "a digest that is not sha256:<64 hex>",
             SpawnContent {
-                image: ImageRef::upstream("docker.io/library/alpine".to_string(), "sha256:abc".to_string()),
+                image: ImageRef::upstream(
+                    "docker.io/library/alpine".to_string(),
+                    "sha256:abc".to_string(),
+                ),
                 ..spawn_content(1)
             },
         ),

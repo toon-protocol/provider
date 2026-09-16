@@ -43,8 +43,13 @@ use super::wire::{ErrorCode, ErrorResponse, ImageRef, PortRequest, RegistryEntry
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum BlobSource {
-    ToonStore { blob_record_txid: String },
-    Oci { registry: String, repository: String },
+    ToonStore {
+        blob_record_txid: String,
+    },
+    Oci {
+        registry: String,
+        repository: String,
+    },
 }
 
 /// One blob an Image Registry entry lists: enough to fetch it, verify it and
@@ -98,10 +103,16 @@ impl ImageEntry {
         check_x_tag(event, &content.digest)?;
         let d = identifier(event)?;
         let (name, tag) = d.rsplit_once(':').with_context(|| {
-            format!("an Image Registry entry's `d` is `<name>:<tag>`, not {:?}", d)
+            format!(
+                "an Image Registry entry's `d` is `<name>:<tag>`, not {:?}",
+                d
+            )
         })?;
         if name.is_empty() || tag.is_empty() {
-            bail!("an Image Registry entry's `d` is `<name>:<tag>`, not {:?}", d);
+            bail!(
+                "an Image Registry entry's `d` is `<name>:<tag>`, not {:?}",
+                d
+            );
         }
         Ok(Self {
             publisher: event.pubkey,
@@ -376,9 +387,9 @@ impl SpawnImage {
     /// The image's content address, whichever form named it.
     pub fn digest(&self) -> &str {
         match self {
-            Self::Upstream { digest, .. } | Self::Registry { digest, .. } | Self::Digest { digest } => {
-                digest
-            }
+            Self::Upstream { digest, .. }
+            | Self::Registry { digest, .. }
+            | Self::Digest { digest } => digest,
         }
     }
 
@@ -492,14 +503,13 @@ fn digest_tag(digest: &str) -> Result<Tag> {
     Ok(Tag::parse(["x", hex])?)
 }
 
-fn parse_content<T: serde::de::DeserializeOwned>(event: &Event, kind: u16, what: &str) -> Result<T> {
+fn parse_content<T: serde::de::DeserializeOwned>(
+    event: &Event,
+    kind: u16,
+    what: &str,
+) -> Result<T> {
     if event.kind.as_u16() != kind {
-        bail!(
-            "{} is kind {}, not {}",
-            what,
-            kind,
-            event.kind.as_u16()
-        );
+        bail!("{} is kind {}, not {}", what, kind, event.kind.as_u16());
     }
     serde_json::from_str(&event.content).with_context(|| format!("the content of {}", what))
 }
