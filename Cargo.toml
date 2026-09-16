@@ -64,6 +64,12 @@ tempfile = "3"
 # `tests/blossom.rs`).
 wiremock = "0.6"
 
+# Stubs a NIP-01 relay in the relay-backed Directory's tests
+# (`tests/common/relay.rs`): the same websocket stack nostr-sdk connects
+# with, on the server side, so no second one is pulled in.
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+
 [profile.release]
 # Optimize for small binary size
 opt-level = "s"

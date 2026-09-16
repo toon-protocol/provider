@@ -420,6 +420,31 @@ async fn every_version_of_a_tier_shares_one_availability_figure() {
 }
 
 #[tokio::test]
+async fn publishing_liveness_reports_which_relays_took_it() {
+    // A primary that cannot reach a strict majority of its own Relay Set
+    // for five cadences must stop its workload (spec §7.1); the count it
+    // keeps is this report, relay by relay.
+    let h = harness().await;
+    let report = h.service.publish_liveness(NOW).await.unwrap();
+    assert!(report.reached_every_relay());
+    assert_eq!(report.accepted, vec!["wss://relay.example"]);
+
+    h.directory.relay_always_refuses("ws://relay-two:7100");
+    let report = h.service.publish_liveness(NOW + CADENCE).await.unwrap();
+    assert_eq!(report.accepted, vec!["wss://relay.example"]);
+    assert_eq!(
+        report.failed.keys().collect::<Vec<_>>(),
+        vec!["ws://relay-two:7100"]
+    );
+    assert!(!report.reached_every_relay());
+
+    // A publisher that could not be reached asked no relay at all: that is
+    // an error, not a report in which every relay happened to refuse.
+    h.directory.fail_next_publish("publisher down");
+    assert!(h.service.publish_liveness(NOW + 2 * CADENCE).await.is_err());
+}
+
+#[tokio::test]
 async fn a_relay_that_refuses_a_write_does_not_stop_the_provider() {
     let h = harness().await;
     h.directory

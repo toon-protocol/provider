@@ -799,10 +799,13 @@ async fn one_directory_event_per_kind() {
     );
 
     // A Takeover, which no route produces: a Warm Standby publishes one when
-    // the primary it watches has gone silent (spec §7.1 step 2), and the
-    // watchdog that decides that is a later ticket of this milestone. The
-    // EVENT is built by the same builder that ticket will call, signed by
-    // the fixture provider in its role as the standby.
+    // the primary it watches has gone silent (spec §7.1 step 2), which
+    // `provider::watchdog` decides over a cadence of silent readings that
+    // nothing here waits out. The EVENT is built by the same builder the
+    // watchdog calls, signed by the fixture provider in its role as the
+    // standby; `tests/takeover_watch.rs` drives the watchdog with these
+    // keys and checks that what it publishes is this fixture, byte for
+    // byte.
     let takeover = with_reproducible_sig(
         &takeover_event(
             &workload_id(STANDBY_SET_WORKLOAD),

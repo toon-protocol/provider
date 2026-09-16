@@ -14,6 +14,7 @@ use tracing::{error, warn};
 pub use crate::nostr::wire::{LeaseEnd, LeaseState};
 
 use super::standby::StandbySet;
+use super::watchdog::TakeoverAnnouncement;
 use crate::nostr::wire::{Access, PortAccess, Role, SpawnContent};
 
 /// How many live (`Provisioning`, `Reserved` or `Running`) leases of
@@ -81,6 +82,13 @@ pub struct LeaseRecord {
     /// the wire: `status` answers the lease, not the request that made it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reserved_spawn: Option<SpawnContent>,
+
+    /// The Takeover this Warm Standby announced, once it has (spec §7.1
+    /// step 2): absent until then, and always for a lease that is not a
+    /// reservation. Persisted so a standby that restarts after announcing
+    /// settles the race it entered instead of announcing again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takeover: Option<TakeoverAnnouncement>,
 
     pub created_at: u64,
 
@@ -213,6 +221,7 @@ mod tests {
             state: LeaseState::Running,
             standby_set: None,
             reserved_spawn: None,
+            takeover: None,
             created_at: 1000,
             expires_at,
             ended_at: None,
@@ -309,6 +318,27 @@ mod tests {
         assert_eq!(loaded[&2000].role, Role::Standalone);
         assert_eq!(loaded[&2000].standby_set, None);
         assert_eq!(loaded[&2000].reserved_spawn, None);
+        assert_eq!(loaded[&2000].takeover, None);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn an_announced_takeover_survives_a_restart() {
+        // A standby that announced and then restarted must settle the race
+        // it entered (spec §7.1 step 3), not announce a second time: when
+        // it claimed, in what cadence, and where the other claims are.
+        let p = temp_path("announced");
+        let mut announced = lease(2000, 9999);
+        announced.role = Role::Standby;
+        announced.state = LeaseState::Reserved;
+        announced.takeover = Some(TakeoverAnnouncement {
+            announced_at: 5000,
+            cadence_s: 60,
+            relays: vec!["ws://relay-one:7100".to_string()],
+        });
+        persist_leases(&HashMap::from([(2000, announced.clone())]), &p);
+
+        assert_eq!(load_leases(&p)[&2000], announced);
         let _ = std::fs::remove_file(&p);
     }
 
