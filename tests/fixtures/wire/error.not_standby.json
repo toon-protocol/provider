@@ -1,17 +1,19 @@
 {
   "fixture": {
     "case": "not_standby",
-    "description": "The `not_standby` refusal as this provider renders it. No route that exists can produce it: it belongs to `.standby.extend` (spec §6.3), which arrives with Warm Standby in Milestone 3 (TOON_Network #11). Shape and status only, until #11 replaces this with a real exchange.",
+    "description": "`.standby.extend` paid for a RUNNING lease — standalone here, and the same for a Standby Set's primary or a standby after Takeover. It is billed at its own price on `.extend` instead; nothing here is a role a tenant can fix by retrying, so the message points at the route that will take the payment.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "error"
   },
-  "http_path": null,
-  "request_body": null,
+  "http_path": "/listings/warm/v1/standby/extend",
+  "request_body": {
+    "workload_id": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+  },
   "response_body": {
     "error": "not_standby",
     "message": "this lease is not a Warm Standby; extend it on .extend"
   },
   "response_status": 409,
-  "route": null,
-  "validation_step": "§6.3: on `.standby.extend` the lease MUST be a standby before Takeover"
+  "route": "g.fixture.warm.v1.standby.extend",
+  "validation_step": "§6.3: on .standby.extend the lease MUST be Reserved"
 }

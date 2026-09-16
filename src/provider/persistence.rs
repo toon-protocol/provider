@@ -13,12 +13,20 @@ use tracing::{error, warn};
 // so their JSON is a wire shape, and this table is the same JSON on disk.
 pub use crate::nostr::wire::{LeaseEnd, LeaseState};
 
-use crate::nostr::wire::{Access, PortAccess, Role};
+use super::settle::TakeoverSettlement;
+use super::standby::StandbySet;
+use super::watchdog::TakeoverAnnouncement;
+use crate::nostr::wire::{Access, PortAccess, Role, SpawnContent};
 
-/// How many live (`Provisioning` or `Running`) leases of `listing` are on
-/// the table right now. Shared by `availability`'s capacity check and
-/// spawn's, so a change to what counts as "live" cannot desync the two
-/// (they must agree: spec §9, "availability... applies the same policy").
+/// How many live (`Provisioning`, `Reserved` or `Running`) leases of
+/// `listing` are on the table right now. Shared by `availability`'s capacity
+/// check, spawn's and the Liveness `available` count, so a change to what
+/// counts as "live" cannot desync them (they must agree: spec §9,
+/// "availability... applies the same policy").
+///
+/// A RESERVATION counts: a Warm Standby holds its slot with nothing running,
+/// and the whole of what its tenant bought is that nobody else is sold it
+/// (spec §6.7).
 pub fn count_live(leases: &HashMap<u32, LeaseRecord>, listing: &str) -> usize {
     leases
         .values()
@@ -53,6 +61,54 @@ pub struct LeaseRecord {
 
     pub role: Role,
     pub state: LeaseState,
+
+    /// The Standby Set this lease was spawned into, and this provider's
+    /// position in it (spec §7). Absent for a standalone lease, which is
+    /// every lease that named no `standby_set`.
+    ///
+    /// Persisted with the rest: a Warm Standby that restarts must still know
+    /// whose Liveness to watch — `set.primary()` — and among whom a Takeover
+    /// is settled, and neither is derivable from anything else the record
+    /// holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standby_set: Option<StandbySet>,
+
+    /// The spawn a Takeover would start, kept only while the lease is a
+    /// RESERVATION (spec §7.1 step 4).
+    ///
+    /// A reservation is capacity held for a workload that does not exist
+    /// yet, so the spawn that described it is the only thing that says what
+    /// to start if the primary goes silent; a lease whose workload is
+    /// already running needs nothing of the sort. It is on disk and never on
+    /// the wire: `status` answers the lease, not the request that made it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_spawn: Option<SpawnContent>,
+
+    /// The Takeover this Warm Standby announced, once it has (spec §7.1
+    /// step 2): absent until then, and always for a lease that is not a
+    /// reservation. Persisted so a standby that restarts after announcing
+    /// settles the race it entered instead of announcing again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takeover: Option<TakeoverAnnouncement>,
+
+    /// How the last Takeover on this workload settled here (spec §7.1 steps
+    /// 3–5), once one has: who won. Persisted because a standby that LOST
+    /// watches the winner as its primary from then on, and nothing else on
+    /// the record says who that is; a standby that won and restarts before
+    /// its workload started still has to start it. `status` answers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled: Option<TakeoverSettlement>,
+    /// Set on a PRIMARY whose Standby Set has moved past it: a Takeover for
+    /// this lease's `workload_id` was found on the Relay Set, signed by a
+    /// member of the set (spec §7.1). Its workload is never started again
+    /// for the rest of the lease, whatever the relays say later.
+    ///
+    /// Persisted, and persisted as a FACT rather than re-derived, because
+    /// the guarantee is for the rest of the lease: a relay that has since
+    /// dropped the claim, or a provider that restarts and cannot read one,
+    /// must not put a second copy of the workload beside the new primary's.
+    #[serde(default)]
+    pub taken_over: bool,
 
     pub created_at: u64,
 
@@ -183,6 +239,11 @@ mod tests {
             listing_version: 1,
             role: Role::Standalone,
             state: LeaseState::Running,
+            standby_set: None,
+            reserved_spawn: None,
+            takeover: None,
+            settled: None,
+            taken_over: false,
             created_at: 1000,
             expires_at,
             ended_at: None,
@@ -220,6 +281,135 @@ mod tests {
         assert_eq!(loaded[&2001].expires_at, 1234567999);
         assert_eq!(loaded[&2000].state, LeaseState::Running);
 
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_reservation_keeps_the_set_it_watches_across_a_restart() {
+        // What a Warm Standby cannot re-derive after a restart: whose
+        // Liveness it watches, and which position it holds.
+        let p = temp_path("reservation");
+        let mut reserved = lease(2000, 9999);
+        reserved.role = Role::Standby;
+        reserved.state = LeaseState::Reserved;
+        reserved.standby_set = Some(StandbySet {
+            members: vec!["aa".repeat(32), "bb".repeat(32)],
+            index: 1,
+        });
+        persist_leases(&HashMap::from([(2000, reserved.clone())]), &p);
+
+        let loaded = load_leases(&p);
+        assert_eq!(loaded[&2000], reserved);
+        let set = loaded[&2000].standby_set.as_ref().unwrap();
+        assert_eq!(set.primary(), Some("aa".repeat(32).as_str()));
+        assert!(!set.is_primary());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_table_written_before_standby_sets_still_loads() {
+        // The two Warm Standby fields arrived after the first leases were
+        // written. A provider restarting over a table from before them must
+        // not lose every lease in it: one unreadable record empties the
+        // WHOLE table (`load_leases`), which would strand every paid
+        // workload on the host.
+        let p = temp_path("pre-standby");
+        std::fs::write(
+            &p,
+            serde_json::json!({ "2000": {
+                "id": 2000,
+                "workload_id": "aa".repeat(32),
+                "tenant": "ee6afe4b4a6e4fe49d6c35359d1161a6fd26fbe5d6eefcbab1c9c147731bf08a",
+                "listing": "basic",
+                "listing_version": 1,
+                "role": "standalone",
+                "state": "running",
+                "created_at": 1000,
+                "expires_at": 4600,
+                "destroyed": false,
+                "ssh_port": 40000,
+                "ports": [],
+            }})
+            .to_string(),
+        )
+        .unwrap();
+
+        let loaded = load_leases(&p);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[&2000].expires_at, 4600);
+        assert_eq!(loaded[&2000].role, Role::Standalone);
+        assert_eq!(loaded[&2000].standby_set, None);
+        assert_eq!(loaded[&2000].reserved_spawn, None);
+        assert_eq!(loaded[&2000].takeover, None);
+        assert_eq!(loaded[&2000].settled, None);
+        assert!(!loaded[&2000].taken_over);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_settled_takeover_survives_a_restart() {
+        // A standby that lost watches the winner from then on (spec §7.1
+        // step 5), and only this field says who that is: the set on the
+        // record still lists the original primary at index 0.
+        let p = temp_path("settled");
+        let mut lost = lease(2000, 9999);
+        lost.role = Role::Standby;
+        lost.state = LeaseState::Reserved;
+        lost.settled = Some(TakeoverSettlement {
+            winner: "cc".repeat(32),
+        });
+        persist_leases(&HashMap::from([(2000, lost.clone())]), &p);
+
+        assert_eq!(load_leases(&p)[&2000], lost);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_self_stopped_primary_survives_a_restart() {
+        // What a primary that stopped its own workload cannot re-derive
+        // after a restart (spec §7.1): that the workload is off, and that a
+        // member of its Standby Set has claimed the workload id — which is
+        // why it must never be started again for this lease, whatever the
+        // relays hold by then.
+        let p = temp_path("self-stopped");
+        let mut stopped = lease(2000, 9999);
+        stopped.role = Role::Primary;
+        stopped.state = LeaseState::Stopped;
+        stopped.standby_set = Some(StandbySet {
+            members: vec!["aa".repeat(32), "bb".repeat(32)],
+            index: 0,
+        });
+        stopped.taken_over = true;
+        persist_leases(&HashMap::from([(2000, stopped.clone())]), &p);
+
+        let loaded = load_leases(&p);
+        assert_eq!(loaded[&2000], stopped);
+        assert_eq!(loaded[&2000].state, LeaseState::Stopped);
+        // Still a lease: it holds its slot and its workload, and only the
+        // ending destroys the container the stop left behind.
+        assert!(loaded[&2000].state.is_live());
+        assert!(loaded[&2000].state.has_workload());
+        assert!(!loaded[&2000].state.is_reachable());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn an_announced_takeover_survives_a_restart() {
+        // A standby that announced and then restarted must settle the race
+        // it entered (spec §7.1 step 3), not announce a second time: when
+        // it claimed, in what cadence, and where the other claims are.
+        let p = temp_path("announced");
+        let mut announced = lease(2000, 9999);
+        announced.role = Role::Standby;
+        announced.state = LeaseState::Reserved;
+        announced.takeover = Some(TakeoverAnnouncement {
+            announced_at: 5000,
+            cadence_s: 60,
+            relays: vec!["ws://relay-one:7100".to_string()],
+        });
+        persist_leases(&HashMap::from([(2000, announced.clone())]), &p);
+
+        assert_eq!(load_leases(&p)[&2000], announced);
         let _ = std::fs::remove_file(&p);
     }
 

@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 pub mod harness;
+pub mod relay;
 pub mod store;
 
 use std::collections::HashMap;
@@ -12,9 +13,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use nostr_sdk::PublicKey;
 use sha2::{Digest, Sha256};
 use toon_provider::compute::{ComputeBackend, ContainerConfig, ContainerStatus, NodeStatus};
-use toon_provider::{Clock, Directory, PublishReport};
+use toon_provider::nostr::kinds::{K_LIVENESS, K_PROFILE, K_TAKEOVER};
+use toon_provider::{Clock, Directory, LivenessState, PublishReport, RelayLiveness};
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -296,6 +299,14 @@ pub struct FakeDirectory {
     /// When set, every publish is recorded but reports this relay as having
     /// refused — a Relay Set reached only in part.
     relay_always_refuses: Mutex<Option<String>>,
+    /// The Relay Set every publication is offered to, when a test says so
+    /// (`publishes_to`). Unset, the fake answers as it always has: one
+    /// nameless relay took it.
+    relay_set: Mutex<Option<Vec<String>>>,
+    /// Relays of that set which refuse every LIVENESS from now on
+    /// (`refuse_liveness_on`), taking everything else. What a primary's own
+    /// majority count reads (spec §7.1).
+    liveness_refusals: Mutex<Vec<String>>,
     /// Image Registry entries `get_image_entry` answers with, as relays
     /// holding them would: matched by kind, signer and `d`, newest first.
     image_entries: Mutex<Vec<nostr_sdk::Event>>,
@@ -313,6 +324,22 @@ pub struct FakeDirectory {
     /// a test can see that the Relay Set was (or was not) searched, and for
     /// what.
     blob_record_lookups: Mutex<Vec<String>>,
+    /// Provider Profiles `get_profile` answers with, as the Relay Set
+    /// holding them would: matched by kind and signer, newest first.
+    profiles: Mutex<Vec<nostr_sdk::Event>>,
+    /// What each relay says about each provider's Liveness, as a test sets
+    /// it: `(provider hex, relay URL) -> state`. A pair nobody set is
+    /// `Absent`, as a relay that never heard of the provider is.
+    liveness_states: Mutex<HashMap<(String, String), LivenessState>>,
+    /// Every `(provider, relays)` the provider asked `liveness_state` for,
+    /// in order — so a test can see WHICH relays a standby watched.
+    liveness_lookups: Mutex<Vec<(PublicKey, Vec<String>)>>,
+    /// Every Takeover handed to `publish_takeover`, with the relays it was
+    /// addressed to. Also in `published`, so `of_kind(K_TAKEOVER)` sees it.
+    takeover_publications: Mutex<Vec<(nostr_sdk::Event, Vec<String>)>>,
+    /// Takeovers `find_takeovers` answers with, as the relays holding them
+    /// would: matched by kind, `d` and signer.
+    takeovers: Mutex<Vec<nostr_sdk::Event>>,
     /// Every READ the provider made through the Directory port, in order. A
     /// test that asserts the provider looked nothing up (a spawn's
     /// `template`, which it never resolves) needs the fake to record the
@@ -362,6 +389,24 @@ impl FakeDirectory {
         *self.relay_always_refuses.lock().unwrap() = Some(relay.to_string());
     }
 
+    /// Every publication from now on is offered to exactly these relays, and
+    /// the report names them one by one. Set it to the provider's own
+    /// `relay_set` whenever the per-relay outcome has to MEAN something: a
+    /// primary counts the relays of its own Relay Set that took its Liveness
+    /// (spec §7.1), which a report about one nameless relay says nothing
+    /// about.
+    pub fn publishes_to(&self, relays: &[&str]) {
+        *self.relay_set.lock().unwrap() = Some(relays.iter().map(|r| r.to_string()).collect());
+    }
+
+    /// These relays refuse every LIVENESS from now on and take everything
+    /// else — one relay of three is a primary that still has its majority,
+    /// two of three is one that has lost it. Only meaningful beside
+    /// `publishes_to`, which says what the whole Relay Set is.
+    pub fn refuse_liveness_on(&self, relays: &[&str]) {
+        *self.liveness_refusals.lock().unwrap() = relays.iter().map(|r| r.to_string()).collect();
+    }
+
     /// A relay holds this Image Registry entry (or any addressable event):
     /// `get_image_entry` will answer with it for its own address.
     pub fn seed_image_entry(&self, event: nostr_sdk::Event) {
@@ -387,33 +432,106 @@ impl FakeDirectory {
     pub fn blob_record_lookups(&self) -> Vec<String> {
         self.blob_record_lookups.lock().unwrap().clone()
     }
+
+    /// The Relay Set holds this Provider Profile: `get_profile` will answer
+    /// with it for its signer.
+    pub fn seed_profile(&self, event: nostr_sdk::Event) {
+        self.profiles.lock().unwrap().push(event);
+    }
+
+    /// What `relay` says about `provider`'s Liveness from now on.
+    pub fn set_liveness(&self, provider: PublicKey, relay: &str, state: LivenessState) {
+        self.liveness_states
+            .lock()
+            .unwrap()
+            .insert((provider.to_hex(), relay.to_string()), state);
+    }
+
+    /// `provider` is `state` on every relay of `relays` from now on.
+    pub fn set_liveness_on(&self, provider: PublicKey, relays: &[&str], state: LivenessState) {
+        for relay in relays {
+            self.set_liveness(provider, relay, state);
+        }
+    }
+
+    /// Every `(provider, relays)` the provider has asked `liveness_state`
+    /// for, in order.
+    pub fn liveness_lookups(&self) -> Vec<(PublicKey, Vec<String>)> {
+        self.liveness_lookups.lock().unwrap().clone()
+    }
+
+    /// Every Takeover handed to `publish_takeover` so far, in order, each
+    /// with the relays it was addressed to.
+    pub fn takeover_publications(&self) -> Vec<(nostr_sdk::Event, Vec<String>)> {
+        self.takeover_publications.lock().unwrap().clone()
+    }
+
+    /// The relays hold this Takeover: `find_takeovers` will answer with it
+    /// for its `d` and signer.
+    pub fn seed_takeover(&self, event: nostr_sdk::Event) {
+        self.takeovers.lock().unwrap().push(event);
+    }
+
+    fn read(&self, what: String) {
+        self.reads.lock().unwrap().push(what);
+    }
 }
 
-#[async_trait]
-impl Directory for FakeDirectory {
-    async fn publish(&self, event: nostr_sdk::Event) -> Result<PublishReport> {
+impl FakeDirectory {
+    /// What every publication through the fake answers: recorded, then
+    /// accepted by one nameless relay — or, once `publishes_to` has named a
+    /// Relay Set, by every relay of it but those refusing this kind — and
+    /// refused by the one `relay_always_refuses` names, if any, unless the
+    /// next publication was told to fail.
+    fn record_publication(&self, event: nostr_sdk::Event) -> Result<PublishReport> {
         if let Some(why) = self.fail_next_publish.lock().unwrap().take() {
             anyhow::bail!("{}", why);
         }
+        let kind = event.kind.as_u16();
         self.published.lock().unwrap().push(event);
-        let mut report = PublishReport {
-            accepted: vec!["wss://relay.example".to_string()],
-            failed: Default::default(),
+
+        let mut report = match self.relay_set.lock().unwrap().clone() {
+            // A named Relay Set: every relay of it took the event, except
+            // those refusing this kind.
+            Some(relays) => {
+                let refuses: Vec<String> = if kind == K_LIVENESS {
+                    self.liveness_refusals.lock().unwrap().clone()
+                } else {
+                    Vec::new()
+                };
+                let (failed, accepted): (Vec<String>, Vec<String>) =
+                    relays.into_iter().partition(|r| refuses.contains(r));
+                PublishReport {
+                    accepted,
+                    failed: failed
+                        .into_iter()
+                        .map(|r| (r, "relay refused".to_string()))
+                        .collect(),
+                }
+            }
+            None => PublishReport {
+                accepted: vec!["wss://relay.example".to_string()],
+                failed: Default::default(),
+            },
         };
         if let Some(relay) = self.relay_always_refuses.lock().unwrap().clone() {
             report.failed.insert(relay, "relay refused".to_string());
         }
         Ok(report)
     }
+}
+
+#[async_trait]
+impl Directory for FakeDirectory {
+    async fn publish(&self, event: nostr_sdk::Event) -> Result<PublishReport> {
+        self.record_publication(event)
+    }
 
     async fn query_liveness(
         &self,
         provider: nostr_sdk::PublicKey,
     ) -> Result<Option<nostr_sdk::Event>> {
-        self.reads
-            .lock()
-            .unwrap()
-            .push(format!("query_liveness({})", provider.to_hex()));
+        self.read(format!("query_liveness({})", provider.to_hex()));
         Ok(self
             .liveness
             .lock()
@@ -427,10 +545,7 @@ impl Directory for FakeDirectory {
         address: &str,
         relay: &str,
     ) -> Result<Option<nostr_sdk::Event>> {
-        self.reads
-            .lock()
-            .unwrap()
-            .push(format!("get_image_entry({address}, {relay})"));
+        self.read(format!("get_image_entry({address}, {relay})"));
         self.entry_lookups
             .lock()
             .unwrap()
@@ -454,10 +569,7 @@ impl Directory for FakeDirectory {
     }
 
     async fn find_blob_records(&self, digest: &str) -> Result<Vec<nostr_sdk::Event>> {
-        self.reads
-            .lock()
-            .unwrap()
-            .push(format!("find_blob_records({digest})"));
+        self.read(format!("find_blob_records({digest})"));
         self.blob_record_lookups
             .lock()
             .unwrap()
@@ -481,5 +593,95 @@ impl Directory for FakeDirectory {
             })
             .cloned()
             .collect())
+    }
+
+    async fn get_profile(&self, provider: PublicKey) -> Result<Option<nostr_sdk::Event>> {
+        self.read(format!("get_profile({})", provider.to_hex()));
+        Ok(self
+            .profiles
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind.as_u16() == K_PROFILE && e.pubkey == provider)
+            .max_by_key(|e| e.created_at)
+            .cloned())
+    }
+
+    async fn liveness_state(
+        &self,
+        provider: PublicKey,
+        relays: &[String],
+        _now: u64,
+    ) -> Result<RelayLiveness> {
+        self.read(format!(
+            "liveness_state({}, [{}])",
+            provider.to_hex(),
+            relays.join(", ")
+        ));
+        self.liveness_lookups
+            .lock()
+            .unwrap()
+            .push((provider, relays.to_vec()));
+        // The test SETS each relay's answer, so `now` decides nothing here:
+        // "expired" is what the test said, not what a tag says.
+        let states = self.liveness_states.lock().unwrap();
+        Ok(relays
+            .iter()
+            .map(|relay| {
+                let state = states
+                    .get(&(provider.to_hex(), relay.clone()))
+                    .copied()
+                    .unwrap_or(LivenessState::Absent);
+                (relay.clone(), state)
+            })
+            .collect())
+    }
+
+    async fn publish_takeover(
+        &self,
+        event: nostr_sdk::Event,
+        relays: &[String],
+    ) -> Result<PublishReport> {
+        let report = self.record_publication(event.clone())?;
+        self.takeover_publications
+            .lock()
+            .unwrap()
+            .push((event.clone(), relays.to_vec()));
+        // A relay that took the claim holds it: the provider's own Takeover
+        // is among what `find_takeovers` answers, as it would be on the
+        // primary's Relay Set. A fake built fresh — a restart with a
+        // Directory that knows nothing — holds none of it.
+        self.takeovers.lock().unwrap().push(event);
+        Ok(report)
+    }
+
+    async fn find_takeovers(
+        &self,
+        workload_id: &str,
+        claimants: &[PublicKey],
+        relays: &[String],
+    ) -> Result<Vec<nostr_sdk::Event>> {
+        self.read(format!(
+            "find_takeovers({}, {} claimant(s), [{}])",
+            workload_id,
+            claimants.len(),
+            relays.join(", ")
+        ));
+        // What the relays answer an authors + `#d` filter with, earliest
+        // first, as `ConnectorDirectory` orders it.
+        let mut found: Vec<nostr_sdk::Event> = self
+            .takeovers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                e.kind.as_u16() == K_TAKEOVER
+                    && e.tags.identifier() == Some(workload_id)
+                    && claimants.contains(&e.pubkey)
+            })
+            .cloned()
+            .collect();
+        found.sort_by_key(|e| e.created_at);
+        Ok(found)
     }
 }

@@ -36,22 +36,20 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::harness::post;
 use common::{sha256_hex, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory};
-use toon_provider::nostr::directory_events::Settlement;
+use toon_provider::nostr::directory_events::{takeover_event, ProfileContent, Settlement};
 use toon_provider::nostr::image_events::{
     blob_record_event, image_entry_event, template_event, BlobPart, BlobRecordContent, BlobSource,
     EntryBlob, ImageEntryContent, TemplateContent, TemplateImage,
 };
 use toon_provider::nostr::kinds::{
-    K_BLOB, K_EVICTION, K_IMAGE, K_LEASE_REQUEST, K_LISTING, K_LIVENESS, K_PROFILE, K_TEMPLATE,
-    TOON_LABEL,
+    K_BLOB, K_EVICTION, K_IMAGE, K_LEASE_REQUEST, K_LISTING, K_LIVENESS, K_PROFILE, K_TAKEOVER,
+    K_TEMPLATE, TOON_LABEL,
 };
 use toon_provider::nostr::wire::{
-    ErrorCode, ErrorResponse, EvictionReason, ImageRef, PortRequest, Protocol, RegistryEntryRef,
-    Resources, SpawnContent,
+    EvictionReason, ImageRef, PortRequest, Protocol, RegistryEntryRef, Resources, SpawnContent,
 };
-use toon_provider::provider::{evict, route_table, ImagePolicyConfig};
-use toon_provider::provider_http::refuse;
-use toon_provider::{router, Listing, ProviderConfig, ProviderService};
+use toon_provider::provider::{evict, route_table, ImagePolicyConfig, SELF_STOP_CADENCES};
+use toon_provider::{router, Listing, LivenessState, ProviderConfig, ProviderService};
 
 // ── the fixed world every fixture is generated in ────────────────────────────
 
@@ -72,6 +70,14 @@ const OTHER_TENANT_SECRET: &str =
 /// Template. Never a provider — spec §8's events are a publisher's, and the
 /// provider only reads them — so it gets a key of its own here.
 const PUBLISHER_SECRET: &str = "4444444444444444444444444444444444444444444444444444444444444444";
+/// The PRIMARY of a Standby Set (spec §7): index 0 of the `standby_set`,
+/// another provider entirely. The fixture provider is the STANDBY that
+/// watches it, so a Takeover it announces names this key.
+const PRIMARY_SECRET: &str = "5555555555555555555555555555555555555555555555555555555555555555";
+/// The OTHER Warm Standby of a Standby Set: the peer the fixture provider
+/// stands beside when IT is the primary. It signs nothing here either; it is
+/// index 1 of the set `spawn.primary` forms.
+const STANDBY_SECRET: &str = "6666666666666666666666666666666666666666666666666666666666666666";
 
 const PROVIDER_NAME: &str = "Fixture Provider";
 const ILP_ADDRESS: &str = "g.fixture";
@@ -84,6 +90,10 @@ const RELAY: &str = "ws://relay.fixture.example:7100";
 const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const GEOHASH: &str = "u4pruydqqvj";
 const LIVENESS_CADENCE_S: u64 = 60;
+/// µUSDC per interval for a Warm Standby of the `warm` tier: less than the
+/// 1000 a running lease costs, because held capacity is not a running
+/// workload.
+const STANDBY_PRICE: u64 = 400;
 
 const REFERENCE: &str = "docker.io/library/alpine";
 const SSH_KEY: &str =
@@ -264,6 +274,17 @@ fn workload_id(seed: u8) -> String {
     format!("{:02x}", seed).repeat(32)
 }
 
+/// The workload a Standby Set serves: one id across the primary and every
+/// standby (spec §7). The Takeover and the reserved status are about this
+/// one, so the two fixtures tell one story.
+const STANDBY_SET_WORKLOAD: u8 = 0xa0;
+
+/// The workload of the OTHER set in the fixtures: the one the fixture
+/// provider is the primary of (`spawn.primary`). A different id, because it
+/// is a different set — membership never changes, so a second set is always a
+/// second workload id (spec §7).
+const PRIMARY_WORKLOAD: u8 = 0xa1;
+
 fn spawn_content(seed: u8) -> Value {
     serde_json::to_value(SpawnContent {
         workload_id: workload_id(seed),
@@ -283,23 +304,35 @@ fn spawn_content(seed: u8) -> Value {
     .unwrap()
 }
 
+/// The spawn content of a Standby Set (spec §6.2, §7): the same
+/// `workload_id` and the same `standby_set`, primary first, at every member.
+fn standby_set_content(seed: u8, set: &[PublicKey]) -> Value {
+    let mut content = spawn_content(seed);
+    content["standby_set"] = json!(set.iter().map(|k| k.to_hex()).collect::<Vec<_>>());
+    content
+}
+
 /// A Lease Request exactly as spec §6.1 has a tenant sign it: kind
-/// `K_LEASE_REQUEST`, tags `p` (the provider), `op` and `expiration`, the
+/// `K_LEASE_REQUEST`, one `p` tag per addressee, `op` and `expiration`, the
 /// op's content object as the JSON `content` string.
+///
+/// `providers` is ordinarily one. A spawn that forms a Standby Set names
+/// every member of it, because the tenant signs the request ONCE and sends
+/// the same bytes to all of them (§6.1, §7); each member then reads its role
+/// off its own position and the route it was paid on.
 fn lease_request(
     tenant: &Keys,
-    provider: PublicKey,
+    providers: &[PublicKey],
     op: &str,
     content: &Value,
     created_at: u64,
     expiration: u64,
 ) -> Event {
+    let mut tags: Vec<Tag> = providers.iter().copied().map(Tag::public_key).collect();
+    tags.push(Tag::custom(TagKind::custom("op"), [op]));
+    tags.push(Tag::expiration(Timestamp::from(expiration)));
     let unsigned = EventBuilder::new(Kind::Custom(K_LEASE_REQUEST), content.to_string())
-        .tags([
-            Tag::public_key(provider),
-            Tag::custom(TagKind::custom("op"), [op]),
-            Tag::expiration(Timestamp::from(expiration)),
-        ])
+        .tags(tags)
         .custom_created_at(Timestamp::from(created_at))
         .build(tenant.public_key());
     sign_reproducibly(unsigned, tenant)
@@ -323,6 +356,7 @@ fn listing(
     capacity: u32,
     gpu: Option<&str>,
     capabilities: &[&str],
+    standby_price: Option<u64>,
 ) -> Listing {
     Listing {
         name: name.to_string(),
@@ -336,6 +370,7 @@ fn listing(
         arch: "amd64".to_string(),
         lease_interval_s: INTERVAL,
         price: 1000,
+        standby_price,
         capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
         capacity,
     }
@@ -364,8 +399,13 @@ fn config(
         geohash: Some(GEOHASH.to_string()),
         capabilities: vec!["x-fixture".to_string()],
         listings: vec![
-            listing("basic", 1, 2, None, &["x-fixture"]),
-            listing("gpu", 1, 1, Some("rtx-4090"), &[]),
+            listing("basic", 1, 2, None, &["x-fixture"], None),
+            listing("gpu", 1, 1, Some("rtx-4090"), &[], None),
+            // The one tier that sells Warm Standbys, so the fixtures show
+            // both halves of the rule: a priced listing gets `.standby` and
+            // `.standby.extend` rows and publishes `standby_price`, and the
+            // two above get neither and publish no such field.
+            listing("warm", 1, 1, None, &[], Some(STANDBY_PRICE)),
         ],
         workload_id_range_start: 1000,
         workload_id_range_end: 1003,
@@ -384,6 +424,9 @@ struct Fixture {
     app: axum::Router,
     service: ProviderService,
     directory: Arc<FakeDirectory>,
+    /// Stopped at `NOW`, and moved only to drive the watchdog through a
+    /// Takeover — then set back, so every request is signed at `NOW`.
+    clock: Arc<FakeClock>,
     provider: Keys,
     tenant: Keys,
     other_tenant: Keys,
@@ -402,7 +445,7 @@ impl Fixture {
     fn spawn_request(&self, seed: u8, ttl: u64) -> Event {
         lease_request(
             &self.tenant,
-            self.provider_pubkey(),
+            &[self.provider_pubkey()],
             "spawn",
             &spawn_content(seed),
             NOW,
@@ -416,7 +459,7 @@ impl Fixture {
     fn about_request(&self, tenant: &Keys, op: &str, seed: u8, ttl: u64) -> Event {
         lease_request(
             tenant,
-            self.provider_pubkey(),
+            &[self.provider_pubkey()],
             op,
             &about(seed),
             NOW,
@@ -444,13 +487,14 @@ async fn fixture_provider(policy: ImagePolicyConfig, registry: MockServer) -> Fi
     }
     let gateway = MockServer::start().await;
     mount_image_bytes(&gateway, &registry).await;
+    let clock = FakeClock::at(NOW);
     let service = ProviderService::with_backend_clock_and_directory(
         ProviderConfig {
             gateway_url_pattern: Some(format!("{}/raw/{{txid}}", gateway.uri())),
             ..config(state_path, Some(registry.uri()), policy)
         },
         FakeBackend::new(),
-        FakeClock::at(NOW),
+        clock.clone(),
         directory.clone(),
     )
     .unwrap();
@@ -458,6 +502,7 @@ async fn fixture_provider(policy: ImagePolicyConfig, registry: MockServer) -> Fi
         app: router(service.app_state()),
         service,
         directory,
+        clock,
         provider: keys(PROVIDER_SECRET),
         tenant: keys(TENANT_SECRET),
         other_tenant: keys(OTHER_TENANT_SECRET),
@@ -538,16 +583,20 @@ fn constants_and_test_keys() {
             "tenant": key(&tenant),
             "other_tenant": key(&other),
             "publisher": key(&keys(PUBLISHER_SECRET)),
+            "primary_provider": key(&keys(PRIMARY_SECRET)),
+            "standby_provider": key(&keys(STANDBY_SECRET)),
             "kinds": {
                 "K_PROFILE": K_PROFILE,
                 "K_LISTING": K_LISTING,
                 "K_LIVENESS": K_LIVENESS,
                 "K_LEASE_REQUEST": K_LEASE_REQUEST,
                 "K_EVICTION": K_EVICTION,
+                "K_TAKEOVER": K_TAKEOVER,
                 "K_IMAGE": K_IMAGE,
                 "K_BLOB": K_BLOB,
                 "K_TEMPLATE": K_TEMPLATE,
             },
+            "standby_price": STANDBY_PRICE,
             "label": TOON_LABEL,
             "signing": {
                 "id": "sha256 over the NIP-01 serialization [0, pubkey, created_at, kind, tags, content]",
@@ -581,7 +630,7 @@ fn a_lease_request_per_op() {
         ),
     ];
     for (op, content, description) in cases {
-        let event = lease_request(&tenant, provider, op, &content, NOW, NOW + TTL);
+        let event = lease_request(&tenant, &[provider], op, &content, NOW, NOW + TTL);
         assert!(event.verify().is_ok());
         let mut doc = event_fixture("lease_request", op, description, "K_LEASE_REQUEST", &event);
         doc["packet_body"] = envelope(&event);
@@ -609,18 +658,33 @@ fn the_routes_a_listing_generates() {
                 "routes",
                 "listing",
                 "The connector routes this provider's Profile and Listings generate: one paid \
-                 `.spawn` and `.extend` per listing version, then the three free provider-wide \
-                 routes. `prefix` is what a tenant pays; `handler_url` is the provider's own \
-                 HTTP path behind its connector and never leaves the operator's config.",
+                 `.spawn` and `.extend` per listing version, a `.standby` and a \
+                 `.standby.extend` beside them at the listing's `standby_price` when it sells \
+                 Warm Standbys (here `warm` only), then the three free provider-wide routes. A \
+                 listing that prices no standby gets neither standby row: a connector must \
+                 never terminate a route the provider did not price. `prefix` is what a tenant \
+                 pays; `handler_url` is the provider's own HTTP path behind its connector and \
+                 never leaves the operator's config.",
             ),
             "ilp_address": ILP_ADDRESS,
-            "listings": cfg.listings.iter().map(|l| json!({
-                "name": l.name, "version": l.version, "price": l.price,
-                "lease_interval_s": l.lease_interval_s,
-            })).collect::<Vec<_>>(),
+            "listings": cfg.listings.iter().map(|l| {
+                let mut row = json!({
+                    "name": l.name, "version": l.version, "price": l.price,
+                    "lease_interval_s": l.lease_interval_s,
+                });
+                // Absent, never zero, exactly as the Listing event writes it.
+                if let Some(standby_price) = l.standby_price {
+                    row["standby_price"] = json!(standby_price);
+                }
+                row
+            }).collect::<Vec<_>>(),
             "patterns": {
                 "spawn": "<ilp_address>.<listing d tag>.v<content.version>.spawn",
                 "extend": "<ilp_address>.<listing d tag>.v<content.version>.extend",
+                "standby": "<ilp_address>.<listing d tag>.v<content.version>.standby \
+                            (only when content.standby_price is present)",
+                "standby.extend": "<ilp_address>.<listing d tag>.v<content.version>.standby.extend \
+                                   (only when content.standby_price is present)",
                 "availability": "<ilp_address>.availability",
                 "status": "<ilp_address>.status",
                 "terminate": "<ilp_address>.terminate",
@@ -655,20 +719,31 @@ async fn one_directory_event_per_kind() {
     );
 
     let listings = f.directory.of_kind(K_LISTING);
-    assert_eq!(listings.len(), 2);
+    assert_eq!(listings.len(), 3);
     for (event, case, description) in [
         (
             &listings[0],
             "listing",
             "The `basic` Listing (spec §4.2): addressable on `d`, pointing at its Profile \
              through `a`, with one `t` tag per capability (here the experimental `x-fixture`) and \
-             `l` labels for isolation and arch. `routes.listing` is what this event generates.",
+             `l` labels for isolation and arch. It sells no Warm Standby, so it carries NO \
+             `standby_price` field at all — absent, never `0`, which would read as \
+             \"standbys are free\". `routes.listing` is what this event generates.",
         ),
         (
             &listings[1],
             "listing.gpu",
             "The `gpu` Listing: as `listing`, plus `resources.gpu` in content and an \
              `l gpu:<model>` label, and no capabilities.",
+        ),
+        (
+            &listings[2],
+            "listing.warm",
+            "The `warm` Listing: the one tier that sells Warm Standbys (spec §4.2, §7), so \
+             its content carries `standby_price` — µUSDC per interval for held capacity with \
+             nothing running, less than the `price` of a running lease. It is this field \
+             alone that gives the tier its `.standby` and `.standby.extend` routes in \
+             `routes.listing`; nothing else about the Listing changes.",
         ),
     ] {
         golden(
@@ -725,6 +800,42 @@ async fn one_directory_event_per_kind() {
             &one(K_EVICTION),
         ),
     );
+
+    // A Takeover, which no route produces: a Warm Standby publishes one when
+    // the primary it watches has gone silent (spec §7.1 step 2), which
+    // `provider::watchdog` decides over a cadence of silent readings that
+    // nothing here waits out. The EVENT is built by the same builder the
+    // watchdog calls, signed by the fixture provider in its role as the
+    // standby; `tests/takeover_watch.rs` drives the watchdog with these
+    // keys and checks that what it publishes is this fixture, byte for
+    // byte.
+    let takeover = with_reproducible_sig(
+        &takeover_event(
+            &workload_id(STANDBY_SET_WORKLOAD),
+            &keys(PRIMARY_SECRET).public_key(),
+            &f.provider,
+            NOW,
+        )
+        .unwrap(),
+        &f.provider,
+    );
+    golden(
+        "directory.takeover.json",
+        event_fixture(
+            "directory",
+            "takeover",
+            "A Takeover (spec §7.1): a Warm Standby's claim on the workload of a primary \
+             that went silent, published to the PRIMARY's Relay Set, where every other \
+             member of the Standby Set is watching. Addressable on `d` = the workload id \
+             the whole set shares, so a second announcement about the same workload \
+             replaces the first and the settle query reads one claim per standby rather \
+             than a history. `primary` is the pubkey at index 0 of the `standby_set` \
+             (`constants.primary_provider`); the signer is the standby that claims the \
+             workload — here the fixture provider — and never the primary itself.",
+            "K_TAKEOVER",
+            &takeover,
+        ),
+    );
 }
 
 #[tokio::test]
@@ -770,6 +881,31 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
     assert_eq!(response["would_run"], false);
     assert_eq!(error_of(&response), "wrong_listing_version");
     golden("availability.refused.json", doc);
+
+    // Availability asked about a Warm Standby rather than a running lease.
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "availability",
+            "standby_role",
+            "Availability with §6.4's optional `role`, asked about the one tier that sells \
+             Warm Standbys: would a standby be RESERVED here? Nothing is reserved by \
+             asking, and the answer is `false` with `wrong_listing_version` on a listing \
+             that prices no standby, exactly as its `.standby` route would have answered. \
+             `role` takes `primary` or `standby` and nothing else — `standalone` is a \
+             lease role, not a question, since every spawn with no Standby Set is \
+             standalone already — and an unknown value is `invalid_request` like any other \
+             shape. Omitting `role` asks the ordinary question, as every other \
+             availability fixture here does.",
+        ),
+        &route("availability"),
+        "/availability",
+        json!({ "listing": "warm", "version": 1, "image": image, "role": "standby" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["would_run"], true);
+    golden("availability.standby_role.json", doc);
 
     // Spawn.
     let (status, response, doc) = exchange(
@@ -960,7 +1096,7 @@ async fn one_refusal_per_spawn_validation_step() {
     // Step 1: freshness.
     let stale = lease_request(
         &f.tenant,
-        f.provider_pubkey(),
+        &[f.provider_pubkey()],
         "spawn",
         &spawn_content(0xaa),
         NOW - 400,
@@ -992,7 +1128,7 @@ async fn one_refusal_per_spawn_validation_step() {
     privileged["privileged"] = json!(true);
     let event = lease_request(
         &f.tenant,
-        f.provider_pubkey(),
+        &[f.provider_pubkey()],
         "spawn",
         &privileged,
         NOW,
@@ -1152,7 +1288,7 @@ async fn one_refusal_per_spawn_validation_step() {
     content["image"]["digest"] = json!(index_digest);
     let event = lease_request(
         &arm_only.tenant,
-        arm_only.provider_pubkey(),
+        &[arm_only.provider_pubkey()],
         "spawn",
         &content,
         NOW,
@@ -1177,41 +1313,441 @@ async fn one_refusal_per_spawn_validation_step() {
         "error.no_matching_arch.json",
         with_validation_step(doc, "§6.2 step 5: pick the manifest for the listing's arch"),
     );
+}
 
-    // `not_standby` has no route to produce it until Milestone 3 sells Warm
-    // Standbys, so its fixture is the error shape as `provider_http::refuse`
-    // renders it — the same serialiser and status mapping every other
-    // refusal above went through — with no request to show.
-    let rendered = refuse(ErrorResponse::new(
-        ErrorCode::NotStandby,
-        "this lease is not a Warm Standby; extend it on .extend",
-    ));
-    let status = rendered.status();
-    let bytes = axum::body::to_bytes(rendered.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let body: Value = serde_json::from_slice(&bytes).unwrap();
+/// Paying a reservation (spec §6.3, TOON_Network #30): `.standby.extend`'s
+/// response, and the two refusals that turn on a lease's ROLE rather than on
+/// its workload id, its listing version or whether it has ended — those three
+/// are the same codes `error.wrong_listing_version`, `error.expired` and
+/// `error.unknown_workload` already show, on `.extend`. Each scenario gets
+/// its own fixture provider: `warm` sells one slot, and a role refusal must
+/// not be confused with a capacity one.
+#[tokio::test]
+async fn a_standby_extend_response_and_its_role_refusals() {
+    let warm_standby_extend_route = route("warm.v1.standby.extend");
+    let warm_extend_route = route("warm.v1.extend");
+
+    // ── the response: one lease_interval_s on a reservation ──────────────
+    let f = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let seed = 0xb0;
+    let set = [keys(PRIMARY_SECRET).public_key(), f.provider_pubkey()];
+    let reserve_event = lease_request(
+        &f.tenant,
+        &set,
+        "spawn",
+        &standby_set_content(seed, &set),
+        NOW,
+        NOW + TTL,
+    );
+    let (status, response) = post(
+        &f.app,
+        "/listings/warm/v1/standby",
+        envelope(&reserve_event),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "standby_extend",
+            "ok",
+            "A paid extension of a reservation (spec §6.3): unsigned, `{ workload_id }` \
+             only, exactly like `.extend`. `expires_at` grows by one lease interval at the \
+             listing's `standby_price`, and the fake backend is never asked for anything — \
+             a reservation runs nothing to extend.",
+        ),
+        &warm_standby_extend_route,
+        "/listings/warm/v1/standby/extend",
+        about(seed),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["expires_at"], NOW + 2 * INTERVAL);
+    golden("standby_extend.ok.json", doc);
+
+    // ── `not_standby`: `.standby.extend` meets a RUNNING lease ───────────
+    // Bought on `.spawn` rather than `.standby`, so it is running rather than
+    // reserved, but still on `warm` — the same listing and version
+    // `.standby.extend` is paid on, so the role is the only thing wrong.
+    let g = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let running_seed = 0xb1;
+    let running_event = g.spawn_request(running_seed, TTL);
+    let (status, response) =
+        post(&g.app, "/listings/warm/v1/spawn", envelope(&running_event)).await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["role"], "standalone");
+
+    let (status, response, doc) = exchange(
+        &g,
+        (
+            "error",
+            "not_standby",
+            "`.standby.extend` paid for a RUNNING lease — standalone here, and the same for \
+             a Standby Set's primary or a standby after Takeover. It is billed at its own \
+             price on `.extend` instead; nothing here is a role a tenant can fix by \
+             retrying, so the message points at the route that will take the payment.",
+        ),
+        &warm_standby_extend_route,
+        "/listings/warm/v1/standby/extend",
+        about(running_seed),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(error_of(&body), "not_standby");
+    assert_eq!(error_of(&response), "not_standby");
     golden(
         "error.not_standby.json",
-        json!({
-            "fixture": header(
-                "error",
-                "not_standby",
-                "The `not_standby` refusal as this provider renders it. No route that \
-                 exists can produce it: it belongs to `.standby.extend` (spec §6.3), which \
-                 arrives with Warm Standby in Milestone 3 (TOON_Network #11). Shape and \
-                 status only, until #11 replaces this with a real exchange.",
-            ),
-            "route": Value::Null,
-            "http_path": Value::Null,
-            "request_body": Value::Null,
-            "response_status": status.as_u16(),
-            "response_body": body,
-            "validation_step": "§6.3: on `.standby.extend` the lease MUST be a standby before Takeover",
-        }),
+        with_validation_step(doc, "§6.3: on .standby.extend the lease MUST be Reserved"),
     );
+
+    // ── `not_running`: `.extend` meets a RESERVATION ──────────────────────
+    // The mirror refusal, this ticket's own choice of code: none of §6.3's
+    // other three named codes fit a lease that is known, on the right
+    // version and not yet ended, just not RUNNING.
+    let h = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let reserved_seed = 0xb2;
+    let reserved_set = [keys(PRIMARY_SECRET).public_key(), h.provider_pubkey()];
+    let reserved_event = lease_request(
+        &h.tenant,
+        &reserved_set,
+        "spawn",
+        &standby_set_content(reserved_seed, &reserved_set),
+        NOW,
+        NOW + TTL,
+    );
+    let (status, response) = post(
+        &h.app,
+        "/listings/warm/v1/standby",
+        envelope(&reserved_event),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+
+    let (status, response, doc) = exchange(
+        &h,
+        (
+            "error",
+            "not_running",
+            "`.extend` paid for a Warm Standby RESERVATION rather than a running lease \
+             (spec §6.3). A reservation is billed at `standby_price` on `.standby.extend`; \
+             a lease is always billed at the price for what it is doing.",
+        ),
+        &warm_extend_route,
+        "/listings/warm/v1/extend",
+        about(reserved_seed),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error_of(&response), "not_running");
+    golden(
+        "error.not_running.json",
+        with_validation_step(doc, "§6.3: on .extend the lease MUST be Running"),
+    );
+}
+
+/// The two roles a Standby Set gives, each as a paid exchange: the same
+/// signed spawn reaches every member, and the route it lands on decides what
+/// this provider does with it (spec §6.2 step 3, §7) — and what the primary's
+/// `status` says once its own relays stop taking its Liveness (§7.1).
+///
+/// Two fixture providers, because ONE provider can hold only one position in
+/// one set: in `spawn.primary` the fixture provider is index 0 of a set whose
+/// other member is `constants.standby_provider`, and in `spawn.standby` it is
+/// index 1 behind `constants.primary_provider` — the same primary the
+/// `directory.takeover` fixture names, for the same workload id, so the two
+/// tell one story.
+#[tokio::test]
+async fn a_spawn_and_a_status_per_standby_set_role() {
+    // ── index 0, on `.spawn`: the primary runs the workload ──────────────
+    let f = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let primary_set = [f.provider_pubkey(), keys(STANDBY_SECRET).public_key()];
+    let content = standby_set_content(PRIMARY_WORKLOAD, &primary_set);
+    let event = lease_request(&f.tenant, &primary_set, "spawn", &content, NOW, NOW + TTL);
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "spawn",
+            "primary",
+            "A paid spawn that forms a Standby Set (spec §6.2, §7), at the member it makes the \
+             PRIMARY. The content carries `standby_set` with this provider's key at index 0, and \
+             the request carries one `p` tag per member, because the tenant signs it once and \
+             sends the same bytes to every member. Index 0 must arrive on `.spawn`, and the lease \
+             that follows runs exactly as a standalone one does: `role` is `primary` and `access` \
+             is present. The tier is `warm`, the one that prices standbys, because the rest of \
+             the set is bought on its `.standby` route at `standby_price`.",
+        ),
+        &route("warm.v1.spawn"),
+        "/listings/warm/v1/spawn",
+        envelope(&event),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["role"], "primary");
+    assert!(response.get("access").is_some());
+    golden("spawn.primary.json", doc);
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "status",
+            "primary",
+            "Status of that primary (spec §6.5): `role` is `primary` rather than `standalone`, \
+             `state` is `running`, and `access` is where the workload actually runs. A tenant \
+             asks every member of the set the same question to find out where its workload is.",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.about_request(&f.tenant, "status", PRIMARY_WORKLOAD, TTL)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["role"], "primary");
+    assert_eq!(response["state"], "running");
+    golden("status.primary.json", doc);
+
+    // ── the same primary, cut off from its own Relay Set ─────────────────
+    // Five Liveness publications that no relay of the Relay Set took, which
+    // is exactly what spec §7.1 counts: the provider stops its primary's
+    // workload rather than keep it running beside a Takeover.
+    f.directory.publishes_to(&[RELAY]);
+    f.directory.refuse_liveness_on(&[RELAY]);
+    for _ in 0..SELF_STOP_CADENCES {
+        f.service
+            .publish_liveness(NOW)
+            .await
+            .expect("a Liveness every relay refused is still a report");
+    }
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "status",
+            "stopped",
+            "The same primary after five Liveness cadences that reached no relay of its own \
+             Relay Set (spec §7.1, \"Primary self-stop\"): `state` is the one word `stopped` and \
+             there is NO `access`, because the workload's container is off. Nothing about the \
+             LEASE ended — `role` is still `primary`, `expires_at` is unchanged, and `.extend` \
+             still buys another interval — and the workload starts again if the relays come back \
+             before any member of the Standby Set has claimed the workload id. The request is \
+             the same question as `status.primary`, asked with a longer TTL so that it is a \
+             different event (§6.1).",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.about_request(&f.tenant, "status", PRIMARY_WORKLOAD, TTL + 30)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["role"], "primary");
+    assert_eq!(response["state"], "stopped");
+    assert!(response.get("access").is_none(), "{}", response);
+    golden("status.stopped.json", doc);
+
+    // ── any other index, on `.standby`: a Warm Standby reserves ──────────
+    let g = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let standby_set = [keys(PRIMARY_SECRET).public_key(), g.provider_pubkey()];
+    let content = standby_set_content(STANDBY_SET_WORKLOAD, &standby_set);
+    let event = lease_request(&g.tenant, &standby_set, "spawn", &content, NOW, NOW + TTL);
+    let (status, response, doc) = exchange(
+        &g,
+        (
+            "spawn",
+            "standby",
+            "The same kind of request at the member it makes a WARM STANDBY: this provider's key \
+             is at index 1 of the `standby_set`, so the spawn must arrive on `.standby` and is \
+             paid at the listing's `standby_price`. The provider reserves capacity and sets \
+             `expires_at` the same way a running lease does, and starts NOTHING: `role` is \
+             `standby` and there is no `access` at all, because there is nowhere to reach until a \
+             Takeover (spec §7.1). Index 0 here is `constants.primary_provider`, the primary \
+             whose Liveness this standby watches and whom `directory.takeover` claims the same \
+             workload id from.",
+        ),
+        &route("warm.v1.standby"),
+        "/listings/warm/v1/standby",
+        envelope(&event),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["role"], "standby");
+    assert!(response.get("access").is_none(), "{}", response);
+    golden("spawn.standby.json", doc);
+
+    let (status, response, doc) = exchange(
+        &g,
+        (
+            "status",
+            "reserved",
+            "Status of that Warm Standby before Takeover (spec §6.5, §6.7): `state` is the one \
+             word `reserved`, `role` is `standby`, and there is NO `access` — the capacity is \
+             held and paid for, and nothing is running to reach. The reservation counts against \
+             the listing's capacity exactly as a running lease does, so Liveness `available` and \
+             `availability` both subtract it.",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&g.about_request(&g.tenant, "status", STANDBY_SET_WORKLOAD, TTL)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["state"], "reserved");
+    assert_eq!(response["role"], "standby");
+    assert!(response.get("access").is_none(), "{}", response);
+    golden("status.reserved.json", doc);
+}
+
+/// The workload of the set the fixture provider LOSES in: a third id, since
+/// a set is a workload id and this set has three members — the primary
+/// provider, the fixture provider and the standby provider.
+const LOST_WORKLOAD: u8 = 0xa2;
+
+/// The primary provider's Profile, as the relay holds it (spec §4.1): the
+/// Relay Set and the cadence the fixture provider watches it by. Never a
+/// fixture itself — it is signed by a peer, not by the provider under test.
+fn primary_profile() -> Event {
+    let content = ProfileContent {
+        ilp_address: "g.primary".to_string(),
+        connector_url: "http://connector.primary.example:3300/ilp".to_string(),
+        connector_seal_key: CONNECTOR_SEAL_KEY.to_string(),
+        relays: vec![RELAY.to_string()],
+        settlement: vec![],
+        isolation: "shared-kernel".to_string(),
+        hidden: false,
+        host: Some("198.51.100.9".to_string()),
+        liveness_cadence_s: LIVENESS_CADENCE_S,
+    };
+    EventBuilder::new(
+        Kind::Custom(K_PROFILE),
+        serde_json::to_string(&content).unwrap(),
+    )
+    .tags([Tag::parse(["L", TOON_LABEL]).unwrap()])
+    .custom_created_at(Timestamp::from(NOW - 1000))
+    .sign_with_keys(&keys(PRIMARY_SECRET))
+    .unwrap()
+}
+
+/// Drive `f` through one Takeover of `workload` (spec §7.1): the primary
+/// provider is silent on its one relay from a cadence before `NOW`, so the
+/// Takeover is announced AT `NOW` — the same event `directory.takeover`
+/// shows — and settled two cadences later. The clock ends back at `NOW`.
+async fn take_over(f: &Fixture, workload: u8) {
+    let primary = keys(PRIMARY_SECRET).public_key();
+    f.directory.seed_profile(primary_profile());
+    f.directory
+        .set_liveness_on(primary, &[RELAY], LivenessState::Absent);
+    for at in [NOW - LIVENESS_CADENCE_S, NOW, NOW + 2 * LIVENESS_CADENCE_S] {
+        f.clock.set(at);
+        f.service.watch_primaries(at).await;
+    }
+    f.clock.set(NOW);
+
+    let published = f.directory.takeover_publications();
+    assert_eq!(published.len(), 1, "one Takeover, at NOW: {published:?}");
+    assert_eq!(
+        published[0].0.id,
+        takeover_event(&workload_id(workload), &primary, &f.provider, NOW)
+            .unwrap()
+            .id,
+        "the claim is the one the Takeover fixture shows, byte for byte"
+    );
+}
+
+/// The two ways a Takeover settles (spec §7.1 steps 3–5), each as `status`
+/// then reports it: the fixture provider WON the race for the set of
+/// `spawn.standby` — it was the only claimant — and runs the workload; and
+/// it LOST a second set's race to the standby provider, whose claim was
+/// earlier, and stays reserved watching the winner.
+#[tokio::test]
+async fn a_status_per_takeover_outcome() {
+    // ── won: the standby of `spawn.standby`, after its primary went silent ──
+    let f = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let set = [keys(PRIMARY_SECRET).public_key(), f.provider_pubkey()];
+    let content = standby_set_content(STANDBY_SET_WORKLOAD, &set);
+    let event = lease_request(&f.tenant, &set, "spawn", &content, NOW, NOW + TTL);
+    let (status, response) = post(&f.app, "/listings/warm/v1/standby", envelope(&event)).await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+
+    take_over(&f, STANDBY_SET_WORKLOAD).await;
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "status",
+            "won",
+            "Status of the Warm Standby of `spawn.standby` after it WON the Takeover of its \
+             workload (spec §6.5, §7.1 steps 3–4). The primary provider went silent on its \
+             Relay Set; this provider announced `directory.takeover` at `now`, waited the \
+             settle window of two cadences, found its own claim the earliest from any \
+             member of the `standby_set`, and started the workload from the image exactly \
+             as a spawn would, with no state carried over (ADR 0010). `state` is now \
+             `running` and `access` is where the workload runs; `role` is still `standby`, \
+             because a role is a position in the set and never changes; and `takeover.winner` \
+             names this provider. `expires_at` is the reservation's own: winning buys no \
+             time, so a full-price `.extend` is due before it or the sweep ends the lease. \
+             `.standby.extend` is refused `not_standby` from here on.",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.about_request(&f.tenant, "status", STANDBY_SET_WORKLOAD, TTL)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["state"], "running");
+    assert_eq!(response["role"], "standby");
+    assert!(response.get("access").is_some(), "{}", response);
+    assert_eq!(response["takeover"]["winner"], f.provider_pubkey().to_hex());
+    golden("status.won.json", doc);
+
+    // ── lost: a set of three, where the standby provider claimed first ──
+    let g = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let winner = keys(STANDBY_SECRET);
+    let set = [
+        keys(PRIMARY_SECRET).public_key(),
+        g.provider_pubkey(),
+        winner.public_key(),
+    ];
+    let content = standby_set_content(LOST_WORKLOAD, &set);
+    let event = lease_request(&g.tenant, &set, "spawn", &content, NOW, NOW + TTL);
+    let (status, response) = post(&g.app, "/listings/warm/v1/standby", envelope(&event)).await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    // The relay already holds the standby provider's claim, one second
+    // earlier than this provider's will be.
+    g.directory.seed_takeover(
+        takeover_event(
+            &workload_id(LOST_WORKLOAD),
+            &keys(PRIMARY_SECRET).public_key(),
+            &winner,
+            NOW - 1,
+        )
+        .unwrap(),
+    );
+
+    take_over(&g, LOST_WORKLOAD).await;
+
+    let (status, response, doc) = exchange(
+        &g,
+        (
+            "status",
+            "lost",
+            "Status of a Warm Standby that LOST a Takeover (spec §6.5, §7.1 steps 3 and 5). \
+             This provider is index 1 of a set of three; the standby provider at index 2 \
+             announced one second earlier, so its claim won. The lease stays `reserved` with \
+             no `access` — nothing runs here, and `.standby.extend` still pays it while \
+             `.extend` is still `not_running` — and `takeover.winner` names the member the \
+             workload went to, which is the whole of what a tenant asking THIS member needs \
+             to know. From the next watchdog step on, this provider watches the winner's \
+             Liveness on the winner's own Relay Set, so the set survives a second failure.",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&g.about_request(&g.tenant, "status", LOST_WORKLOAD, TTL)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["state"], "reserved");
+    assert_eq!(response["role"], "standby");
+    assert!(response.get("access").is_none(), "{}", response);
+    assert_eq!(response["takeover"]["winner"], winner.public_key().to_hex());
+    golden("status.lost.json", doc);
 }
 
 // ── Milestone 2: what a publisher signs, and the three forms of `image` ──────
@@ -1638,7 +2174,7 @@ async fn one_spawn_per_image_form() {
     );
     let event = lease_request(
         &f.tenant,
-        f.provider_pubkey(),
+        &[f.provider_pubkey()],
         "spawn",
         &content,
         NOW,
@@ -1677,7 +2213,7 @@ async fn one_spawn_per_image_form() {
     );
     let event = lease_request(
         &f.tenant,
-        f.provider_pubkey(),
+        &[f.provider_pubkey()],
         "spawn",
         &content,
         NOW,
@@ -1717,7 +2253,7 @@ async fn one_spawn_per_image_form() {
     let content = spawn_content_with(0xd3, ImageRef::by_digest(image_digest()), None);
     let event = lease_request(
         &bare.tenant,
-        bare.provider_pubkey(),
+        &[bare.provider_pubkey()],
         "spawn",
         &content,
         NOW,

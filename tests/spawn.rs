@@ -151,7 +151,7 @@ async fn a_request_with_no_expiration_is_invalid() {
 async fn a_request_addressed_to_another_provider_is_refused() {
     let h = harness().await;
     let spec = RequestSpec {
-        provider: Keys::generate().public_key(),
+        providers: vec![Keys::generate().public_key()],
         ..RequestSpec::spawn(&h, &spawn_content(1))
     };
     let (status, body) = spawn(&h, spec.sign()).await;
@@ -271,18 +271,6 @@ async fn asking_for_docker_in_the_workload_is_refused_when_the_listing_does_not_
         Some("unix:///var/run/docker.sock"),
         "the variable is set, and points at a socket nothing mounted"
     );
-}
-
-#[tokio::test]
-async fn a_standby_set_is_refused_this_milestone() {
-    let h = harness().await;
-    let content = SpawnContent {
-        standby_set: Some(vec![h.provider.to_hex(), "bb".repeat(32)]),
-        ..spawn_content(1)
-    };
-    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
-    assert_eq!(error_of(&body), "invalid_request");
-    assert!(body["message"].as_str().unwrap().contains("standby_set"));
 }
 
 /// The Image Registry entry address of a plausible publisher: spec §6.2's
@@ -694,9 +682,13 @@ async fn the_first_failing_step_is_the_one_reported() {
     .await;
     assert_eq!(error_of(&body), "invalid_request");
 
-    // 2 before 3/4/6: unsold version, with a standby set, a taken id, full.
+    // 2 before 3/4/6: unsold version, with a standby set this provider holds
+    // the wrong position in for the route, a taken id, full.
     let content = SpawnContent {
-        standby_set: Some(vec![h.provider.to_hex()]),
+        standby_set: Some(vec![
+            Keys::generate().public_key().to_hex(),
+            h.provider.to_hex(),
+        ]),
         ..spawn_content(1)
     };
     let event = RequestSpec::spawn(&h, &content).sign();

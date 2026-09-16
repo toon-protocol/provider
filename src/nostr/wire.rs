@@ -244,15 +244,22 @@ pub enum LeaseEnd {
     Eviction,
 }
 
-/// `Provisioning → Running → Ended(…)` for a standalone or primary lease
-/// (spec §6.7). A standby's `Reserved` state is a later milestone.
+/// What a lease is doing (spec §6.7):
+///
+/// ```text
+/// standalone:           Provisioning → Running → Ended(…)
+/// primary:              Provisioning → Running ⇄ Stopped → Ended(…)
+/// standby:              Reserved → (takeover) → Running → Ended(…)
+///                       Reserved → Ended(…)
+/// ```
 ///
 /// On the wire and on disk this is serde's externally tagged form — the
 /// encoding spec §6.7 fixes — which is what `status` and `terminate` answer
 /// and what the lease table holds:
 ///
 /// ```json
-/// "provisioning" | "running" | { "ended": "expiry" | "termination" | "eviction" }
+/// "provisioning" | "reserved" | "running" | "stopped"
+///   | { "ended": "expiry" | "termination" | "eviction" }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -261,15 +268,70 @@ pub enum LeaseState {
     /// id and counts against capacity already, so a racing spawn cannot take
     /// either.
     Provisioning,
+    /// A Warm Standby before Takeover: the capacity is held and paid for,
+    /// and NOTHING RUNS. It counts against capacity exactly as a running
+    /// lease does — that is what the tenant bought — and `status` answers it
+    /// with no `access`.
+    Reserved,
     Running,
+    /// A PRIMARY that stopped its own workload because it could not publish
+    /// Liveness to a strict majority of its own Relay Set for five cadences
+    /// (spec §7.1). A partitioned primary must not keep running beside the
+    /// Takeover its standbys are about to announce.
+    ///
+    /// Nothing about the LEASE ended: it is paid to its `expires_at`, it
+    /// still holds its capacity slot, its workload id and its host ports,
+    /// `.extend` still buys it another interval, and the sweep still ends it
+    /// when nobody does. Only the workload is off — the container is stopped
+    /// rather than deleted, so regaining a majority with no Takeover in
+    /// sight starts the same one again.
+    Stopped,
     Ended(LeaseEnd),
 }
 
 impl LeaseState {
     /// Whether the lease still holds its workload id and its capacity slot.
+    /// A reservation does: a standby is holding the capacity it was paid
+    /// for, and nobody else may be sold it.
     pub fn is_live(self) -> bool {
         !matches!(self, LeaseState::Ended(_))
     }
+
+    /// Whether a workload exists for this lease on the provider's backend:
+    /// what an ending has to destroy. A `Reserved` standby has none until
+    /// Takeover; an `Ended` lease's has been destroyed already.
+    /// `Provisioning` counts, because the container may exist by the time
+    /// the question is asked, and so does `Stopped`: a self-stopped primary
+    /// stopped its container, it did not delete it, and a lease that ended
+    /// without deleting it would leave it on the host forever.
+    pub fn has_workload(self) -> bool {
+        matches!(
+            self,
+            LeaseState::Provisioning | LeaseState::Running | LeaseState::Stopped
+        )
+    }
+
+    /// Whether the tenant can reach the workload right now: what `status`
+    /// answers `access` for, since a host and port that reach nothing would
+    /// be a lie. Everything `has_workload` covers except `Stopped`, where
+    /// the container exists and nothing in it is listening.
+    pub fn is_reachable(self) -> bool {
+        matches!(self, LeaseState::Provisioning | LeaseState::Running)
+    }
+}
+
+/// What `status` says about a Takeover once one has settled on the lease's
+/// workload (spec §6.5, §7.1 steps 3–5): who won.
+///
+/// One field, because one is what a tenant asking any member of the set
+/// needs: the winner is the member that runs the workload now, so a
+/// reservation that lost can still say WHERE the workload went. A standby
+/// that won names itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TakeoverStatus {
+    /// The member of the `standby_set` that won: 64 lowercase hex characters.
+    pub winner: String,
 }
 
 /// The answer to a successful status (spec §6.5).
@@ -289,6 +351,12 @@ pub struct StatusResponse {
     /// (spec §8.3, ADR 0004).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// Present once a Takeover on this workload has settled here (spec
+    /// §7.1): a standby that won answers it beside `running`, one that lost
+    /// beside `reserved`. Absent until then, and always for a lease that was
+    /// never in a Standby Set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takeover: Option<TakeoverStatus>,
 }
 
 /// The answer to a successful termination (spec §6.6). The state is always
@@ -312,6 +380,25 @@ pub struct AvailabilityRequest {
     pub listing: String,
     pub version: u32,
     pub image: ImageRef,
+    /// Which role the question is about (spec §6.4). Absent asks the
+    /// ordinary question: would a spawn run here?
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<AvailabilityRole>,
+}
+
+/// The role an `availability` question is about (spec §6.4): a primary —
+/// which is what an ordinary spawn buys — or a Warm Standby.
+///
+/// Deliberately NOT `Role`: `standalone` is a lease role, not a question.
+/// Every spawn with no Standby Set is standalone already, so asking about
+/// it is asking the default, and §6.4 names only these two values. An
+/// unknown value is `invalid_request` like any other shape this provider
+/// does not know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AvailabilityRole {
+    Primary,
+    Standby,
 }
 
 /// The answer to `availability`. Always HTTP 200: the answer IS the payload,
@@ -419,6 +506,11 @@ pub enum ErrorCode {
     InvalidRequest,
     Expired,
     NotStandby,
+    /// `.extend` on a Warm Standby reservation (spec §6.3): the mirror of
+    /// `NotStandby`, which `.standby.extend` answers a running lease with.
+    /// A lease is always billed at the price for what it is doing, and a
+    /// reservation is not running — it is paid on `.standby.extend` instead.
+    NotRunning,
     BadSignature,
     StaleRequest,
 }

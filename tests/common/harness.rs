@@ -70,6 +70,7 @@ pub fn listing(name: &str, version: u32, capacity: u32) -> Listing {
         arch: "amd64".to_string(),
         lease_interval_s: INTERVAL,
         price: 1000,
+        standby_price: None,
         capabilities: vec![],
         capacity,
     }
@@ -120,21 +121,55 @@ pub async fn restart(
     registry: MockServer,
     image_policy: ImagePolicyConfig,
 ) -> Harness {
-    let config = ProviderConfig {
+    let config = config_for(
+        listings,
+        &provider_key,
+        &state_path,
+        &registry,
+        image_policy,
+    );
+    harness_from(config, backend, clock, directory, registry)
+}
+
+/// The config every harness runs on: `listings` over a fake-sized id range,
+/// images resolved against `registry`. A test that needs more of the config
+/// — a Relay Set of its own, say — takes this and changes it before
+/// `harness_from`.
+pub fn config_for(
+    listings: Vec<Listing>,
+    provider_key: &str,
+    state_path: &str,
+    registry: &MockServer,
+    image_policy: ImagePolicyConfig,
+) -> ProviderConfig {
+    ProviderConfig {
         public_ip: PUBLIC_IP.to_string(),
-        nostr_private_key: provider_key.clone(),
+        nostr_private_key: provider_key.to_string(),
         listings,
         workload_id_range_start: 1000,
         workload_id_range_end: 1003,
         ssh_port_start: Some(40000),
         workload_port_start: 41000,
-        lease_state_path: state_path.clone(),
+        lease_state_path: state_path.to_string(),
         image_policy: ImagePolicyConfig {
             registry_url_override: Some(registry.uri()),
             ..image_policy
         },
         ..ProviderConfig::default()
-    };
+    }
+}
+
+/// The provider process over exactly `config`, with the fakes a test reads
+/// back from.
+pub fn harness_from(
+    config: ProviderConfig,
+    backend: Arc<FakeBackend>,
+    clock: Arc<FakeClock>,
+    directory: Arc<FakeDirectory>,
+    registry: MockServer,
+) -> Harness {
+    let provider_key = config.nostr_private_key.clone();
+    let state_path = config.lease_state_path.clone();
     let service = ProviderService::with_backend_clock_and_directory(
         config,
         backend.clone(),
@@ -185,7 +220,11 @@ pub fn spawn_content(seed: u8) -> SpawnContent {
 /// A Lease Request as a tenant's tooling would sign it.
 pub struct RequestSpec {
     pub tenant: Keys,
-    pub provider: PublicKey,
+    /// Every provider the request is addressed to: one `p` tag each, in this
+    /// order. Ordinarily one. A spawn that forms a Standby Set names every
+    /// member, because ONE signed request is what the tenant sends to all of
+    /// them (spec §6.1, §7) — `addressed_to`.
+    pub providers: Vec<PublicKey>,
     pub op: &'static str,
     pub content: Value,
     pub created_at: u64,
@@ -199,13 +238,21 @@ impl RequestSpec {
     pub fn op(h: &Harness, op: &'static str, content: Value) -> Self {
         Self {
             tenant: Keys::generate(),
-            provider: h.provider,
+            providers: vec![h.provider],
             op,
             content,
             created_at: h.clock.now(),
             expiration: Some(h.clock.now() + 60),
             kind: K_LEASE_REQUEST,
         }
+    }
+
+    /// Address this request to every provider in `providers` rather than to
+    /// the one harness it was built from: the one signed spawn a tenant
+    /// sends to a whole Standby Set.
+    pub fn addressed_to(mut self, providers: &[PublicKey]) -> Self {
+        self.providers = providers.to_vec();
+        self
     }
 
     pub fn spawn(h: &Harness, content: &SpawnContent) -> Self {
@@ -218,10 +265,13 @@ impl RequestSpec {
     }
 
     pub fn sign(&self) -> Value {
-        let mut tags = vec![
-            Tag::public_key(self.provider),
-            Tag::custom(TagKind::custom("op"), [self.op]),
-        ];
+        let mut tags: Vec<Tag> = self
+            .providers
+            .iter()
+            .copied()
+            .map(Tag::public_key)
+            .collect();
+        tags.push(Tag::custom(TagKind::custom("op"), [self.op]));
         if let Some(t) = self.expiration {
             tags.push(Tag::expiration(Timestamp::from(t)));
         }

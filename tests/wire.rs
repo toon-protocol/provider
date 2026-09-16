@@ -5,13 +5,16 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 use toon_provider::nostr::directory_events::{
-    EvictionContent, ListingContent, LivenessContent, ProfileContent, Settlement,
+    takeover_event, EvictionContent, ListingContent, LivenessContent, ProfileContent, Settlement,
+    TakeoverContent,
 };
 use toon_provider::nostr::image_events::{
     blob_record_event, image_entry_event, template_event, BlobRecord, BlobRecordContent,
     BlobSource, ImageEntry, ImageEntryContent, SpawnImage, Template, TemplateContent,
 };
-use toon_provider::nostr::kinds::{K_BLOB, K_IMAGE, K_LEASE_REQUEST, K_TEMPLATE, TOON_LABEL};
+use toon_provider::nostr::kinds::{
+    K_BLOB, K_IMAGE, K_LEASE_REQUEST, K_TAKEOVER, K_TEMPLATE, TOON_LABEL,
+};
 use toon_provider::nostr::wire::*;
 
 fn spawn_content() -> SpawnContent {
@@ -262,6 +265,7 @@ fn every_error_code_serialises_as_the_spec_writes_it() {
         (ErrorCode::InvalidRequest, "invalid_request"),
         (ErrorCode::Expired, "expired"),
         (ErrorCode::NotStandby, "not_standby"),
+        (ErrorCode::NotRunning, "not_running"),
         (ErrorCode::BadSignature, "bad_signature"),
         (ErrorCode::StaleRequest, "stale_request"),
     ];
@@ -444,9 +448,15 @@ fn the_status_and_terminate_answers_round_trip() {
             }],
         }),
         template: None,
+        takeover: None,
     };
     let value = serde_json::to_value(&running).unwrap();
     assert_eq!(value["state"], json!("running"));
+    assert_eq!(
+        value.get("takeover"),
+        None,
+        "a lease no Takeover settled on says nothing about one"
+    );
     assert_eq!(
         value.get("template"),
         None,
@@ -489,6 +499,7 @@ fn availability_request_round_trips_the_tickets_shape() {
             "docker.io/library/alpine".to_string(),
             format!("sha256:{}", "cd".repeat(32)),
         ),
+        role: None,
     };
     let value = serde_json::to_value(&request).unwrap();
     assert_eq!(value["listing"], "basic");
@@ -513,6 +524,7 @@ fn an_unknown_availability_field_is_refused_at_parse() {
             "docker.io/library/alpine".to_string(),
             format!("sha256:{}", "cd".repeat(32)),
         ),
+        role: None,
     })
     .unwrap();
     value["image_digest"] = json!(format!("sha256:{}", "cd".repeat(32)));
@@ -936,6 +948,261 @@ fn a_parser_refuses_an_event_of_the_wrong_kind_or_with_a_mismatched_tag() {
             .sign_with_keys(&keys)
             .unwrap();
     assert!(BlobRecord::from_event(&lying).is_err(), "x tag must match");
+}
+
+// ── Milestone 3: Warm Standby, Takeover and the reserved state ──────────────
+//
+// Byte-identical against literals written from spec §4.2, §6.4, §6.5 and
+// §7.1, the same way the Milestone 2 contents above are: the JSON here is the
+// independent source of truth, and a field renamed, reordered or dropped
+// fails here rather than only in the fixtures.
+
+/// The provider whose Liveness a standby watches: index 0 of the
+/// `standby_set`. A test-only key, like everything else in this file.
+const PRIMARY_SECRET: &str = "5555555555555555555555555555555555555555555555555555555555555555";
+
+/// A Takeover's content (spec §7.1 step 2): the workload the set serves and
+/// the primary that went silent, nothing else.
+const TAKEOVER_CONTENT: &str = concat!(
+    r#"{"workload_id":"abababababababababababababababababababababababababababababababab","#,
+    r#""primary":"9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b"}"#,
+);
+
+/// A Listing that sells Warm Standbys (spec §4.2): `standby_price` sits
+/// between `price` and `capabilities`, and is a price per interval like
+/// `price` itself.
+const LISTING_WITH_STANDBY_PRICE: &str = concat!(
+    r#"{"version":1,"resources":{"cpu_millicores":500,"memory_mb":256,"storage_gb":4},"#,
+    r#""arch":"amd64","lease_interval_s":3600,"price":1000,"standby_price":400,"#,
+    r#""capabilities":[]}"#,
+);
+
+/// The `status` answer for a Warm Standby before Takeover (spec §6.5,
+/// §6.7): `reserved` is one word like `running`, the role says which member
+/// of the Standby Set this is, and there is no `access` because nothing is
+/// running here yet.
+const STATUS_RESERVED: &str = concat!(
+    r#"{"workload_id":"abababababababababababababababababababababababababababababababab","#,
+    r#""role":"standby","state":"reserved","expires_at":1700003600}"#,
+);
+
+/// The `status` answer for a Warm Standby that WON a Takeover (spec §6.5,
+/// §7.1 step 4): `running` with `access`, the role still `standby`, and
+/// `takeover.winner` naming this provider — the same member that answers.
+/// `takeover` is last, after `access`, and absent until a Takeover settles.
+const STATUS_TAKEN_OVER: &str = concat!(
+    r#"{"workload_id":"abababababababababababababababababababababababababababababababab","#,
+    r#""role":"standby","state":"running","expires_at":1700003600,"#,
+    r#""access":{"host":"203.0.113.7","ssh_port":40000,"ports":[]},"#,
+    r#""takeover":{"winner":"6666666666666666666666666666666666666666666666666666666666666666"}}"#,
+);
+
+/// The `status` answer for a primary that stopped its own workload (spec
+/// §6.5, §6.7, §7.1): `stopped` is one word like `running`, the role is
+/// still `primary`, `expires_at` is untouched because the lease is still
+/// paid, and there is no `access` because the container is off.
+const STATUS_STOPPED: &str = concat!(
+    r#"{"workload_id":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1","#,
+    r#""role":"primary","state":"stopped","expires_at":1700003600}"#,
+);
+
+/// An availability request that asks about a standby rather than a primary
+/// (spec §6.4). `role` is last, and absent when the question is about an
+/// ordinary spawn.
+const AVAILABILITY_WITH_ROLE: &str = concat!(
+    r#"{"listing":"warm","version":1,"#,
+    r#""image":{"reference":"docker.io/library/alpine","#,
+    r#""digest":"sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"},"#,
+    r#""role":"standby"}"#,
+);
+
+fn primary() -> nostr_sdk::Keys {
+    nostr_sdk::Keys::parse(PRIMARY_SECRET).unwrap()
+}
+
+#[test]
+fn a_takeover_event_round_trips_byte_identically_through_its_builder() {
+    let standby =
+        nostr_sdk::Keys::parse("6666666666666666666666666666666666666666666666666666666666666666")
+            .unwrap();
+    let workload_id = "ab".repeat(32);
+    let event = takeover_event(
+        &workload_id,
+        &primary().public_key(),
+        &standby,
+        1_700_000_000,
+    )
+    .expect("a Takeover signs");
+
+    assert_eq!(event.kind.as_u16(), K_TAKEOVER);
+    assert_eq!(
+        d_tag(&event).as_deref(),
+        Some(workload_id.as_str()),
+        "spec §7.1: addressable on d = the workload id"
+    );
+    assert!(carries_the_toon_label(&event));
+    assert_eq!(
+        event.pubkey,
+        standby.public_key(),
+        "the STANDBY announces a Takeover, never the primary"
+    );
+
+    // The content is exactly what §7.1 writes, and parses back to itself.
+    assert_eq!(event.content, TAKEOVER_CONTENT);
+    let content: TakeoverContent = serde_json::from_str(&event.content).unwrap();
+    assert_eq!(content.workload_id, workload_id);
+    assert_eq!(content.primary, primary().public_key().to_hex());
+    assert_eq!(serde_json::to_string(&content).unwrap(), TAKEOVER_CONTENT);
+}
+
+#[test]
+fn an_unknown_field_in_a_takeover_is_refused() {
+    let mut value: serde_json::Value = serde_json::from_str(TAKEOVER_CONTENT).unwrap();
+    value["standby_index"] = json!(1);
+    assert!(serde_json::from_value::<TakeoverContent>(value).is_err());
+}
+
+#[test]
+fn a_listing_that_prices_standbys_round_trips_byte_identically() {
+    let content: ListingContent = serde_json::from_str(LISTING_WITH_STANDBY_PRICE).unwrap();
+    assert_eq!(content.standby_price, Some(400));
+    assert_eq!(
+        serde_json::to_string(&content).unwrap(),
+        LISTING_WITH_STANDBY_PRICE
+    );
+
+    // And a listing that sells none writes no field at all: zero would read
+    // as "standbys are free".
+    let without = ListingContent {
+        standby_price: None,
+        ..content
+    };
+    let rendered = serde_json::to_string(&without).unwrap();
+    assert!(!rendered.contains("standby_price"), "{}", rendered);
+}
+
+#[test]
+fn a_reserved_status_round_trips_byte_identically() {
+    let response: StatusResponse = serde_json::from_str(STATUS_RESERVED).unwrap();
+    assert_eq!(response.state, LeaseState::Reserved);
+    assert_eq!(response.role, Role::Standby);
+    assert!(
+        response.access.is_none(),
+        "a reservation runs nothing to reach"
+    );
+    assert_eq!(serde_json::to_string(&response).unwrap(), STATUS_RESERVED);
+}
+
+#[test]
+fn a_taken_over_status_round_trips_byte_identically() {
+    let response: StatusResponse = serde_json::from_str(STATUS_TAKEN_OVER).unwrap();
+    assert_eq!(response.state, LeaseState::Running);
+    assert_eq!(response.role, Role::Standby, "the role never changes");
+    assert!(response.access.is_some(), "the workload runs here now");
+    assert_eq!(
+        response.takeover.as_ref().map(|t| t.winner.as_str()),
+        Some("66".repeat(32).as_str())
+    );
+    assert_eq!(serde_json::to_string(&response).unwrap(), STATUS_TAKEN_OVER);
+
+    // A standby that LOST answers the same field beside `reserved`: still
+    // no `access`, and `winner` is the OTHER member — where the workload
+    // went.
+    let lost = StatusResponse {
+        state: LeaseState::Reserved,
+        access: None,
+        ..response
+    };
+    let value = serde_json::to_value(&lost).unwrap();
+    assert_eq!(value["state"], json!("reserved"));
+    assert!(value.get("access").is_none());
+    assert_eq!(value["takeover"]["winner"], json!("66".repeat(32)));
+}
+
+#[test]
+fn a_reservation_holds_its_workload_id_and_its_capacity_slot() {
+    // `Reserved` is a LIVE state (spec §6.7): a standby is holding the
+    // capacity it was paid for, so it counts exactly as a running lease does.
+    assert!(LeaseState::Reserved.is_live());
+    assert_eq!(
+        serde_json::to_value(LeaseState::Reserved).unwrap(),
+        json!("reserved")
+    );
+    assert_eq!(
+        serde_json::from_value::<LeaseState>(json!("reserved")).unwrap(),
+        LeaseState::Reserved
+    );
+}
+
+#[test]
+fn a_stopped_status_round_trips_byte_identically() {
+    let response: StatusResponse = serde_json::from_str(STATUS_STOPPED).unwrap();
+    assert_eq!(response.state, LeaseState::Stopped);
+    assert_eq!(response.role, Role::Primary);
+    assert!(
+        response.access.is_none(),
+        "a stopped workload has nothing listening"
+    );
+    assert_eq!(serde_json::to_string(&response).unwrap(), STATUS_STOPPED);
+}
+
+#[test]
+fn a_stopped_primary_still_holds_its_lease_and_its_workload() {
+    // `Stopped` is a LIVE state (spec §6.7, §7.1): the lease is paid to its
+    // `expires_at` and the container still exists, so the slot is still held
+    // and the ending still has something to destroy — only the tenant has
+    // nowhere to reach.
+    assert!(LeaseState::Stopped.is_live());
+    assert!(LeaseState::Stopped.has_workload());
+    assert!(!LeaseState::Stopped.is_reachable());
+    assert_eq!(
+        serde_json::to_value(LeaseState::Stopped).unwrap(),
+        json!("stopped")
+    );
+    assert_eq!(
+        serde_json::from_value::<LeaseState>(json!("stopped")).unwrap(),
+        LeaseState::Stopped
+    );
+}
+
+#[test]
+fn an_availability_request_round_trips_its_role_byte_identically() {
+    let request: AvailabilityRequest = serde_json::from_str(AVAILABILITY_WITH_ROLE).unwrap();
+    assert_eq!(request.role, Some(AvailabilityRole::Standby));
+    assert_eq!(
+        serde_json::to_string(&request).unwrap(),
+        AVAILABILITY_WITH_ROLE
+    );
+
+    // Absent is the ordinary question, and writes no field.
+    let without = AvailabilityRequest {
+        role: None,
+        ..request
+    };
+    assert!(!serde_json::to_string(&without).unwrap().contains("role"));
+}
+
+#[test]
+fn an_availability_role_outside_the_spec_vocabulary_is_refused() {
+    // §6.4 names `primary` and `standby` and nothing else. `standalone` is a
+    // lease ROLE (§6.2) but not a question this route can be asked: every
+    // spawn with no Standby Set is standalone already.
+    let mut value: serde_json::Value = serde_json::from_str(AVAILABILITY_WITH_ROLE).unwrap();
+    for refused in ["standalone", "Standby", "", "primary "] {
+        value["role"] = json!(refused);
+        assert!(
+            serde_json::from_value::<AvailabilityRequest>(value.clone()).is_err(),
+            "role {:?} is not §6.4 vocabulary",
+            refused
+        );
+    }
+    value["role"] = json!("primary");
+    assert_eq!(
+        serde_json::from_value::<AvailabilityRequest>(value)
+            .unwrap()
+            .role,
+        Some(AvailabilityRole::Primary)
+    );
 }
 
 fn d_tag(event: &nostr_sdk::Event) -> Option<String> {

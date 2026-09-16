@@ -1,0 +1,18 @@
+{
+  "fixture": {
+    "case": "ok",
+    "description": "A paid extension of a reservation (spec §6.3): unsigned, `{ workload_id }` only, exactly like `.extend`. `expires_at` grows by one lease interval at the listing's `standby_price`, and the fake backend is never asked for anything — a reservation runs nothing to extend.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "standby_extend"
+  },
+  "http_path": "/listings/warm/v1/standby/extend",
+  "request_body": {
+    "workload_id": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+  },
+  "response_body": {
+    "expires_at": 1700007200,
+    "workload_id": "b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+  },
+  "response_status": 200,
+  "route": "g.fixture.warm.v1.standby.extend"
+}

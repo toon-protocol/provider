@@ -1,0 +1,41 @@
+{
+  "fixture": {
+    "case": "reserved",
+    "description": "Status of that Warm Standby before Takeover (spec §6.5, §6.7): `state` is the one word `reserved`, `role` is `standby`, and there is NO `access` — the capacity is held and paid for, and nothing is running to reach. The reservation counts against the listing's capacity exactly as a running lease does, so Liveness `available` and `availability` both subtract it.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "status"
+  },
+  "http_path": "/status",
+  "request_body": {
+    "request": {
+      "content": "{\"workload_id\":\"a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0\"}",
+      "created_at": 1700000000,
+      "id": "55ecd731934f8e487304fd0ce96861a7957b10345c4072baf462f03addedf01b",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "6a0085eb76d8648899d8fe00b5289fb1247cdf8d539a54c7f97b67c643fcc0e3040c9d815bbe8bd5596cfc6ea8f11ed353ca9f9485c407b9a6185da294b1d9a2",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "status"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "expires_at": 1700003600,
+    "role": "standby",
+    "state": "reserved",
+    "workload_id": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+  },
+  "response_status": 200,
+  "route": "g.fixture.status"
+}

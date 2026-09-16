@@ -10,7 +10,6 @@ pub mod clock;
 pub mod compute;
 pub mod directory;
 pub mod docker;
-pub mod durable_workload;
 pub mod nostr;
 pub mod provider;
 pub mod provider_http;
@@ -18,11 +17,13 @@ pub mod reputation;
 
 pub use clock::{system_clock, Clock, SystemClock};
 pub use compute::{ComputeBackend, ContainerConfig, ContainerStatus, NodeStatus, PortMapping};
-pub use directory::{ConnectorDirectory, Directory, NullDirectory, PublishReport};
+pub use directory::{
+    ConnectorDirectory, Directory, LivenessState, NullDirectory, PublishReport, RelayLiveness,
+};
 pub use docker::DockerBackend;
 pub use provider::persisted_leases;
 pub use provider::{
     load_config, render_routes, BackendKind, LeaseEnd, LeaseRecord, LeaseState, Listing,
-    ProviderConfig, ProviderService, SWEEP_INTERVAL_SECS,
+    ProviderConfig, ProviderService, SWEEP_INTERVAL_SECS, WATCHDOG_INTERVAL_SECS,
 };
 pub use provider_http::{operator_router, router, AppState};

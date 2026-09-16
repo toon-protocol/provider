@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "listing",
-    "description": "The connector routes this provider's Profile and Listings generate: one paid `.spawn` and `.extend` per listing version, then the three free provider-wide routes. `prefix` is what a tenant pays; `handler_url` is the provider's own HTTP path behind its connector and never leaves the operator's config.",
+    "description": "The connector routes this provider's Profile and Listings generate: one paid `.spawn` and `.extend` per listing version, a `.standby` and a `.standby.extend` beside them at the listing's `standby_price` when it sells Warm Standbys (here `warm` only), then the three free provider-wide routes. A listing that prices no standby gets neither standby row: a connector must never terminate a route the provider did not price. `prefix` is what a tenant pays; `handler_url` is the provider's own HTTP path behind its connector and never leaves the operator's config.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "routes"
   },
@@ -18,12 +18,21 @@
       "name": "gpu",
       "price": 1000,
       "version": 1
+    },
+    {
+      "lease_interval_s": 3600,
+      "name": "warm",
+      "price": 1000,
+      "standby_price": 400,
+      "version": 1
     }
   ],
   "patterns": {
     "availability": "<ilp_address>.availability",
     "extend": "<ilp_address>.<listing d tag>.v<content.version>.extend",
     "spawn": "<ilp_address>.<listing d tag>.v<content.version>.spawn",
+    "standby": "<ilp_address>.<listing d tag>.v<content.version>.standby (only when content.standby_price is present)",
+    "standby.extend": "<ilp_address>.<listing d tag>.v<content.version>.standby.extend (only when content.standby_price is present)",
     "status": "<ilp_address>.status",
     "terminate": "<ilp_address>.terminate"
   },
@@ -47,6 +56,26 @@
       "handler_url": "http://127.0.0.1:8080/listings/gpu/v1/extend",
       "prefix": "g.fixture.gpu.v1.extend",
       "price": 1000
+    },
+    {
+      "handler_url": "http://127.0.0.1:8080/listings/warm/v1/spawn",
+      "prefix": "g.fixture.warm.v1.spawn",
+      "price": 1000
+    },
+    {
+      "handler_url": "http://127.0.0.1:8080/listings/warm/v1/extend",
+      "prefix": "g.fixture.warm.v1.extend",
+      "price": 1000
+    },
+    {
+      "handler_url": "http://127.0.0.1:8080/listings/warm/v1/standby",
+      "prefix": "g.fixture.warm.v1.standby",
+      "price": 400
+    },
+    {
+      "handler_url": "http://127.0.0.1:8080/listings/warm/v1/standby/extend",
+      "prefix": "g.fixture.warm.v1.standby.extend",
+      "price": 400
     },
     {
       "handler_url": "http://127.0.0.1:8080/availability",

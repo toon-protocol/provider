@@ -332,6 +332,38 @@ async fn a_replayed_status_request_is_refused() {
     assert_eq!(error_of(&body), "stale_request");
 }
 
+/// Only a spawn may name more than one provider, because one signed spawn
+/// forms a whole Standby Set (§6.1, §7). A status or a termination is about
+/// one lease on one provider, so naming a second one is a request addressed
+/// to somebody else as much as to us.
+#[tokio::test]
+async fn a_status_or_terminate_naming_a_second_provider_is_refused() {
+    let h = harness().await;
+    let lease = spawn_lease(&h, 1).await;
+    for op in ["status", "terminate"] {
+        let spec = RequestSpec {
+            tenant: Keys::parse(&lease.tenant.secret_key().to_secret_hex()).unwrap(),
+            ..RequestSpec::about(&h, op, &lease.workload_id)
+        }
+        .addressed_to(&[h.provider, Keys::generate().public_key()]);
+        let (status, body) = post(
+            &h.app,
+            &format!("/{}", op),
+            json!({ "request": spec.sign() }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+        assert_eq!(error_of(&body), "invalid_request");
+    }
+    // The lease is untouched: still running, still reachable.
+    let (_, body) = status_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    assert_eq!(body["state"], "running", "{}", body);
+    assert!(matches!(
+        h.backend.calls().as_slice(),
+        [BackendCall::Create(_), BackendCall::Start(_)]
+    ));
+}
+
 #[tokio::test]
 async fn a_status_request_signed_for_another_op_is_invalid() {
     let h = harness().await;

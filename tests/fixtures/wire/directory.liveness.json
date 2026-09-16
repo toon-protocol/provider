@@ -2,16 +2,17 @@
   "content": {
     "available": {
       "basic": 2,
-      "gpu": 1
+      "gpu": 1,
+      "warm": 1
     }
   },
   "event": {
-    "content": "{\"available\":{\"basic\":2,\"gpu\":1}}",
+    "content": "{\"available\":{\"basic\":2,\"gpu\":1,\"warm\":1}}",
     "created_at": 1700000000,
-    "id": "52b613f0d7a498b460bacbdf7889b5dccae67532d0befb86af3e51d0b0977f17",
+    "id": "4cf7e9d507819c3aab6d5cef35231ae48475e3f0eb128f6a57f27e980a90f4a1",
     "kind": 10433,
     "pubkey": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
-    "sig": "c37bc20674f086a2ecee550c1d267712679b8b78477388546e73ceba6ac8b7cbe743c9a4272ab407722cff5a947216e4def4adc9d2fbdb8b4efe3f7c4e2628f0",
+    "sig": "d59d2cea90ca2b116fe0897a495a92d57372434ca6edb4db447dd8ad2264945891c80d40a8004032538be1346ac60dcee098a41d3e8f5f1ecd9ad71c72d838b5",
     "tags": [
       [
         "L",
@@ -30,5 +31,5 @@
     "surface": "directory"
   },
   "kind_name": "K_LIVENESS",
-  "nip01_serialization": "[0,\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\",1700000000,10433,[[\"L\",\"toon.network\"],[\"expiration\",\"1700000300\"]],\"{\\\"available\\\":{\\\"basic\\\":2,\\\"gpu\\\":1}}\"]"
+  "nip01_serialization": "[0,\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\",1700000000,10433,[[\"L\",\"toon.network\"],[\"expiration\",\"1700000300\"]],\"{\\\"available\\\":{\\\"basic\\\":2,\\\"gpu\\\":1,\\\"warm\\\":1}}\"]"
 }

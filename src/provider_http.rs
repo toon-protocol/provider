@@ -8,8 +8,8 @@
 // not from who paid.
 //
 // Paths are `provider::routes`'s: the connector forwards each ILP prefix to
-// one of them. Spawn, extend, availability, status and terminate are all
-// served.
+// one of them. Spawn, extend, standby, standby.extend, availability, status
+// and terminate are all served.
 //
 // The free routes (`availability`, `status`, `terminate`) arrive with nothing
 // paid and are served exactly like the paid ones: this app never looks at what
@@ -35,11 +35,12 @@ use crate::directory::{ConnectorDirectory, Directory, NullDirectory};
 use crate::nostr::lease_request::AcceptedRequests;
 use crate::nostr::wire::{ErrorCode, ErrorResponse, EvictRequest};
 use crate::provider::routes::{
-    AVAILABILITY_PATH, EXTEND_PATTERN, SPAWN_PATTERN, STATUS_PATH, TERMINATE_PATH,
+    AVAILABILITY_PATH, EXTEND_PATTERN, SPAWN_PATTERN, STANDBY_EXTEND_PATTERN, STANDBY_PATTERN,
+    STATUS_PATH, TERMINATE_PATH,
 };
 use crate::provider::{
-    availability, evict, extend, spawn, status, terminate, BlobCache, BlobFetcher, ImagePolicy,
-    LeaseRecord, ProviderConfig,
+    availability, evict, extend, spawn, standby_extend, standby_spawn, status, terminate,
+    BlobCache, BlobFetcher, ImagePolicy, LeaseRecord, ProviderConfig,
 };
 
 /// Everything a handler may touch. Arc-cloned from `ProviderService`, so the
@@ -134,6 +135,8 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route(SPAWN_PATTERN, post(spawn_route))
         .route(EXTEND_PATTERN, post(extend_route))
+        .route(STANDBY_PATTERN, post(standby_route))
+        .route(STANDBY_EXTEND_PATTERN, post(standby_extend_route))
         .route(AVAILABILITY_PATH, post(availability_route))
         .route(STATUS_PATH, post(status_route))
         .route(TERMINATE_PATH, post(terminate_route))
@@ -241,6 +244,48 @@ async fn extend_route(
     }
 }
 
+/// `POST /listings/:listing/:version/standby`, the path the connector
+/// forwards `<addr>.<listing>.v<n>.standby` to. Registered for every
+/// listing, priced only for the ones that sell standbys
+/// (`routes::route_table`): a spawn that lands here reserves capacity for
+/// the Standby Set member it names at an index other than 0, and one paid
+/// on a listing that prices no standby is refused `wrong_listing_version`.
+async fn standby_route(
+    State(state): State<AppState>,
+    Path((listing, version)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let Some(version) = parse_version(&version) else {
+        return refuse(ErrorResponse::new(
+            ErrorCode::WrongListingVersion,
+            format!("{:?} is not a listing version (`v<n>`)", version),
+        ));
+    };
+    match standby_spawn(&state, &listing, version, &body).await {
+        Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
+        Err(e) => refuse(e),
+    }
+}
+
+/// `POST /listings/:listing/:version/standby/extend`, for
+/// `<addr>.<listing>.v<n>.standby.extend`.
+async fn standby_extend_route(
+    State(state): State<AppState>,
+    Path((listing, version)): Path<(String, String)>,
+    body: Bytes,
+) -> Response {
+    let Some(version) = parse_version(&version) else {
+        return refuse(ErrorResponse::new(
+            ErrorCode::WrongListingVersion,
+            format!("{:?} is not a listing version (`v<n>`)", version),
+        ));
+    };
+    match standby_extend(&state, &listing, version, &body).await {
+        Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
+        Err(e) => refuse(e),
+    }
+}
+
 async fn status_route(State(state): State<AppState>, body: Bytes) -> Response {
     match status(&state, &body).await {
         Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
@@ -301,7 +346,8 @@ pub fn refuse(error: ErrorResponse) -> Response {
         ErrorCode::WorkloadIdTaken
         | ErrorCode::NoCapacity
         | ErrorCode::Expired
-        | ErrorCode::NotStandby => StatusCode::CONFLICT,
+        | ErrorCode::NotStandby
+        | ErrorCode::NotRunning => StatusCode::CONFLICT,
         ErrorCode::RefusedImage | ErrorCode::NoMatchingArch => StatusCode::UNPROCESSABLE_ENTITY,
     };
     (status, Json(error)).into_response()

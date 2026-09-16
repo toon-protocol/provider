@@ -35,8 +35,8 @@ pub const MAX_PORTS_PER_WORKLOAD: u16 = 16;
 /// `<addr>.<name>.v<version>.spawn` / `.extend`.
 ///
 /// A price or resource change is a NEW VERSION with its own routes, so a lease
-/// keeps the price it started at (ADR 0009). Two entries may share a name as
-/// long as their versions differ.
+/// keeps the price it started at (ADR 0009) — the standby price included.
+/// Two entries may share a name as long as their versions differ.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Listing {
@@ -52,6 +52,16 @@ pub struct Listing {
     pub lease_interval_s: u64,
     /// µUSDC per Lease Interval.
     pub price: u64,
+    /// µUSDC per Lease Interval for a Warm Standby of this tier: held
+    /// capacity with nothing running (spec §7).
+    ///
+    /// Unset means this tier sells no standbys, which is a DIFFERENT thing
+    /// from selling them for nothing: the Listing event then carries no
+    /// `standby_price` at all and the route table prints no `.standby` rows,
+    /// so the connector never terminates a route this provider did not
+    /// price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standby_price: Option<u64>,
     /// Capabilities granted to every workload of this tier (ADR 0004).
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -348,7 +358,37 @@ impl ProviderConfig {
     pub fn latest_version(&self, name: &str) -> Option<u32> {
         self.listing_on_sale(name).map(|l| l.version)
     }
+}
 
+impl Listing {
+    /// The other half of step 2 for the `.standby` route (spec §6.2): this
+    /// listing prices Warm Standbys at all.
+    ///
+    /// A listing with no `standby_price` sells none, so it has no `.standby`
+    /// route (§4.2, §5) and its connector should never have carried one.
+    /// `wrong_listing_version` is step 2's code and the one a tenant can act
+    /// on — the route it paid is not on sale here, exactly as a retired
+    /// version's is not — while the listing itself still sells running
+    /// leases.
+    ///
+    /// Here rather than in `spawn`, because `availability` answers the same
+    /// question for free (§6.4) and the two must give the same code and the
+    /// same reason, not two copies of them that can drift (spec §9).
+    pub fn sells_standbys(&self) -> Result<(), ErrorResponse> {
+        if self.standby_price.is_some() {
+            return Ok(());
+        }
+        Err(ErrorResponse::new(
+            ErrorCode::WrongListingVersion,
+            format!(
+                "{} v{} prices no Warm Standby, so it sells none; it has no .standby route",
+                self.name, self.version
+            ),
+        ))
+    }
+}
+
+impl ProviderConfig {
     /// Step 2 of the spec's spawn validation (§6.2): the route's listing
     /// version exists AND is the one on sale.
     ///
@@ -724,6 +764,11 @@ mod tests {
             listing_version: version,
             role: Role::Standalone,
             state,
+            standby_set: None,
+            reserved_spawn: None,
+            takeover: None,
+            settled: None,
+            taken_over: false,
             created_at: 0,
             expires_at: 3600,
             ended_at: None,
@@ -747,6 +792,7 @@ mod tests {
             arch: "amd64".to_string(),
             lease_interval_s: 3600,
             price: 1000,
+            standby_price: None,
             capabilities: vec![],
             capacity: 2,
         }

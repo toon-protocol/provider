@@ -1,16 +1,24 @@
 // The provider service: it holds the lease table, restores it after a restart,
-// serves the HTTP app its TOON connector forwards to, and sweeps expired
-// leases.
+// serves the HTTP app its TOON connector forwards to, sweeps expired leases,
+// and watches the primary of every reservation it holds.
 //
 // Paygress ran five loops here — offer publication, heartbeat, a Nostr DM
-// request listener, a standby watchdog and the expiry sweep. Three are left:
-// the sweep in `cleanup`, the directory publication in `publish`, and the HTTP
-// app in `provider_http`.
+// request listener, a standby watchdog and the expiry sweep. Four are left:
+// the sweep in `cleanup`, the directory publication in `publish`, the
+// watchdog in `watchdog` — rewritten for Liveness on the primary's Relay Set
+// and ADR 0010's Takeover — and the HTTP app in `provider_http`. `self_stop`
+// is the same rule read from the other end: what a PRIMARY does when its own
+// relays stop taking its Liveness.
 //
-// The routes themselves are one module each: `spawn` starts a lease,
-// `lifecycle` extends, reports and ends one, `availability` answers whether a
-// spawn would run without starting anything, and `cleanup` is where every
-// ending — Expiry or Termination — actually destroys the workload.
+// The routes themselves are one module each: `spawn` starts a lease — or, on
+// `.standby`, reserves capacity for one without starting it — `lifecycle`
+// extends, reports and ends one, `availability` answers whether a spawn would
+// run without starting anything, and `cleanup` is where every ending — Expiry
+// or Termination — releases the slot and, when there is a workload, destroys
+// it. `standby` is the rule the two spawn routes share: which role a
+// `standby_set` and a route give this provider, and what the lease then
+// remembers of the set; `settle` is what a Warm Standby does once it has
+// announced a Takeover — settle the race, and start the workload if it won.
 // `image_policy` is the rule both `spawn` and `availability` apply, so the
 // two can never disagree; `fetcher` (over `oci` and the TOON store gateway)
 // is how every image byte they read arrives, verified.
@@ -27,8 +35,11 @@ pub mod oci_layout;
 mod persistence;
 mod publish;
 pub mod routes;
+mod self_stop;
+mod settle;
 mod spawn;
 mod standby;
+mod watchdog;
 
 pub use availability::availability;
 pub use blob_cache::BlobCache;
@@ -38,12 +49,15 @@ pub use config::{
 };
 pub use fetcher::BlobFetcher;
 pub use image_policy::{ImagePolicy, ResolvedImage};
-pub use lifecycle::{evict, extend, status, terminate};
+pub use lifecycle::{evict, extend, standby_extend, status, terminate};
 pub use persistence::persisted_leases;
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
-pub use spawn::{spawn, VOLUME_MOUNT_PATH};
-pub use standby::StandbySlot;
+pub use self_stop::{reached_a_majority, SELF_STOP_CADENCES};
+pub use settle::{pick_winner, Claim, TakeoverSettlement};
+pub use spawn::{spawn, standby_spawn, VOLUME_MOUNT_PATH};
+pub use standby::StandbySet;
+pub use watchdog::{silent_on_a_majority, TakeoverAnnouncement, WATCHDOG_INTERVAL_SECS};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,6 +75,28 @@ use persistence::{load_leases, persist_leases};
 
 pub struct ProviderService {
     state: AppState,
+    /// The watchdog's count of silence: lease id -> the first instant its
+    /// primary was read silent on a majority of its Relay Set, for the
+    /// reservations whose primary is silent right now (`watchdog`).
+    ///
+    /// In memory ON PURPOSE, unlike the announcement it leads to. The trigger
+    /// is silence CONTINUOUSLY for a cadence (spec §7.1 step 1), and a
+    /// provider that was down cannot vouch for what happened while it was:
+    /// a count carried across a restart would take over on the strength of
+    /// one old reading and one new one, with anything in between unseen.
+    /// A restart starts the count again, which costs at most one cadence.
+    silence: tokio::sync::Mutex<HashMap<u32, u64>>,
+    /// How many Liveness cadences in a row have failed to reach a strict
+    /// majority of this provider's OWN Relay Set (`self_stop`). Five stop
+    /// the workload of every primary lease it holds (spec §7.1).
+    ///
+    /// In memory for the same reason `silence` is: the rule counts
+    /// CONTINUOUS cadences, and a provider that was down cannot vouch for
+    /// the ones it did not publish. A restart starts the count again — and
+    /// asks the Relay Set outright whether it was taken over while it was
+    /// away (`stand_down_if_taken_over`), which is the question the count
+    /// would have been standing in for.
+    cadences_without_majority: std::sync::atomic::AtomicU32,
 }
 
 impl ProviderService {
@@ -85,6 +121,8 @@ impl ProviderService {
     ) -> Result<Self> {
         Ok(Self {
             state: AppState::new(config, backend, clock)?,
+            silence: Default::default(),
+            cadences_without_majority: Default::default(),
         })
     }
 
@@ -98,6 +136,8 @@ impl ProviderService {
     ) -> Result<Self> {
         Ok(Self {
             state: AppState::new(config, backend, clock)?.with_directory(directory),
+            silence: Default::default(),
+            cadences_without_majority: Default::default(),
         })
     }
 
@@ -126,7 +166,12 @@ impl ProviderService {
             // its retention runs out (`cleanup`), and asking the backend
             // about a container that was deleted on purpose would drop the
             // very thing `status` still has to report.
-            if !lease.state.is_live() {
+            // A reservation is the same case for the opposite reason: a Warm
+            // Standby holds capacity with NOTHING RUNNING (spec §6.7), so
+            // the backend has never heard of it and would report it absent —
+            // dropping every reservation the tenant is paying for. It must
+            // survive a restart exactly as a running lease does.
+            if !lease.state.is_live() || !lease.state.has_workload() {
                 restored.insert(id, lease);
                 continue;
             }
@@ -186,6 +231,10 @@ impl ProviderService {
         );
 
         self.restore_leases().await;
+        // Before anything is served or published: a primary whose Standby
+        // Set moved on while this process was down must not carry on serving
+        // a workload another provider is now running (spec §7.1).
+        self.stand_down_if_taken_over().await;
 
         let bind_addr = self.state.config.http_bind_addr.clone();
         let operator_bind_addr = self.state.config.operator_bind_addr.clone();
@@ -207,6 +256,12 @@ impl ProviderService {
             }
             result = self.expiry_sweep_loop() => {
                 tracing::error!("expiry sweep exited: {:?}", result);
+                result
+            }
+            // Beside the sweep, in the same shape: a reservation that nobody
+            // watches for is capacity held for nothing (spec §7.1).
+            result = self.watchdog_loop() => {
+                tracing::error!("standby watchdog exited: {:?}", result);
                 result
             }
             // After the restore above, so the first Liveness counts the

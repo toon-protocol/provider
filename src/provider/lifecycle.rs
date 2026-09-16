@@ -22,7 +22,7 @@ use crate::nostr::directory_events::eviction_event;
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
     ErrorCode, ErrorResponse, EvictResponse, EvictionReason, ExtendRequest, ExtendResponse,
-    StatusResponse, TerminateResponse, WorkloadContent,
+    StatusResponse, TakeoverStatus, TerminateResponse, WorkloadContent,
 };
 use crate::provider_http::AppState;
 
@@ -34,6 +34,26 @@ fn unknown_workload() -> ErrorResponse {
     ErrorResponse::new(
         ErrorCode::UnknownWorkload,
         "this provider holds no lease with that workload_id",
+    )
+}
+
+/// `.standby.extend` met a running lease of any role: it is billed at its
+/// own price on `.extend`, not this one's (spec §6.3).
+fn not_standby() -> ErrorResponse {
+    ErrorResponse::new(
+        ErrorCode::NotStandby,
+        "this lease is not a Warm Standby; extend it on .extend",
+    )
+}
+
+/// `.extend` met a Warm Standby reservation: the mirror of `not_standby`
+/// above. A lease is always billed at the price for what it is doing (spec
+/// §6.3), and a reservation's price is `standby_price` on `.standby.extend`.
+fn not_running() -> ErrorResponse {
+    ErrorResponse::new(
+        ErrorCode::NotRunning,
+        "this lease is a Warm Standby reservation, not a running lease; extend it on \
+         .standby.extend",
     )
 }
 
@@ -74,17 +94,68 @@ fn still_running(lease: &LeaseRecord, now: u64) -> Result<(), ErrorResponse> {
     ))
 }
 
+/// Which of the two paid extension routes a request arrived on: the whole of
+/// what tells `extend_lease` which role the lease it finds must hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtendRoute {
+    /// `<addr>.<listing>.v<n>.extend`, at the listing's `price`.
+    Extend,
+    /// `<addr>.<listing>.v<n>.standby.extend`, at its `standby_price`.
+    StandbyExtend,
+}
+
 /// Serve one extension on `<addr>.<listing>.v<version>.extend`.
 ///
 /// The money is already spent when this runs (ADR 0003), so a refusal is
 /// billed like a success. It buys time on the lease's OWN listing version:
 /// a lease keeps the price it started at (ADR 0009), and an extension bought
-/// on another version's route would be bought at another price.
+/// on another version's route would be bought at another price. A Warm
+/// Standby reservation is refused `not_running` (spec §6.3): it is billed at
+/// its own price on `.standby.extend`.
 pub async fn extend(
     state: &AppState,
     listing_name: &str,
     version: u32,
     body: &[u8],
+) -> Result<ExtendResponse, ErrorResponse> {
+    extend_lease(state, listing_name, version, body, ExtendRoute::Extend).await
+}
+
+/// Serve one extension of a reservation on
+/// `<addr>.<listing>.v<version>.standby.extend`.
+///
+/// The mirror of `extend`: the lease MUST be `Reserved` rather than running,
+/// and the backend is NEVER touched — extending only ever changes
+/// `expires_at` (spec §6.3). A running lease of any role — standalone,
+/// primary, or a standby after Takeover — is refused `not_standby`: it is
+/// billed at its own price on `.extend`.
+pub async fn standby_extend(
+    state: &AppState,
+    listing_name: &str,
+    version: u32,
+    body: &[u8],
+) -> Result<ExtendResponse, ErrorResponse> {
+    extend_lease(
+        state,
+        listing_name,
+        version,
+        body,
+        ExtendRoute::StandbyExtend,
+    )
+    .await
+}
+
+/// ONE function serves both extension routes, because they differ only in
+/// which role the lease they find must hold — splitting them would be two
+/// copies of the same lookup, freshness check, version check and interval
+/// arithmetic, free to drift on the one thing they must agree about: that a
+/// lease is billed at the price for what it is doing (spec §6.3).
+async fn extend_lease(
+    state: &AppState,
+    listing_name: &str,
+    version: u32,
+    body: &[u8],
+    route: ExtendRoute,
 ) -> Result<ExtendResponse, ErrorResponse> {
     let request: ExtendRequest = serde_json::from_slice(body)
         .map_err(|e| invalid(format!("body is not {{ \"workload_id\": \"…\" }}: {}", e)))?;
@@ -102,6 +173,16 @@ pub async fn extend(
                 lease.listing, lease.listing_version
             ),
         ));
+    }
+    // AFTER the version check: a lease paid on the wrong route AND the wrong
+    // version should hear about the version it can fix rather than about a
+    // role rule that may move.
+    match (route, lease.state) {
+        (ExtendRoute::Extend, LeaseState::Reserved) => return Err(not_running()),
+        (ExtendRoute::StandbyExtend, lease_state) if lease_state != LeaseState::Reserved => {
+            return Err(not_standby())
+        }
+        _ => {}
     }
     // The lease's own version, which is the route's: the interval a payment
     // buys is the one the lease was sold under.
@@ -143,12 +224,23 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
         role: lease.role,
         state: lease.state,
         expires_at: lease.expires_at,
-        // An ended lease has no workload left, so it has nothing to reach.
+        // Only a lease whose workload is reachable has somewhere to reach.
+        // An ended one has had its workload destroyed; a `Reserved` standby
+        // has not started one yet, and spec §6.2 is explicit that `access`
+        // is absent for a standby until Takeover; a `Stopped` primary's
+        // container is off (spec §7.1). Naming a host and port that reach
+        // nothing would be a lie in every one of those cases.
         access: lease
             .state
-            .is_live()
+            .is_reachable()
             .then(|| lease.access(&state.config.public_ip)),
         template: lease.template.clone(),
+        // Once a Takeover has settled here, which member won — on the winner
+        // beside `running`, on a loser beside `reserved` — so a tenant
+        // asking any member learns where the workload went (spec §7.1).
+        takeover: lease.settled.as_ref().map(|s| TakeoverStatus {
+            winner: s.winner.clone(),
+        }),
     })
 }
 
@@ -247,7 +339,16 @@ pub async fn evict(
     // `ErrorResponse` that would tell the caller the eviction was refused
     // when it already happened.
     let notice_published = match eviction_event(workload_id, reason, message, &state.keys, now) {
-        Ok(event) => state.publish_one("Eviction Notice", event).await,
+        Ok(event) => match state.publish_one("Eviction Notice", event).await {
+            Ok(report) => report.reached_every_relay(),
+            Err(e) => {
+                error!(
+                    "lease {} was evicted, but its Eviction Notice was not published: {:#}",
+                    id, e
+                );
+                false
+            }
+        },
         Err(e) => {
             error!(
                 "lease {} was evicted, but its Eviction Notice could not be built: {:#}",
