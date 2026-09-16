@@ -38,8 +38,8 @@ use crate::provider::routes::{
     AVAILABILITY_PATH, EXTEND_PATTERN, SPAWN_PATTERN, STATUS_PATH, TERMINATE_PATH,
 };
 use crate::provider::{
-    availability, evict, extend, spawn, status, terminate, BlobFetcher, ImagePolicy, LeaseRecord,
-    ProviderConfig,
+    availability, evict, extend, spawn, status, terminate, BlobCache, BlobFetcher, ImagePolicy,
+    LeaseRecord, ProviderConfig,
 };
 
 /// Everything a handler may touch. Arc-cloned from `ProviderService`, so the
@@ -65,13 +65,15 @@ pub struct AppState {
     pub image_policy: Arc<ImagePolicy>,
     /// How every image byte is fetched and verified (spec §8.4): from the
     /// TOON store through the configured gateway, or from an upstream OCI
-    /// registry. One instance, so its cache of verified blobs is shared.
+    /// registry. One instance over the one on-disk blob cache, so a blob
+    /// verified for any lease serves every later one.
     pub fetcher: Arc<BlobFetcher>,
 }
 
 impl AppState {
-    /// Fails if the config is invalid or its `nostr_private_key` does not
-    /// parse: a provider with no identity cannot be addressed.
+    /// Fails if the config is invalid, its `nostr_private_key` does not
+    /// parse (a provider with no identity cannot be addressed), or the blob
+    /// cache directory cannot be created.
     pub fn new(
         config: ProviderConfig,
         backend: Arc<dyn ComputeBackend>,
@@ -82,9 +84,11 @@ impl AppState {
             .context("nostr_private_key must be a hex or nsec1 secret key")?;
         let directory = directory_from_config(&config)?;
         let image_policy = Arc::new(ImagePolicy::from_config(&config.image_policy));
+        let cache = BlobCache::open(config.blob_cache_dir(), config.blob_cache_max_bytes)?;
         let fetcher = Arc::new(BlobFetcher::new(
             config.gateway_url_pattern.clone(),
             config.image_policy.registry_url_override.clone(),
+            cache,
         ));
         Ok(Self {
             config: Arc::new(config),

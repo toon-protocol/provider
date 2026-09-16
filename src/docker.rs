@@ -21,9 +21,10 @@
 // cannot honour. `nesting` is refused for the same reason: it would mean
 // tenant code holding kernel privileges this backend never hands out.
 
+use std::path::Path;
 use std::process::Stdio;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use tokio::process::Command;
 
@@ -118,6 +119,10 @@ impl DockerBackend {
     }
 
     async fn docker(&self, args: &[&str]) -> Result<std::process::Output> {
+        Self::docker_command(args).await
+    }
+
+    async fn docker_command(args: &[&str]) -> Result<std::process::Output> {
         Command::new("docker")
             .args(args)
             .stdout(Stdio::piped())
@@ -132,6 +137,28 @@ impl Default for DockerBackend {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The id `docker load` reports for an untagged image: `Loaded image ID:
+/// sha256:…`. Under the containerd image store that is the manifest's
+/// digest; under the classic graph driver it is the config's — either way
+/// it is what `docker run` accepts and no tag was involved. A tagged image
+/// (`Loaded image: name:tag`) is refused: the layouts this provider writes
+/// carry no ref name, so a tag here means the load did not read what was
+/// written.
+fn loaded_image_id(output: &str) -> Result<String> {
+    for line in output.lines() {
+        if let Some(id) = line.trim().strip_prefix("Loaded image ID:") {
+            let id = id.trim();
+            if id.starts_with("sha256:") {
+                return Ok(id.to_string());
+            }
+        }
+    }
+    bail!(
+        "docker load did not report an image id (got: {})",
+        output.trim()
+    )
 }
 
 #[async_trait]
@@ -161,6 +188,18 @@ impl ComputeBackend for DockerBackend {
             range_start,
             range_end
         );
+    }
+
+    async fn load_image(&self, layout_tar: &Path) -> Result<String> {
+        let path = layout_tar.to_string_lossy();
+        let output = self.docker(&["load", "-q", "-i", &path]).await?;
+        if !output.status.success() {
+            bail!(
+                "docker load failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        loaded_image_id(&String::from_utf8_lossy(&output.stdout))
     }
 
     async fn create_container(&self, config: &ContainerConfig) -> Result<String> {
@@ -251,6 +290,17 @@ mod tests {
     #[test]
     fn name_for_is_deterministic() {
         assert_eq!(container_name(1234), "toon-1234");
+    }
+
+    #[test]
+    fn the_loaded_image_id_is_read_from_docker_loads_report() {
+        let id = "sha256:8dfc124d76b553b66bdc6f665560d253e5459b42b9758f46a4dcb5dcbee9d3e4";
+        assert_eq!(
+            loaded_image_id(&format!("Loaded image ID: {}\n", id)).unwrap(),
+            id
+        );
+        assert!(loaded_image_id("Loaded image: alpine:3.20\n").is_err());
+        assert!(loaded_image_id("").is_err());
     }
 
     #[test]

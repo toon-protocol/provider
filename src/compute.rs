@@ -10,6 +10,7 @@
 // listings — speaks the glossary, and calls the same thing a workload.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -61,7 +62,9 @@ pub struct ContainerConfig {
     pub id: u32,
     pub name: String,
     /// What to run: a content-addressed OCI reference, `reference@digest`,
-    /// so the backend verifies the bytes it pulls.
+    /// so the backend verifies the bytes it pulls — or the image id
+    /// `load_image` answered for an image the provider fetched and verified
+    /// itself. Never a tag.
     pub image: String,
     /// CPU as the listing prices it. 1000 = one core.
     pub cpu_millicores: u32,
@@ -88,6 +91,12 @@ pub struct ContainerConfig {
 #[async_trait]
 pub trait ComputeBackend: Send + Sync {
     async fn find_available_id(&self, range_start: u32, range_end: u32) -> Result<u32>;
+
+    /// Load an image the provider assembled itself — an OCI image layout
+    /// tar of blobs it fetched and verified by digest (spec §8.4) — and
+    /// answer the id the backend now knows it by, which `ContainerConfig::
+    /// image` then names. No tag is involved at either end.
+    async fn load_image(&self, layout_tar: &Path) -> Result<String>;
 
     /// Returns the backend's container ID/name.
     async fn create_container(&self, config: &ContainerConfig) -> Result<String>;
