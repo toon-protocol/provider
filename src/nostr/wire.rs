@@ -247,7 +247,8 @@ pub enum LeaseEnd {
 /// What a lease is doing (spec §6.7):
 ///
 /// ```text
-/// standalone/primary:   Provisioning → Running → Ended(…)
+/// standalone:           Provisioning → Running → Ended(…)
+/// primary:              Provisioning → Running ⇄ Stopped → Ended(…)
 /// standby:              Reserved → (takeover) → Running → Ended(…)
 ///                       Reserved → Ended(…)
 /// ```
@@ -256,7 +257,8 @@ pub enum LeaseEnd {
 /// what `status` answers and what the lease table holds:
 ///
 /// ```json
-/// "provisioning" | "reserved" | "running" | { "ended": "expiry" | "termination" | "eviction" }
+/// "provisioning" | "reserved" | "running" | "stopped"
+///   | { "ended": "expiry" | "termination" | "eviction" }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -271,6 +273,18 @@ pub enum LeaseState {
     /// with no `access`.
     Reserved,
     Running,
+    /// A PRIMARY that stopped its own workload because it could not publish
+    /// Liveness to a strict majority of its own Relay Set for five cadences
+    /// (spec §7.1). A partitioned primary must not keep running beside the
+    /// Takeover its standbys are about to announce.
+    ///
+    /// Nothing about the LEASE ended: it is paid to its `expires_at`, it
+    /// still holds its capacity slot, its workload id and its host ports,
+    /// `.extend` still buys it another interval, and the sweep still ends it
+    /// when nobody does. Only the workload is off — the container is stopped
+    /// rather than deleted, so regaining a majority with no Takeover in
+    /// sight starts the same one again.
+    Stopped,
     Ended(LeaseEnd),
 }
 
@@ -282,15 +296,25 @@ impl LeaseState {
         !matches!(self, LeaseState::Ended(_))
     }
 
-    /// Whether a workload exists for this lease on the provider's backend.
-    ///
-    /// One question with two uses, and they must never disagree: it is what
-    /// `status` answers `access` for — a host and port that reach nothing
-    /// would be a lie — and what an ending destroys. A `Reserved` standby
-    /// has none until Takeover; an `Ended` lease's has been destroyed
-    /// already. `Provisioning` counts: the container may exist by the time
-    /// the question is asked.
+    /// Whether a workload exists for this lease on the provider's backend:
+    /// what an ending has to destroy. A `Reserved` standby has none until
+    /// Takeover; an `Ended` lease's has been destroyed already.
+    /// `Provisioning` counts, because the container may exist by the time
+    /// the question is asked, and so does `Stopped`: a self-stopped primary
+    /// stopped its container, it did not delete it, and a lease that ended
+    /// without deleting it would leave it on the host forever.
     pub fn has_workload(self) -> bool {
+        matches!(
+            self,
+            LeaseState::Provisioning | LeaseState::Running | LeaseState::Stopped
+        )
+    }
+
+    /// Whether the tenant can reach the workload right now: what `status`
+    /// answers `access` for, since a host and port that reach nothing would
+    /// be a lie. Everything `has_workload` covers except `Stopped`, where
+    /// the container exists and nothing in it is listening.
+    pub fn is_reachable(self) -> bool {
         matches!(self, LeaseState::Provisioning | LeaseState::Running)
     }
 }

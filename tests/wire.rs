@@ -997,6 +997,15 @@ const STATUS_TAKEN_OVER: &str = concat!(
     r#""takeover":{"winner":"6666666666666666666666666666666666666666666666666666666666666666"}}"#,
 );
 
+/// The `status` answer for a primary that stopped its own workload (spec
+/// §6.5, §6.7, §7.1): `stopped` is one word like `running`, the role is
+/// still `primary`, `expires_at` is untouched because the lease is still
+/// paid, and there is no `access` because the container is off.
+const STATUS_STOPPED: &str = concat!(
+    r#"{"workload_id":"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1","#,
+    r#""role":"primary","state":"stopped","expires_at":1700003600}"#,
+);
+
 /// An availability request that asks about a standby rather than a primary
 /// (spec §6.4). `role` is last, and absent when the question is about an
 /// ordinary spawn.
@@ -1122,6 +1131,37 @@ fn a_reservation_holds_its_workload_id_and_its_capacity_slot() {
     assert_eq!(
         serde_json::from_value::<LeaseState>(json!("reserved")).unwrap(),
         LeaseState::Reserved
+    );
+}
+
+#[test]
+fn a_stopped_status_round_trips_byte_identically() {
+    let response: StatusResponse = serde_json::from_str(STATUS_STOPPED).unwrap();
+    assert_eq!(response.state, LeaseState::Stopped);
+    assert_eq!(response.role, Role::Primary);
+    assert!(
+        response.access.is_none(),
+        "a stopped workload has nothing listening"
+    );
+    assert_eq!(serde_json::to_string(&response).unwrap(), STATUS_STOPPED);
+}
+
+#[test]
+fn a_stopped_primary_still_holds_its_lease_and_its_workload() {
+    // `Stopped` is a LIVE state (spec §6.7, §7.1): the lease is paid to its
+    // `expires_at` and the container still exists, so the slot is still held
+    // and the ending still has something to destroy — only the tenant has
+    // nowhere to reach.
+    assert!(LeaseState::Stopped.is_live());
+    assert!(LeaseState::Stopped.has_workload());
+    assert!(!LeaseState::Stopped.is_reachable());
+    assert_eq!(
+        serde_json::to_value(LeaseState::Stopped).unwrap(),
+        json!("stopped")
+    );
+    assert_eq!(
+        serde_json::from_value::<LeaseState>(json!("stopped")).unwrap(),
+        LeaseState::Stopped
     );
 }
 

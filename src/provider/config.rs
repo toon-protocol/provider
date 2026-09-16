@@ -768,6 +768,7 @@ mod tests {
             reserved_spawn: None,
             takeover: None,
             settled: None,
+            taken_over: false,
             created_at: 0,
             expires_at: 3600,
             ended_at: None,

@@ -121,17 +121,29 @@ impl ProviderService {
         Ok(landed)
     }
 
-    /// Publish one Liveness event for the instant `now`, and say which
-    /// relays of the Relay Set took it. Public so a test can drive a cadence
-    /// on a chosen instant rather than waiting one out.
+    /// Publish one Liveness event for the instant `now`, count it against
+    /// this provider's own Relay Set, and say which relays took it. Public
+    /// so a test can drive a cadence on a chosen instant rather than waiting
+    /// one out.
     ///
     /// The report is the answer, not a side effect in the log: a primary
     /// that cannot reach a strict majority of its own Relay Set for five
-    /// cadences must stop its workload (spec §7.1), and this is where it
-    /// counts. `Err` when no relay could even be asked — the event could not
-    /// be built, or the publisher could not be reached — which for that
-    /// count is a cadence on which no relay took it.
+    /// cadences must stop its workload (spec §7.1), and `note_liveness`
+    /// (`self_stop`) is the count. It happens HERE, on the one publication
+    /// the directory loop makes each cadence, so what a test drives and what
+    /// the loop does are the same thing. `Err` when no relay could even be
+    /// asked — the event could not be built, or the publisher could not be
+    /// reached — which for that count is a cadence on which no relay took
+    /// it, and which the caller still hears about.
     pub async fn publish_liveness(&self, now: u64) -> Result<PublishReport> {
+        let published = self.publish_liveness_event(now).await;
+        self.note_liveness(published.as_ref().ok()).await;
+        published
+    }
+
+    /// The publication itself, with nothing counted: the Liveness of this
+    /// instant, offered to the Relay Set.
+    async fn publish_liveness_event(&self, now: u64) -> Result<PublishReport> {
         let state = &self.state;
         let event = liveness_event(
             state.available().await,

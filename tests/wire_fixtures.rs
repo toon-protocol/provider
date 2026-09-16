@@ -48,7 +48,7 @@ use toon_provider::nostr::kinds::{
 use toon_provider::nostr::wire::{
     EvictionReason, ImageRef, PortRequest, Protocol, RegistryEntryRef, Resources, SpawnContent,
 };
-use toon_provider::provider::{evict, route_table, ImagePolicyConfig};
+use toon_provider::provider::{evict, route_table, ImagePolicyConfig, SELF_STOP_CADENCES};
 use toon_provider::{router, Listing, LivenessState, ProviderConfig, ProviderService};
 
 // ── the fixed world every fixture is generated in ────────────────────────────
@@ -1445,7 +1445,8 @@ async fn a_standby_extend_response_and_its_role_refusals() {
 
 /// The two roles a Standby Set gives, each as a paid exchange: the same
 /// signed spawn reaches every member, and the route it lands on decides what
-/// this provider does with it (spec §6.2 step 3, §7).
+/// this provider does with it (spec §6.2 step 3, §7) — and what the primary's
+/// `status` says once its own relays stop taking its Liveness (§7.1).
 ///
 /// Two fixture providers, because ONE provider can hold only one position in
 /// one set: in `spawn.primary` the fixture provider is index 0 of a set whose
@@ -1501,6 +1502,44 @@ async fn a_spawn_and_a_status_per_standby_set_role() {
     assert_eq!(response["role"], "primary");
     assert_eq!(response["state"], "running");
     golden("status.primary.json", doc);
+
+    // ── the same primary, cut off from its own Relay Set ─────────────────
+    // Five Liveness publications that no relay of the Relay Set took, which
+    // is exactly what spec §7.1 counts: the provider stops its primary's
+    // workload rather than keep it running beside a Takeover.
+    f.directory.publishes_to(&[RELAY]);
+    f.directory.refuse_liveness_on(&[RELAY]);
+    for _ in 0..SELF_STOP_CADENCES {
+        f.service
+            .publish_liveness(NOW)
+            .await
+            .expect("a Liveness every relay refused is still a report");
+    }
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "status",
+            "stopped",
+            "The same primary after five Liveness cadences that reached no relay of its own \
+             Relay Set (spec §7.1, \"Primary self-stop\"): `state` is the one word `stopped` and \
+             there is NO `access`, because the workload's container is off. Nothing about the \
+             LEASE ended — `role` is still `primary`, `expires_at` is unchanged, and `.extend` \
+             still buys another interval — and the workload starts again if the relays come back \
+             before any member of the Standby Set has claimed the workload id. The request is \
+             the same question as `status.primary`, asked with a longer TTL so that it is a \
+             different event (§6.1).",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.about_request(&f.tenant, "status", PRIMARY_WORKLOAD, TTL + 30)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["role"], "primary");
+    assert_eq!(response["state"], "stopped");
+    assert!(response.get("access").is_none(), "{}", response);
+    golden("status.stopped.json", doc);
 
     // ── any other index, on `.standby`: a Warm Standby reserves ──────────
     let g = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;

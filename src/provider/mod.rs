@@ -6,7 +6,9 @@
 // request listener, a standby watchdog and the expiry sweep. Four are left:
 // the sweep in `cleanup`, the directory publication in `publish`, the
 // watchdog in `watchdog` — rewritten for Liveness on the primary's Relay Set
-// and ADR 0010's Takeover — and the HTTP app in `provider_http`.
+// and ADR 0010's Takeover — and the HTTP app in `provider_http`. `self_stop`
+// is the same rule read from the other end: what a PRIMARY does when its own
+// relays stop taking its Liveness.
 //
 // The routes themselves are one module each: `spawn` starts a lease — or, on
 // `.standby`, reserves capacity for one without starting it — `lifecycle`
@@ -33,6 +35,7 @@ pub mod oci_layout;
 mod persistence;
 mod publish;
 pub mod routes;
+mod self_stop;
 mod settle;
 mod spawn;
 mod standby;
@@ -50,6 +53,7 @@ pub use lifecycle::{evict, extend, standby_extend, status, terminate};
 pub use persistence::persisted_leases;
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
+pub use self_stop::{reached_a_majority, SELF_STOP_CADENCES};
 pub use settle::{pick_winner, Claim, TakeoverSettlement};
 pub use spawn::{spawn, standby_spawn, VOLUME_MOUNT_PATH};
 pub use standby::StandbySet;
@@ -82,6 +86,17 @@ pub struct ProviderService {
     /// one old reading and one new one, with anything in between unseen.
     /// A restart starts the count again, which costs at most one cadence.
     silence: tokio::sync::Mutex<HashMap<u32, u64>>,
+    /// How many Liveness cadences in a row have failed to reach a strict
+    /// majority of this provider's OWN Relay Set (`self_stop`). Five stop
+    /// the workload of every primary lease it holds (spec §7.1).
+    ///
+    /// In memory for the same reason `silence` is: the rule counts
+    /// CONTINUOUS cadences, and a provider that was down cannot vouch for
+    /// the ones it did not publish. A restart starts the count again — and
+    /// asks the Relay Set outright whether it was taken over while it was
+    /// away (`stand_down_if_taken_over`), which is the question the count
+    /// would have been standing in for.
+    cadences_without_majority: std::sync::atomic::AtomicU32,
 }
 
 impl ProviderService {
@@ -107,6 +122,7 @@ impl ProviderService {
         Ok(Self {
             state: AppState::new(config, backend, clock)?,
             silence: Default::default(),
+            cadences_without_majority: Default::default(),
         })
     }
 
@@ -121,6 +137,7 @@ impl ProviderService {
         Ok(Self {
             state: AppState::new(config, backend, clock)?.with_directory(directory),
             silence: Default::default(),
+            cadences_without_majority: Default::default(),
         })
     }
 
@@ -206,6 +223,10 @@ impl ProviderService {
         );
 
         self.restore_leases().await;
+        // Before anything is served or published: a primary whose Standby
+        // Set moved on while this process was down must not carry on serving
+        // a workload another provider is now running (spec §7.1).
+        self.stand_down_if_taken_over().await;
 
         let bind_addr = self.state.config.http_bind_addr.clone();
         let operator_bind_addr = self.state.config.operator_bind_addr.clone();

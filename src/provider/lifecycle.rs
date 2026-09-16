@@ -224,14 +224,15 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
         role: lease.role,
         state: lease.state,
         expires_at: lease.expires_at,
-        // Only a lease with a workload has somewhere to reach. An ended one
-        // has had its workload destroyed; a `Reserved` standby has not
-        // started one yet, and spec §6.2 is explicit that `access` is absent
-        // for a standby until Takeover — naming a host and port that reach
-        // nothing would be a lie either way.
+        // Only a lease whose workload is reachable has somewhere to reach.
+        // An ended one has had its workload destroyed; a `Reserved` standby
+        // has not started one yet, and spec §6.2 is explicit that `access`
+        // is absent for a standby until Takeover; a `Stopped` primary's
+        // container is off (spec §7.1). Naming a host and port that reach
+        // nothing would be a lie in every one of those cases.
         access: lease
             .state
-            .has_workload()
+            .is_reachable()
             .then(|| lease.access(&state.config.public_ip)),
         template: lease.template.clone(),
         // Once a Takeover has settled here, which member won — on the winner
