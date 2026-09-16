@@ -365,11 +365,12 @@ held from the moment the capacity is.
 
 A reservation is not idle. Every `WATCHDOG_INTERVAL_SECS` (10 s) the
 provider steps a watchdog over every reserved lease it holds, beside the
-expiry sweep (spec §7.1 steps 1–2):
+expiry sweep (spec §7.1):
 
 1. It reads the **primary's Provider Profile** — the pubkey at index 0 of the
-   lease's `standby_set` — through the Directory, on this provider's own
-   Relay Set, to learn the primary's `relays` and `liveness_cadence_s`.
+   lease's `standby_set`, or the winner of a Takeover this provider lost
+   (step 7) — through the Directory, on this provider's own Relay Set, to
+   learn the primary's `relays` and `liveness_cadence_s`.
 2. It asks each of **the primary's relays**, one by one, whether it holds an
    unexpired Liveness from the primary: live, expired or absent. This
    provider's own Relay Set is never consulted for that — the primary
@@ -391,16 +392,47 @@ expiry sweep (spec §7.1 steps 1–2):
    An announced reservation is not watched further, and never announces
    twice. A publisher that could not be reached is not an announcement: the
    count stands and the next step tries again.
+5. **Two cadences after its own announcement** it settles the race: it
+   reads every Takeover on the workload id back from the relays the claim
+   went to, restricted to the pubkeys in the `standby_set` — a claim from
+   any other signer is ignored, however early — and to claims naming the
+   same `primary` this one did, because a claim against an earlier primary
+   is an earlier race, already settled. Its own claim counts whether or not
+   a relay hands it back. The **earliest `created_at` wins; a tie goes to
+   the lower index** in the set. Nothing is read, and nothing starts, before
+   the window is up, however early the other claims are visible. A read
+   that fails settles nothing and is tried again on the next step.
+6. **If it won**, it starts the workload **from the image exactly as a
+   spawn would** — the same image resolution, the same fetch, the same
+   container from the spawn the reservation kept — with no state carried
+   over (ADR 0010). The lease becomes `running`: `status` answers `access`,
+   `role` stays `standby`, and `takeover.winner` names this provider.
+   Winning buys no time: the reservation's own `expires_at` stands, so a
+   **full-price `.extend`** is due before it or the sweep stops the workload
+   and ends the lease with `expiry`; `.standby.extend` is refused
+   `not_standby`. A start the backend refuses leaves the lease reserved and
+   the backend clean, and the next step tries again.
+7. **If it lost**, it stays `reserved` — still paid on `.standby.extend`,
+   still `not_running` on `.extend` — `status` says who won in
+   `takeover.winner`, and from the next step on it **watches the winner** as
+   its primary: the winner's Profile, the winner's Relay Set, a count of
+   silence that starts from nothing. It forgets its own claim, so that if
+   the winner goes silent too it announces again — naming the winner as
+   `primary` — and the set survives a second failure.
+
+What the lease keeps on disk through all of this: the announcement (when,
+in what cadence, to which relays) until the race is settled, and then the
+winner. A standby that restarts after announcing settles from what it kept
+rather than announcing again; one that restarts after winning and before
+the workload started still starts it.
 
 A provider with no `publish_url` watches and decides like any other, and
 announces nothing, exactly as it publishes nothing. A step for a provider
 holding no reservation reads nothing at all.
 
-**Still to come in Milestone 3:** paying a reservation (`.standby.extend`, and
-the `not_standby` refusals that go with it); settling the race after two
-cadences and starting the workload from the image if this provider won, or
-watching the winner if it lost; and a primary stopping its own workload
-after five cadences without a relay majority.
+**Still to come in Milestone 3:** a primary stopping its own workload after
+five cadences without a relay majority, and restarting it only if no
+Takeover exists for the lease.
 
 ## Capabilities
 
@@ -472,7 +504,12 @@ Status answers:
 `state` is the §6.7 lease state: `"provisioning"`, `"reserved"`, `"running"`,
 or `{ "ended": "expiry" | "termination" | "eviction" }`. `"reserved"` is a
 Warm Standby before Takeover — capacity held and paid for, with nothing
-running and so no `access` (see [Standby Sets](#standby-sets)). It is the
+running and so no `access` (see [Standby Sets](#standby-sets)). Once a
+Takeover on the workload has settled at this member, the answer also carries
+`"takeover": { "winner": "<pubkey>" }` — the member that runs the workload
+now, whether that is this provider (`state` is then `"running"`, with
+`access`) or another (`"reserved"` still, and no `access`); see [Watching
+the primary](#watching-the-primary). It is the
 lease record
 as it stands, so between an expiry and the sweep that reaps it a lease still
 reads `"running"` with an `expires_at` in the past — extend and terminate
@@ -781,10 +818,10 @@ Request per `op` with its packet body, request and response bodies for
 spawn, extend, availability, status and terminate, one refusal per spec §5
 error code in validation order, one Profile, Listing, Liveness, Eviction
 Notice and Takeover each, the two roles a Standby Set gives (`spawn.primary`,
-`spawn.standby` and a `status` for each), and the route table a Listing
-generates. One shape no route can produce yet — `not_standby` — is rendered
-through the same serialiser with its `route`, `http_path` and `request_body`
-null. Everything is produced
+`spawn.standby` and a `status` for each), the `status` of a standby that
+won a Takeover and of one that lost (`status.won`, `status.lost` — driven
+through the real watchdog over the fake Directory), and the route table a
+Listing generates. Everything is produced
 over fixed test-only keys, a fixed clock and BIP-340 signatures with all-zero
 auxiliary randomness, so the bytes are reproducible and a tenant can re-derive
 every id and signature (TOON_Network #16).

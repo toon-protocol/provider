@@ -13,6 +13,7 @@ use tracing::{error, warn};
 // so their JSON is a wire shape, and this table is the same JSON on disk.
 pub use crate::nostr::wire::{LeaseEnd, LeaseState};
 
+use super::settle::TakeoverSettlement;
 use super::standby::StandbySet;
 use super::watchdog::TakeoverAnnouncement;
 use crate::nostr::wire::{Access, PortAccess, Role, SpawnContent};
@@ -89,6 +90,14 @@ pub struct LeaseRecord {
     /// settles the race it entered instead of announcing again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub takeover: Option<TakeoverAnnouncement>,
+
+    /// How the last Takeover on this workload settled here (spec §7.1 steps
+    /// 3–5), once one has: who won. Persisted because a standby that LOST
+    /// watches the winner as its primary from then on, and nothing else on
+    /// the record says who that is; a standby that won and restarts before
+    /// its workload started still has to start it. `status` answers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settled: Option<TakeoverSettlement>,
 
     pub created_at: u64,
 
@@ -222,6 +231,7 @@ mod tests {
             standby_set: None,
             reserved_spawn: None,
             takeover: None,
+            settled: None,
             created_at: 1000,
             expires_at,
             ended_at: None,
@@ -319,6 +329,25 @@ mod tests {
         assert_eq!(loaded[&2000].standby_set, None);
         assert_eq!(loaded[&2000].reserved_spawn, None);
         assert_eq!(loaded[&2000].takeover, None);
+        assert_eq!(loaded[&2000].settled, None);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_settled_takeover_survives_a_restart() {
+        // A standby that lost watches the winner from then on (spec §7.1
+        // step 5), and only this field says who that is: the set on the
+        // record still lists the original primary at index 0.
+        let p = temp_path("settled");
+        let mut lost = lease(2000, 9999);
+        lost.role = Role::Standby;
+        lost.state = LeaseState::Reserved;
+        lost.settled = Some(TakeoverSettlement {
+            winner: "cc".repeat(32),
+        });
+        persist_leases(&HashMap::from([(2000, lost.clone())]), &p);
+
+        assert_eq!(load_leases(&p)[&2000], lost);
         let _ = std::fs::remove_file(&p);
     }
 

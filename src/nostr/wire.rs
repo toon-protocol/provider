@@ -295,6 +295,20 @@ impl LeaseState {
     }
 }
 
+/// What `status` says about a Takeover once one has settled on the lease's
+/// workload (spec §6.5, §7.1 steps 3–5): who won.
+///
+/// One field, because one is what a tenant asking any member of the set
+/// needs: the winner is the member that runs the workload now, so a
+/// reservation that lost can still say WHERE the workload went. A standby
+/// that won names itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TakeoverStatus {
+    /// The member of the `standby_set` that won: 64 lowercase hex characters.
+    pub winner: String,
+}
+
 /// The answer to a successful status (spec §6.5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -312,6 +326,12 @@ pub struct StatusResponse {
     /// (spec §8.3, ADR 0004).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
+    /// Present once a Takeover on this workload has settled here (spec
+    /// §7.1): a standby that won answers it beside `running`, one that lost
+    /// beside `reserved`. Absent until then, and always for a lease that was
+    /// never in a Standby Set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takeover: Option<TakeoverStatus>,
 }
 
 /// The answer to a successful termination (spec §6.6). The state is always

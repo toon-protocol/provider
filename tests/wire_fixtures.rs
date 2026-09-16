@@ -36,7 +36,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::harness::post;
 use common::{sha256_hex, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory};
-use toon_provider::nostr::directory_events::{takeover_event, Settlement};
+use toon_provider::nostr::directory_events::{takeover_event, ProfileContent, Settlement};
 use toon_provider::nostr::image_events::{
     blob_record_event, image_entry_event, template_event, BlobPart, BlobRecordContent, BlobSource,
     EntryBlob, ImageEntryContent, TemplateContent, TemplateImage,
@@ -49,7 +49,7 @@ use toon_provider::nostr::wire::{
     EvictionReason, ImageRef, PortRequest, Protocol, RegistryEntryRef, Resources, SpawnContent,
 };
 use toon_provider::provider::{evict, route_table, ImagePolicyConfig};
-use toon_provider::{router, Listing, ProviderConfig, ProviderService};
+use toon_provider::{router, Listing, LivenessState, ProviderConfig, ProviderService};
 
 // ── the fixed world every fixture is generated in ────────────────────────────
 
@@ -424,6 +424,9 @@ struct Fixture {
     app: axum::Router,
     service: ProviderService,
     directory: Arc<FakeDirectory>,
+    /// Stopped at `NOW`, and moved only to drive the watchdog through a
+    /// Takeover — then set back, so every request is signed at `NOW`.
+    clock: Arc<FakeClock>,
     provider: Keys,
     tenant: Keys,
     other_tenant: Keys,
@@ -484,13 +487,14 @@ async fn fixture_provider(policy: ImagePolicyConfig, registry: MockServer) -> Fi
     }
     let gateway = MockServer::start().await;
     mount_image_bytes(&gateway, &registry).await;
+    let clock = FakeClock::at(NOW);
     let service = ProviderService::with_backend_clock_and_directory(
         ProviderConfig {
             gateway_url_pattern: Some(format!("{}/raw/{{txid}}", gateway.uri())),
             ..config(state_path, Some(registry.uri()), policy)
         },
         FakeBackend::new(),
-        FakeClock::at(NOW),
+        clock.clone(),
         directory.clone(),
     )
     .unwrap();
@@ -498,6 +502,7 @@ async fn fixture_provider(policy: ImagePolicyConfig, registry: MockServer) -> Fi
         app: router(service.app_state()),
         service,
         directory,
+        clock,
         provider: keys(PROVIDER_SECRET),
         tenant: keys(TENANT_SECRET),
         other_tenant: keys(OTHER_TENANT_SECRET),
@@ -1547,6 +1552,161 @@ async fn a_spawn_and_a_status_per_standby_set_role() {
     assert_eq!(response["role"], "standby");
     assert!(response.get("access").is_none(), "{}", response);
     golden("status.reserved.json", doc);
+}
+
+/// The workload of the set the fixture provider LOSES in: a third id, since
+/// a set is a workload id and this set has three members — the primary
+/// provider, the fixture provider and the standby provider.
+const LOST_WORKLOAD: u8 = 0xa2;
+
+/// The primary provider's Profile, as the relay holds it (spec §4.1): the
+/// Relay Set and the cadence the fixture provider watches it by. Never a
+/// fixture itself — it is signed by a peer, not by the provider under test.
+fn primary_profile() -> Event {
+    let content = ProfileContent {
+        ilp_address: "g.primary".to_string(),
+        connector_url: "http://connector.primary.example:3300/ilp".to_string(),
+        connector_seal_key: CONNECTOR_SEAL_KEY.to_string(),
+        relays: vec![RELAY.to_string()],
+        settlement: vec![],
+        isolation: "shared-kernel".to_string(),
+        hidden: false,
+        host: Some("198.51.100.9".to_string()),
+        liveness_cadence_s: LIVENESS_CADENCE_S,
+    };
+    EventBuilder::new(
+        Kind::Custom(K_PROFILE),
+        serde_json::to_string(&content).unwrap(),
+    )
+    .tags([Tag::parse(["L", TOON_LABEL]).unwrap()])
+    .custom_created_at(Timestamp::from(NOW - 1000))
+    .sign_with_keys(&keys(PRIMARY_SECRET))
+    .unwrap()
+}
+
+/// Drive `f` through one Takeover of `workload` (spec §7.1): the primary
+/// provider is silent on its one relay from a cadence before `NOW`, so the
+/// Takeover is announced AT `NOW` — the same event `directory.takeover`
+/// shows — and settled two cadences later. The clock ends back at `NOW`.
+async fn take_over(f: &Fixture, workload: u8) {
+    let primary = keys(PRIMARY_SECRET).public_key();
+    f.directory.seed_profile(primary_profile());
+    f.directory
+        .set_liveness_on(primary, &[RELAY], LivenessState::Absent);
+    for at in [NOW - LIVENESS_CADENCE_S, NOW, NOW + 2 * LIVENESS_CADENCE_S] {
+        f.clock.set(at);
+        f.service.watch_primaries(at).await;
+    }
+    f.clock.set(NOW);
+
+    let published = f.directory.takeover_publications();
+    assert_eq!(published.len(), 1, "one Takeover, at NOW: {published:?}");
+    assert_eq!(
+        published[0].0.id,
+        takeover_event(&workload_id(workload), &primary, &f.provider, NOW)
+            .unwrap()
+            .id,
+        "the claim is the one the Takeover fixture shows, byte for byte"
+    );
+}
+
+/// The two ways a Takeover settles (spec §7.1 steps 3–5), each as `status`
+/// then reports it: the fixture provider WON the race for the set of
+/// `spawn.standby` — it was the only claimant — and runs the workload; and
+/// it LOST a second set's race to the standby provider, whose claim was
+/// earlier, and stays reserved watching the winner.
+#[tokio::test]
+async fn a_status_per_takeover_outcome() {
+    // ── won: the standby of `spawn.standby`, after its primary went silent ──
+    let f = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let set = [keys(PRIMARY_SECRET).public_key(), f.provider_pubkey()];
+    let content = standby_set_content(STANDBY_SET_WORKLOAD, &set);
+    let event = lease_request(&f.tenant, &set, "spawn", &content, NOW, NOW + TTL);
+    let (status, response) = post(&f.app, "/listings/warm/v1/standby", envelope(&event)).await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+
+    take_over(&f, STANDBY_SET_WORKLOAD).await;
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "status",
+            "won",
+            "Status of the Warm Standby of `spawn.standby` after it WON the Takeover of its \
+             workload (spec §6.5, §7.1 steps 3–4). The primary provider went silent on its \
+             Relay Set; this provider announced `directory.takeover` at `now`, waited the \
+             settle window of two cadences, found its own claim the earliest from any \
+             member of the `standby_set`, and started the workload from the image exactly \
+             as a spawn would, with no state carried over (ADR 0010). `state` is now \
+             `running` and `access` is where the workload runs; `role` is still `standby`, \
+             because a role is a position in the set and never changes; and `takeover.winner` \
+             names this provider. `expires_at` is the reservation's own: winning buys no \
+             time, so a full-price `.extend` is due before it or the sweep ends the lease. \
+             `.standby.extend` is refused `not_standby` from here on.",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.about_request(&f.tenant, "status", STANDBY_SET_WORKLOAD, TTL)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["state"], "running");
+    assert_eq!(response["role"], "standby");
+    assert!(response.get("access").is_some(), "{}", response);
+    assert_eq!(response["takeover"]["winner"], f.provider_pubkey().to_hex());
+    golden("status.won.json", doc);
+
+    // ── lost: a set of three, where the standby provider claimed first ──
+    let g = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let winner = keys(STANDBY_SECRET);
+    let set = [
+        keys(PRIMARY_SECRET).public_key(),
+        g.provider_pubkey(),
+        winner.public_key(),
+    ];
+    let content = standby_set_content(LOST_WORKLOAD, &set);
+    let event = lease_request(&g.tenant, &set, "spawn", &content, NOW, NOW + TTL);
+    let (status, response) = post(&g.app, "/listings/warm/v1/standby", envelope(&event)).await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    // The relay already holds the standby provider's claim, one second
+    // earlier than this provider's will be.
+    g.directory.seed_takeover(
+        takeover_event(
+            &workload_id(LOST_WORKLOAD),
+            &keys(PRIMARY_SECRET).public_key(),
+            &winner,
+            NOW - 1,
+        )
+        .unwrap(),
+    );
+
+    take_over(&g, LOST_WORKLOAD).await;
+
+    let (status, response, doc) = exchange(
+        &g,
+        (
+            "status",
+            "lost",
+            "Status of a Warm Standby that LOST a Takeover (spec §6.5, §7.1 steps 3 and 5). \
+             This provider is index 1 of a set of three; the standby provider at index 2 \
+             announced one second earlier, so its claim won. The lease stays `reserved` with \
+             no `access` — nothing runs here, and `.standby.extend` still pays it while \
+             `.extend` is still `not_running` — and `takeover.winner` names the member the \
+             workload went to, which is the whole of what a tenant asking THIS member needs \
+             to know. From the next watchdog step on, this provider watches the winner's \
+             Liveness on the winner's own Relay Set, so the set survives a second failure.",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&g.about_request(&g.tenant, "status", LOST_WORKLOAD, TTL)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["state"], "reserved");
+    assert_eq!(response["role"], "standby");
+    assert!(response.get("access").is_none(), "{}", response);
+    assert_eq!(response["takeover"]["winner"], winner.public_key().to_hex());
+    golden("status.lost.json", doc);
 }
 
 // ── Milestone 2: what a publisher signs, and the three forms of `image` ──────

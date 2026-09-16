@@ -62,6 +62,7 @@ fn live_lease(id: u32, listing: &str, version: u32) -> LeaseRecord {
         standby_set: None,
         reserved_spawn: None,
         takeover: None,
+        settled: None,
         created_at: 1_700_000_000,
         expires_at: 1_700_003_600,
         ended_at: None,

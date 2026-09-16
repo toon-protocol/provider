@@ -2,8 +2,9 @@
 // waits (spec §7.1 steps 1–2).
 //
 // For every reserved lease this provider holds, the primary — index 0 of the
-// lease's Standby Set — is watched on the PRIMARY's Relay Set, read from the
-// primary's Provider Profile, never on this provider's own relays: a primary
+// lease's Standby Set, or the winner of a Takeover this provider lost
+// (`settle::primary_of`) — is watched on the PRIMARY's Relay Set, read from
+// the primary's Provider Profile, never on this provider's own relays: a primary
 // publishes Liveness to the relays IT lists, and a standby watching its own
 // would be waiting for something that was never sent there. The primary is
 // silent when its Liveness is expired or absent on a strict majority of that
@@ -13,8 +14,9 @@
 //
 // When the trigger holds, this provider publishes ONE Takeover to the
 // primary's Relay Set and remembers, on the lease and on disk, that it did
-// and when. Settling the race and starting the workload are the next ticket:
-// this module announces and stops.
+// and when. Settling the race and starting the workload are `settle`'s
+// (steps 3–5), run as the second half of the same step: this module
+// announces, and hands over.
 //
 // The shape is the expiry sweep's (`cleanup`): a public step that takes an
 // instant, run by a thin loop in the service and by a fake clock in tests.
@@ -29,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use super::persistence::{persist_leases, LeaseRecord, LeaseState};
+use super::settle::primary_of;
 use super::ProviderService;
 use crate::directory::RelayLiveness;
 use crate::nostr::directory_events::{takeover_event, ProfileContent};
@@ -80,10 +83,13 @@ struct Watched {
 }
 
 /// The primary `lease` watches, if it watches one: a reservation that has
-/// not announced yet. A reservation whose set names no parsable primary is
-/// not watched rather than a panic — the record came off disk, where
-/// nothing re-checks it.
-fn watched_primary(lease: &LeaseRecord) -> Option<Watched> {
+/// not announced yet, on the member `settle::primary_of` names — index 0
+/// of the set, or the winner of a Takeover this provider lost (spec §7.1
+/// step 5). Never this provider itself: a reservation whose primary is `me`
+/// is one that WON and has not started yet, and `settle` starts it. A
+/// reservation whose set names no parsable primary is not watched rather
+/// than a panic — the record came off disk, where nothing re-checks it.
+fn watched_primary(lease: &LeaseRecord, me: &str) -> Option<Watched> {
     if lease.state != LeaseState::Reserved || lease.takeover.is_some() {
         return None;
     }
@@ -91,7 +97,11 @@ fn watched_primary(lease: &LeaseRecord) -> Option<Watched> {
     if set.is_primary() {
         return None;
     }
-    let primary = set.primary().and_then(|hex| PublicKey::parse(hex).ok())?;
+    let primary = primary_of(lease)?;
+    if primary == me {
+        return None;
+    }
+    let primary = PublicKey::parse(primary).ok()?;
     Some(Watched {
         id: lease.id,
         workload_id: lease.workload_id.clone(),
@@ -112,15 +122,21 @@ impl ProviderService {
     /// One step of the watch at `now`: read every watched primary's Profile
     /// and its Liveness on the relays that Profile lists, keep the count of
     /// silence per lease, and announce a Takeover for each primary that has
-    /// been silent for a cadence. Public so a test can drive the trigger on
-    /// chosen instants rather than waiting out cadences.
+    /// been silent for a cadence — then settle every announcement whose
+    /// window has elapsed and start what was won (`settle`). Public so a
+    /// test can drive the trigger on chosen instants rather than waiting
+    /// out cadences.
     ///
     /// A provider with no reservation reads nothing: the table is looked at
     /// first, and the Directory only for the primaries it names.
     pub async fn watch_primaries(&self, now: u64) {
+        let me = self.state.keys.public_key().to_hex();
         let watched: Vec<Watched> = {
             let leases = self.state.leases.lock().await;
-            leases.values().filter_map(watched_primary).collect()
+            leases
+                .values()
+                .filter_map(|l| watched_primary(l, &me))
+                .collect()
         };
 
         // A lease that is no longer watched — ended, or announced — takes
@@ -134,6 +150,12 @@ impl ProviderService {
         for watched in &watched {
             self.watch_one(watched, now).await;
         }
+
+        // Steps 3–5, for the reservations that announced on an earlier
+        // step. A loser comes back into `watched` on the NEXT step, with the
+        // winner as its primary and a count of silence that starts from
+        // nothing.
+        self.settle_takeovers(now).await;
     }
 
     /// Steps 1 and 2 of spec §7.1 for one reservation.

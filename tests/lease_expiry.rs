@@ -27,6 +27,7 @@ fn lease(id: u32, expires_at: u64) -> LeaseRecord {
         standby_set: None,
         reserved_spawn: None,
         takeover: None,
+        settled: None,
         created_at: NOW - 600,
         expires_at,
         ended_at: None,
