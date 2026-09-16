@@ -38,7 +38,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::config::{ImagePolicyConfig, Listing};
-use crate::nostr::wire::{ErrorCode, ErrorResponse, ImageRef};
+use crate::nostr::image_events::{SpawnImage, IMAGE_REGISTRY_NOT_RESOLVED};
+use crate::nostr::wire::{ErrorCode, ErrorResponse};
 
 /// Every OCI/Docker media type this milestone reads: an index (OCI or the
 /// older Docker manifest list) or a single-platform manifest.
@@ -447,38 +448,50 @@ fn manifest_size(digest: &str, value: &Value) -> Result<ResolvedManifest, ErrorR
     })
 }
 
-/// Apply the provider's image policy to a spawn's (or availability's) image,
-/// resolving it against the upstream registry exactly as a spawn's step 5
-/// would. Called by both `availability` and `spawn` so a positive
+/// Apply the provider's image policy to a spawn's (or availability's)
+/// image, resolving it against the upstream registry exactly as a spawn's
+/// step 5 would. Called by both `availability` and `spawn` so a positive
 /// `availability` answer and a spawn's actual behaviour never disagree.
 ///
-/// Order: the cheap, network-free checks (denied digest, denied reference)
-/// first, then resolution against the registry (`no_matching_arch`), then
-/// the size cap against the resolved manifest — which may itself be a
-/// digest this provider denies, if an index was named and its per-arch
-/// manifest (rather than the index digest) is on the deny list.
+/// The IMAGE REGISTRY FORMS are refused here, with `refused_image` and the
+/// one message `IMAGE_REGISTRY_NOT_RESOLVED` — §8.4's resolution is a later
+/// ticket, and this is the gate both routes already share, so a tenant
+/// learns for free on `availability` that this provider cannot fetch that
+/// image, before a spawn bills it for the same answer. It is deliberately
+/// the FIRST thing checked: no deny list, no network fetch and no capacity
+/// count happens for an image that could not be fetched anyway.
+///
+/// Order for the upstream form: the cheap, network-free checks (denied
+/// digest, denied reference) first, then resolution against the registry
+/// (`no_matching_arch`), then the size cap against the resolved manifest —
+/// which may itself be a digest this provider denies, if an index was named
+/// and its per-arch manifest (rather than the index digest) is on the deny
+/// list.
 pub async fn check(
     registry: &OciRegistry,
     policy: &ImagePolicy,
     listing: &Listing,
-    image: &ImageRef,
+    image: &SpawnImage,
 ) -> Result<(), ErrorResponse> {
-    if policy.digest_denied(&image.digest) {
+    let Some(reference) = image.upstream_reference() else {
+        return Err(refused(IMAGE_REGISTRY_NOT_RESOLVED));
+    };
+    let digest = image.digest();
+
+    if policy.digest_denied(digest) {
         return Err(refused(format!(
             "image digest {} is denied by this provider's image policy",
-            image.digest
+            digest
         )));
     }
-    if policy.reference_denied(&image.reference) {
+    if policy.reference_denied(reference) {
         return Err(refused(format!(
             "image reference {} is denied by this provider's image policy",
-            image.reference
+            reference
         )));
     }
 
-    let resolved = registry
-        .resolve(&image.reference, &image.digest, &listing.arch)
-        .await?;
+    let resolved = registry.resolve(reference, digest, &listing.arch).await?;
 
     if policy.digest_denied(&resolved.digest) {
         return Err(refused(format!(

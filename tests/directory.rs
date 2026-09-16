@@ -508,11 +508,7 @@ async fn a_lease_request_is_never_published() {
 async fn spawn_a_lease(h: &Harness) -> (StatusCode, Value) {
     let content = SpawnContent {
         workload_id: "ab".repeat(32),
-        image: ImageRef {
-            reference: "docker.io/library/alpine".to_string(),
-            digest: valid_digest(),
-            registry_entry: None,
-        },
+        image: ImageRef::upstream("docker.io/library/alpine".to_string(), valid_digest()),
         env: BTreeMap::new(),
         ports: vec![PortRequest {
             container_port: 443,

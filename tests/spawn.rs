@@ -316,22 +316,14 @@ async fn malformed_ids_keys_images_and_ports_are_invalid() {
         (
             "a tag instead of a digest",
             SpawnContent {
-                image: ImageRef {
-                    reference: "docker.io/library/alpine:latest".to_string(),
-                    digest: digest(),
-                    registry_entry: None,
-                },
+                image: ImageRef::upstream("docker.io/library/alpine:latest".to_string(), digest()),
                 ..spawn_content(1)
             },
         ),
         (
             "a digest that is not sha256:<64 hex>",
             SpawnContent {
-                image: ImageRef {
-                    reference: "docker.io/library/alpine".to_string(),
-                    digest: "sha256:abc".to_string(),
-                    registry_entry: None,
-                },
+                image: ImageRef::upstream("docker.io/library/alpine".to_string(), "sha256:abc".to_string()),
                 ..spawn_content(1)
             },
         ),

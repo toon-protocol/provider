@@ -258,11 +258,7 @@ fn workload_id(seed: u8) -> String {
 fn spawn_content(seed: u8) -> Value {
     serde_json::to_value(SpawnContent {
         workload_id: workload_id(seed),
-        image: ImageRef {
-            reference: REFERENCE.to_string(),
-            digest: valid_digest(),
-            registry_entry: None,
-        },
+        image: ImageRef::upstream(REFERENCE.to_string(), valid_digest()),
         env: BTreeMap::from([("GREETING".to_string(), "hello".to_string())]),
         ports: vec![PortRequest {
             container_port: 443,

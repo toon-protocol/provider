@@ -7,17 +7,17 @@ use serde_json::json;
 use toon_provider::nostr::directory_events::{
     EvictionContent, ListingContent, LivenessContent, ProfileContent, Settlement,
 };
-use toon_provider::nostr::kinds::K_LEASE_REQUEST;
+use toon_provider::nostr::image_events::{
+    blob_record_event, image_entry_event, template_event, BlobRecord, BlobRecordContent,
+    BlobSource, ImageEntry, ImageEntryContent, Template, TemplateContent,
+};
+use toon_provider::nostr::kinds::{K_BLOB, K_IMAGE, K_LEASE_REQUEST, K_TEMPLATE, TOON_LABEL};
 use toon_provider::nostr::wire::*;
 
 fn spawn_content() -> SpawnContent {
     SpawnContent {
         workload_id: "ab".repeat(32),
-        image: ImageRef {
-            reference: "docker.io/library/alpine".to_string(),
-            digest: format!("sha256:{}", "cd".repeat(32)),
-            registry_entry: None,
-        },
+        image: ImageRef::upstream("docker.io/library/alpine".to_string(), format!("sha256:{}", "cd".repeat(32))),
         env: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
         ports: vec![PortRequest {
             container_port: 443,
@@ -380,11 +380,7 @@ fn availability_request_round_trips_the_tickets_shape() {
     let request = AvailabilityRequest {
         listing: "basic".to_string(),
         version: 1,
-        image: ImageRef {
-            reference: "docker.io/library/alpine".to_string(),
-            digest: format!("sha256:{}", "cd".repeat(32)),
-            registry_entry: None,
-        },
+        image: ImageRef::upstream("docker.io/library/alpine".to_string(), format!("sha256:{}", "cd".repeat(32))),
     };
     let value = serde_json::to_value(&request).unwrap();
     assert_eq!(value["listing"], "basic");
@@ -405,11 +401,7 @@ fn an_unknown_availability_field_is_refused_at_parse() {
     let mut value = serde_json::to_value(AvailabilityRequest {
         listing: "basic".to_string(),
         version: 1,
-        image: ImageRef {
-            reference: "docker.io/library/alpine".to_string(),
-            digest: format!("sha256:{}", "cd".repeat(32)),
-            registry_entry: None,
-        },
+        image: ImageRef::upstream("docker.io/library/alpine".to_string(), format!("sha256:{}", "cd".repeat(32))),
     })
     .unwrap();
     value["image_digest"] = json!(format!("sha256:{}", "cd".repeat(32)));
@@ -582,4 +574,257 @@ fn an_unknown_field_in_a_directory_content_is_refused() {
         "gpu_hours_included": 5
     });
     assert!(serde_json::from_value::<ListingContent>(value).is_err());
+}
+
+// ── Milestone 2: the Image Registry entry, Blob Record and Template ──────────
+//
+// Round-trips are BYTE-IDENTICAL against a literal written from spec §8, not
+// against a value this file built the same way the code would: the JSON below
+// is the independent source of truth, and a field renamed, reordered or
+// dropped fails here.
+
+/// An Image Registry entry's content (spec §8.1) with one blob from the TOON
+/// store and one still upstream, as a publisher signs it.
+const IMAGE_ENTRY_CONTENT: &str = concat!(
+    r#"{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","#,
+    r#""media_type":"application/vnd.oci.image.index.v1+json","#,
+    r#""blobs":[{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","#,
+    r#""size":1234,"media_type":"application/vnd.oci.image.manifest.v1+json","#,
+    r#""source":{"type":"toon-store","blob_record_txid":"dGVzdC10eGlkLWZvci1hLWJsb2ItcmVjb3JkLTE"}},"#,
+    r#"{"digest":"sha256:3333333333333333333333333333333333333333333333333333333333333333","#,
+    r#""size":5678,"media_type":"application/vnd.oci.image.layer.v1.tar+gzip","#,
+    r#""source":{"type":"oci","registry":"registry-1.docker.io","repository":"library/alpine"}}]}"#,
+);
+
+/// A Blob Record's content (spec §8.2) with three ordered parts.
+const BLOB_RECORD_CONTENT: &str = concat!(
+    r#"{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","#,
+    r#""size":235520,"part_size":102400,"#,
+    r#""parts":[{"txid":"cGFydC1vbmU","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","size":102400},"#,
+    r#"{"txid":"cGFydC10d28","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size":102400},"#,
+    r#"{"txid":"cGFydC10aHJlZQ","sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","size":30720}]}"#,
+);
+
+/// A Template's content (spec §8.3), naming its image by digest and the
+/// Image Registry entry that lists the blobs.
+const TEMPLATE_CONTENT: &str = concat!(
+    r#"{"version":1,"#,
+    r#""image":{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","#,
+    r#""registry_entry":{"address":"30434:4444444444444444444444444444444444444444444444444444444444444444:web:1.0","#,
+    r#""relay":"wss://relay.example"}},"#,
+    r#""ports":[{"container_port":8080,"protocol":"tcp"}],"#,
+    r#""data_path":"/data","#,
+    r#""env_fixed":{"MODE":"production"},"#,
+    r#""env_tenant":["API_KEY","SEED"],"#,
+    r#""min_resources":{"cpu_millicores":500,"memory_mb":512,"storage_gb":4}}"#,
+);
+
+const ENTRY_DIGEST_HEX: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+const BLOB_DIGEST_HEX: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+
+fn publisher() -> nostr_sdk::Keys {
+    nostr_sdk::Keys::parse("4444444444444444444444444444444444444444444444444444444444444444")
+        .unwrap()
+}
+
+#[test]
+fn an_image_registry_entry_round_trips_both_source_types_byte_identically() {
+    let content: ImageEntryContent = serde_json::from_str(IMAGE_ENTRY_CONTENT).unwrap();
+    assert_eq!(content.blobs.len(), 2);
+    assert_eq!(
+        content.blobs[0].source,
+        BlobSource::ToonStore {
+            blob_record_txid: "dGVzdC10eGlkLWZvci1hLWJsb2ItcmVjb3JkLTE".to_string()
+        }
+    );
+    assert_eq!(
+        content.blobs[1].source,
+        BlobSource::Oci {
+            registry: "registry-1.docker.io".to_string(),
+            repository: "library/alpine".to_string(),
+        }
+    );
+    assert_eq!(serde_json::to_string(&content).unwrap(), IMAGE_ENTRY_CONTENT);
+}
+
+#[test]
+fn a_blob_record_round_trips_its_ordered_parts_byte_identically() {
+    let content: BlobRecordContent = serde_json::from_str(BLOB_RECORD_CONTENT).unwrap();
+    assert_eq!(content.part_size, 102_400);
+    assert_eq!(
+        content.parts.iter().map(|p| p.size).sum::<u64>(),
+        content.size,
+        "the parts cover the blob"
+    );
+    assert_eq!(
+        content.parts.iter().map(|p| p.txid.as_str()).collect::<Vec<_>>(),
+        ["cGFydC1vbmU", "cGFydC10d28", "cGFydC10aHJlZQ"],
+        "parts keep their order"
+    );
+    assert_eq!(serde_json::to_string(&content).unwrap(), BLOB_RECORD_CONTENT);
+}
+
+#[test]
+fn a_template_round_trips_byte_identically() {
+    let content: TemplateContent = serde_json::from_str(TEMPLATE_CONTENT).unwrap();
+    assert_eq!(content.env_tenant, ["API_KEY", "SEED"]);
+    assert_eq!(content.data_path.as_deref(), Some("/data"));
+    assert_eq!(serde_json::to_string(&content).unwrap(), TEMPLATE_CONTENT);
+}
+
+#[test]
+fn an_unknown_field_in_any_milestone_2_content_is_refused() {
+    // The same rule every other shape follows: an unknown field is refused,
+    // never dropped.
+    let with = |text: &str, key: &str| {
+        let mut value: serde_json::Value = serde_json::from_str(text).unwrap();
+        value[key] = json!("surprise");
+        value
+    };
+    assert!(
+        serde_json::from_value::<ImageEntryContent>(with(IMAGE_ENTRY_CONTENT, "signature")).is_err()
+    );
+    assert!(
+        serde_json::from_value::<BlobRecordContent>(with(BLOB_RECORD_CONTENT, "gateway")).is_err()
+    );
+    assert!(serde_json::from_value::<TemplateContent>(with(TEMPLATE_CONTENT, "privileged")).is_err());
+    let mut entry: serde_json::Value = serde_json::from_str(IMAGE_ENTRY_CONTENT).unwrap();
+    entry["blobs"][0]["source"]["gateway"] = json!("https://example");
+    assert!(
+        serde_json::from_value::<ImageEntryContent>(entry).is_err(),
+        "an unknown field inside a blob source too"
+    );
+    let mut source: serde_json::Value = serde_json::from_str(IMAGE_ENTRY_CONTENT).unwrap();
+    source["blobs"][0]["source"]["type"] = json!("lading");
+    assert!(
+        serde_json::from_value::<ImageEntryContent>(source).is_err(),
+        "and a source type this milestone does not define"
+    );
+}
+
+#[test]
+fn an_image_registry_entry_event_round_trips_through_its_builder_and_parser() {
+    let keys = publisher();
+    let content: ImageEntryContent = serde_json::from_str(IMAGE_ENTRY_CONTENT).unwrap();
+    let event = image_entry_event("web", "1.0", &content, &keys, 1_700_000_000).unwrap();
+
+    assert_eq!(event.kind.as_u16(), K_IMAGE);
+    assert_eq!(d_tag(&event), Some("web:1.0".to_string()));
+    assert_eq!(x_tag(&event), Some(ENTRY_DIGEST_HEX.to_string()));
+    assert!(carries_the_toon_label(&event));
+    assert_eq!(event.content, IMAGE_ENTRY_CONTENT);
+
+    let parsed = ImageEntry::from_event(&event).unwrap();
+    assert_eq!(parsed.publisher, keys.public_key());
+    assert_eq!(parsed.name, "web");
+    assert_eq!(parsed.tag, "1.0");
+    assert_eq!(parsed.content, content);
+    // Re-built from what the parser read: the same NIP-01 id, so every byte
+    // the id covers — pubkey, created_at, kind, tags and content — came back
+    // unchanged. Only `sig` differs, because signing draws fresh randomness.
+    assert_eq!(
+        image_entry_event(&parsed.name, &parsed.tag, &parsed.content, &keys, 1_700_000_000)
+            .unwrap()
+            .id,
+        event.id
+    );
+}
+
+#[test]
+fn a_blob_record_event_round_trips_through_its_builder_and_parser() {
+    let keys = publisher();
+    let content: BlobRecordContent = serde_json::from_str(BLOB_RECORD_CONTENT).unwrap();
+    let event = blob_record_event(&content, &keys, 1_700_000_000).unwrap();
+
+    assert_eq!(event.kind.as_u16(), K_BLOB);
+    assert_eq!(d_tag(&event), Some(format!("sha256:{}", BLOB_DIGEST_HEX)));
+    assert_eq!(x_tag(&event), Some(BLOB_DIGEST_HEX.to_string()));
+    assert!(carries_the_toon_label(&event));
+    assert_eq!(event.content, BLOB_RECORD_CONTENT);
+
+    let parsed = BlobRecord::from_event(&event).unwrap();
+    assert_eq!(parsed.publisher, keys.public_key());
+    assert_eq!(parsed.content, content);
+    assert_eq!(
+        blob_record_event(&parsed.content, &keys, 1_700_000_000).unwrap().id,
+        event.id
+    );
+}
+
+#[test]
+fn a_template_event_round_trips_through_its_builder_and_parser() {
+    let keys = publisher();
+    let content: TemplateContent = serde_json::from_str(TEMPLATE_CONTENT).unwrap();
+    let event = template_event("static-site", &content, &keys, 1_700_000_000).unwrap();
+
+    assert_eq!(event.kind.as_u16(), K_TEMPLATE);
+    assert_eq!(d_tag(&event), Some("static-site".to_string()));
+    assert!(carries_the_toon_label(&event));
+    assert_eq!(event.content, TEMPLATE_CONTENT);
+
+    let parsed = Template::from_event(&event).unwrap();
+    assert_eq!(parsed.publisher, keys.public_key());
+    assert_eq!(parsed.name, "static-site");
+    assert_eq!(parsed.content, content);
+    assert_eq!(
+        template_event(&parsed.name, &parsed.content, &keys, 1_700_000_000)
+            .unwrap()
+            .id,
+        event.id
+    );
+}
+
+#[test]
+fn a_parser_refuses_an_event_of_the_wrong_kind_or_with_a_mismatched_tag() {
+    let keys = publisher();
+    let content: ImageEntryContent = serde_json::from_str(IMAGE_ENTRY_CONTENT).unwrap();
+    let entry = image_entry_event("web", "1.0", &content, &keys, 1_700_000_000).unwrap();
+    let blob: BlobRecordContent = serde_json::from_str(BLOB_RECORD_CONTENT).unwrap();
+    let record = blob_record_event(&blob, &keys, 1_700_000_000).unwrap();
+
+    assert!(BlobRecord::from_event(&entry).is_err(), "wrong kind");
+    assert!(ImageEntry::from_event(&record).is_err(), "wrong kind");
+    assert!(
+        Template::from_event(&entry).is_err(),
+        "wrong kind, even though a Template's `d` has no shape of its own"
+    );
+
+    // An `x` tag that does not match the content's digest: a relay could
+    // serve this to a `#x` filter for a digest it does not describe.
+    let lying = nostr_sdk::EventBuilder::new(
+        nostr_sdk::Kind::Custom(K_BLOB),
+        record.content.clone(),
+    )
+    .tags([
+        nostr_sdk::Tag::identifier(format!("sha256:{}", BLOB_DIGEST_HEX)),
+        nostr_sdk::Tag::parse(["x", ENTRY_DIGEST_HEX]).unwrap(),
+    ])
+    .sign_with_keys(&keys)
+    .unwrap();
+    assert!(BlobRecord::from_event(&lying).is_err(), "x tag must match");
+}
+
+fn d_tag(event: &nostr_sdk::Event) -> Option<String> {
+    tag_value(event, "d")
+}
+
+fn x_tag(event: &nostr_sdk::Event) -> Option<String> {
+    tag_value(event, "x")
+}
+
+fn tag_value(event: &nostr_sdk::Event, name: &str) -> Option<String> {
+    event
+        .tags
+        .iter()
+        .map(nostr_sdk::Tag::as_slice)
+        .find(|cells| cells.first().map(String::as_str) == Some(name))
+        .and_then(|cells| cells.get(1).cloned())
+}
+
+fn carries_the_toon_label(event: &nostr_sdk::Event) -> bool {
+    event
+        .tags
+        .iter()
+        .map(nostr_sdk::Tag::as_slice)
+        .any(|cells| cells.first().map(String::as_str) == Some("L") && cells.get(1).map(String::as_str) == Some(TOON_LABEL))
 }
