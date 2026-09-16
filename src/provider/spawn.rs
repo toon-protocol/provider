@@ -15,10 +15,10 @@ use std::collections::HashMap;
 use tracing::{error, info, warn};
 
 use super::config::{Listing, MAX_PORTS_PER_WORKLOAD};
-use super::image_policy;
+use super::image_policy::{self, IMAGE_REGISTRY_NOT_RUNNABLE};
 use super::persistence::{count_live, persist_leases, LeaseRecord, LeaseState};
 use crate::compute::{container_name, ContainerConfig, PortMapping};
-use crate::nostr::image_events::{SpawnImage, IMAGE_REGISTRY_NOT_RESOLVED};
+use crate::nostr::image_events::SpawnImage;
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
     is_lower_hex, Access, ErrorCode, ErrorResponse, PortAccess, PortRequest, Role, SpawnContent,
@@ -104,6 +104,17 @@ pub async fn spawn(
         // fourth shape is `invalid_request` — and then whether this
         // provider will run it.
         let image = SpawnImage::parse(&content.image)?;
+        // An image named through the Image Registry resolves on
+        // `availability` but is not yet something this provider can RUN:
+        // refused here, before any relay or gateway is read and before
+        // capacity is counted, so a tenant is never billed for a
+        // resolution that ends in a workload that cannot start.
+        if matches!(image, SpawnImage::Registry { .. }) {
+            return Err(ErrorResponse::new(
+                ErrorCode::RefusedImage,
+                IMAGE_REGISTRY_NOT_RUNNABLE,
+            ));
+        }
         // Step 5 continued: the provider's own image policy — a deny list
         // and a size cap, resolved against the upstream registry. The same
         // check `availability` applies, so a positive `availability` answer
@@ -111,15 +122,22 @@ pub async fn spawn(
         // the lease-table lock across a network fetch; deliberately so, to
         // keep the same atomicity `workload_id_taken`/capacity/insert
         // already relied on, at the cost of serialising spawns behind an
-        // uncached image lookup (a repeat digest is served from
-        // `OciRegistry`'s in-memory cache without another fetch).
-        image_policy::check(&state.image_registry, &state.image_policy, &listing, &image).await?;
+        // uncached image lookup (a repeat digest is served from the
+        // fetcher's cache of verified blobs without another fetch).
+        image_policy::check(
+            &state.fetcher,
+            state.directory.as_ref(),
+            &state.image_policy,
+            &listing,
+            &image,
+        )
+        .await?;
         // Every form `image_policy::check` lets through names an upstream
         // repository to pull from, so this cannot fail; it is written as a
         // question rather than an `expect` so a future form that reaches
         // here refuses instead of panicking.
         pull = image.upstream_pull().ok_or_else(|| {
-            ErrorResponse::new(ErrorCode::RefusedImage, IMAGE_REGISTRY_NOT_RESOLVED)
+            ErrorResponse::new(ErrorCode::RefusedImage, IMAGE_REGISTRY_NOT_RUNNABLE)
         })?;
         let running = count_live(&leases, &listing.name);
         if running >= state.config.capacity_of(&listing.name) as usize {

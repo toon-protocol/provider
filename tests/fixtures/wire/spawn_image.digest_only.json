@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "digest_only",
-    "description": "Form 3: `{ digest }` alone. The blobs are found by Blob Record lookup on the provider's own Relay Set (§8.4 step 3), so anyone who knows a digest someone already uploaded can spawn it. Refused the same way as form 2, with the same message, and before capacity is counted or any container is created.",
+    "description": "Form 3: `{ digest }` alone. The blobs are found by Blob Record lookup on the provider's own Relay Set (§8.4 step 3), so anyone who knows a digest someone already uploaded can spawn it. Refused `refused_image` until this provider looks Blob Records up, on `availability` and on a spawn alike, before capacity is counted or any container is created.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "spawn_image"
   },
@@ -35,7 +35,7 @@
   },
   "response_body": {
     "error": "refused_image",
-    "message": "image: this provider does not yet resolve the Image Registry, so it cannot fetch an image named by digest alone or by a registry entry; name it with an upstream `reference` as well"
+    "message": "image: this provider does not yet look up Blob Records on its Relay Set, so it cannot fetch an image named by digest alone; name its Image Registry entry (`registry_entry`) or an upstream `reference` as well"
   },
   "response_status": 422,
   "route": "g.fixture.basic.v1.spawn",

@@ -265,6 +265,12 @@ pub struct FakeDirectory {
     /// When set, every publish is recorded but reports this relay as having
     /// refused — a Relay Set reached only in part.
     relay_always_refuses: Mutex<Option<String>>,
+    /// Image Registry entries `get_image_entry` answers with, as relays
+    /// holding them would: matched by kind, signer and `d`, newest first.
+    image_entries: Mutex<Vec<nostr_sdk::Event>>,
+    /// Every `(address, relay)` the provider asked for, in order — so a
+    /// test can see that a relay was (or was not) consulted.
+    entry_lookups: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeDirectory {
@@ -298,6 +304,18 @@ impl FakeDirectory {
     pub fn relay_always_refuses(&self, relay: &str) {
         *self.relay_always_refuses.lock().unwrap() = Some(relay.to_string());
     }
+
+    /// A relay holds this Image Registry entry (or any addressable event):
+    /// `get_image_entry` will answer with it for its own address.
+    pub fn seed_image_entry(&self, event: nostr_sdk::Event) {
+        self.image_entries.lock().unwrap().push(event);
+    }
+
+    /// Every `(address, relay)` the provider has asked `get_image_entry`
+    /// for, in order.
+    pub fn entry_lookups(&self) -> Vec<(String, String)> {
+        self.entry_lookups.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
@@ -327,5 +345,32 @@ impl Directory for FakeDirectory {
             .unwrap()
             .clone()
             .filter(|e| e.pubkey == provider))
+    }
+
+    async fn get_image_entry(
+        &self,
+        address: &str,
+        relay: &str,
+    ) -> Result<Option<nostr_sdk::Event>> {
+        self.entry_lookups
+            .lock()
+            .unwrap()
+            .push((address.to_string(), relay.to_string()));
+        let (kind, pubkey, d) = toon_provider::directory::parse_coordinate(address)?;
+        Ok(self
+            .image_entries
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                e.kind.as_u16() == kind
+                    && e.pubkey == pubkey
+                    && e.tags
+                        .find(nostr_sdk::TagKind::d())
+                        .and_then(|t| t.content())
+                        == Some(d.as_str())
+            })
+            .max_by_key(|e| e.created_at)
+            .cloned())
     }
 }

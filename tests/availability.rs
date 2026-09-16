@@ -409,9 +409,11 @@ async fn availability_never_calls_the_backend_across_every_outcome() {
 
 #[tokio::test]
 async fn an_image_registry_form_answers_refused_image_before_a_tenant_pays() {
-    // The whole point of the free route: a tenant naming an image by digest
-    // learns here that this provider cannot fetch it, instead of buying the
-    // same answer on `.spawn` (ADR 0003 — a refusal is still billed).
+    // The whole point of the free route: a tenant naming an image this
+    // provider cannot fetch learns it here, instead of buying the same
+    // answer on `.spawn` (ADR 0003 — a refusal is still billed). A bare
+    // digest is not resolved at all yet; a registry entry is resolved, and
+    // here the relay hinted at holds no such entry.
     let registry = common::stub_registry().await;
     let h = harness(
         vec![listing("basic", 1, 2, "amd64")],
@@ -424,12 +426,17 @@ async fn an_image_registry_form_answers_refused_image_before_a_tenant_pays() {
         "address": "30434:4444444444444444444444444444444444444444444444444444444444444444:web:1.0",
         "relay": "wss://relay.example",
     });
-    for (label, image) in [
+    for (label, image, expected) in [
         (
-            "digest with a registry entry",
+            "digest with a registry entry nobody published",
             json!({ "digest": valid_digest(), "registry_entry": entry }),
+            "no Image Registry entry",
         ),
-        ("digest alone", json!({ "digest": valid_digest() })),
+        (
+            "digest alone",
+            json!({ "digest": valid_digest() }),
+            "does not yet look up Blob Records",
+        ),
     ] {
         let body = json!({ "listing": "basic", "version": 1, "image": image });
         let (status, resp) = post(&h.app, body).await;
@@ -438,10 +445,7 @@ async fn an_image_registry_form_answers_refused_image_before_a_tenant_pays() {
         assert_eq!(resp["would_run"], false, "{}", label);
         assert_eq!(resp["error"], "refused_image", "{}", label);
         assert!(
-            resp["message"]
-                .as_str()
-                .unwrap()
-                .contains("does not yet resolve the Image Registry"),
+            resp["message"].as_str().unwrap().contains(expected),
             "{}: {}",
             label,
             resp

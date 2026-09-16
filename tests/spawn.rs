@@ -290,25 +290,27 @@ async fn a_standby_set_is_refused_this_milestone() {
 const ENTRY_ADDRESS: &str =
     "30434:4444444444444444444444444444444444444444444444444444444444444444:web:1.0";
 
-/// The two Image Registry forms of `image` (spec §6.2): digest with an entry
-/// to resolve it through, and digest alone.
-fn image_registry_forms() -> [(&'static str, ImageRef); 2] {
-    [
+#[tokio::test]
+async fn an_image_registry_form_is_refused_image_until_the_provider_can_run_it() {
+    // Not `invalid_request`: both forms are exactly what §6.2 allows, and a
+    // tenant that gets `invalid_request` would go and fix a request that is
+    // already correct. A registry entry resolves on `availability` but this
+    // provider cannot yet RUN what it resolves, and a bare digest is not
+    // resolved at all yet — either way the spawn is refused before any
+    // relay or gateway is read, so the tenant is not billed for a fetch.
+    let h = harness().await;
+    for (label, image, expected) in [
         (
             "digest with a registry entry",
             ImageRef::from_registry(digest(), ENTRY_ADDRESS, "wss://relay.example"),
+            "cannot yet run an image fetched through one",
         ),
-        ("digest alone", ImageRef::by_digest(digest())),
-    ]
-}
-
-#[tokio::test]
-async fn an_image_registry_form_is_refused_image_until_the_registry_is_resolved() {
-    // Not `invalid_request`: both forms are exactly what §6.2 allows, and a
-    // tenant that gets `invalid_request` would go and fix a request that is
-    // already correct. This provider simply cannot fetch those bytes yet.
-    let h = harness().await;
-    for (label, image) in image_registry_forms() {
+        (
+            "digest alone",
+            ImageRef::by_digest(digest()),
+            "does not yet look up Blob Records",
+        ),
+    ] {
         let content = SpawnContent {
             image,
             ..spawn_content(1)
@@ -323,10 +325,7 @@ async fn an_image_registry_form_is_refused_image_until_the_registry_is_resolved(
         );
         assert_eq!(error_of(&body), "refused_image", "{}", label);
         assert!(
-            body["message"]
-                .as_str()
-                .unwrap()
-                .contains("does not yet resolve the Image Registry"),
+            body["message"].as_str().unwrap().contains(expected),
             "{}: {}",
             label,
             body
@@ -334,7 +333,11 @@ async fn an_image_registry_form_is_refused_image_until_the_registry_is_resolved(
     }
     assert!(
         h.backend.calls().is_empty(),
-        "nothing was created for an image this provider cannot fetch"
+        "nothing was created for an image this provider cannot run"
+    );
+    assert!(
+        h.directory.entry_lookups().is_empty(),
+        "no relay was read for a spawn that was going to be refused anyway"
     );
 }
 

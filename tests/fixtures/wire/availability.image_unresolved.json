@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "image_unresolved",
-    "description": "Availability for an image named by digest alone. The free route runs the same §6.2 step 5 a paid spawn does, so a tenant learns that this provider cannot fetch the image BEFORE paying — the same `refused_image` and the same message `spawn_image.digest_only` was billed for.",
+    "description": "Availability for an image named by digest alone. The free route runs the same §6.2 step 5 a paid spawn does, so a tenant learns that this provider cannot fetch the image BEFORE paying — the same `refused_image` and the same message `spawn_image.digest_only` was billed for. (An image named with a `registry_entry` is resolved here instead, through its entry.)",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "availability"
   },
@@ -15,7 +15,7 @@
   },
   "response_body": {
     "error": "refused_image",
-    "message": "image: this provider does not yet resolve the Image Registry, so it cannot fetch an image named by digest alone or by a registry entry; name it with an upstream `reference` as well",
+    "message": "image: this provider does not yet look up Blob Records on its Relay Set, so it cannot fetch an image named by digest alone; name its Image Registry entry (`registry_entry`) or an upstream `reference` as well",
     "would_run": false
   },
   "response_status": 200,
