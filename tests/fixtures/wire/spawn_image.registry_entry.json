@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "registry_entry",
-    "description": "Form 2: `{ digest, registry_entry }`. The entry at `address` lists every blob and where its bytes are (§8.1); `relay` is a hint for finding it, not an authority — the entry is addressed by its signer. Refused `refused_image` until this provider resolves the Image Registry (§8.4): the request is exactly what the spec allows, so the code says the provider cannot fetch it, not that the tenant got it wrong.",
+    "description": "Form 2: `{ digest, registry_entry }`. The entry at `address` lists every blob and where its bytes are (§8.1); `relay` is a hint for finding it, not an authority — the entry is addressed by its signer. `availability` resolves this form through the entry (§8.4); a paid spawn is refused `refused_image` until this provider can run what it resolved, before any relay or gateway is read: the request is exactly what the spec allows, so the code says the provider cannot run it yet, not that the tenant got it wrong.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "spawn_image"
   },
@@ -39,7 +39,7 @@
   },
   "response_body": {
     "error": "refused_image",
-    "message": "image: this provider does not yet resolve the Image Registry, so it cannot fetch an image named by digest alone or by a registry entry; name it with an upstream `reference` as well"
+    "message": "image: this provider resolves an Image Registry entry on `availability` but cannot yet run an image fetched through one; name the image with an upstream `reference` to spawn it"
   },
   "response_status": 422,
   "route": "g.fixture.basic.v1.spawn",

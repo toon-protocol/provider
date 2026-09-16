@@ -1449,27 +1449,31 @@ async fn one_spawn_per_image_form() {
     golden("spawn_image.reference.json", doc);
 
     // Forms 2 and 3: the Image Registry forms. Well-formed and allowed by
-    // §6.2, and refused `refused_image` because this provider does not yet
-    // resolve §8.4 — never `invalid_request`, which would send a tenant off
-    // to fix a request that is already correct.
+    // §6.2, and refused `refused_image` on a paid spawn — never
+    // `invalid_request`, which would send a tenant off to fix a request
+    // that is already correct. Form 2 resolves on `availability` (§8.4)
+    // but this provider cannot yet run what it resolved; form 3 is not
+    // resolved yet at all.
     for (case, image, description) in [
         (
             "registry_entry",
             ImageRef::from_registry(valid_digest(), entry_address(), RELAY),
             "Form 2: `{ digest, registry_entry }`. The entry at `address` lists every blob \
              and where its bytes are (§8.1); `relay` is a hint for finding it, not an \
-             authority — the entry is addressed by its signer. Refused `refused_image` \
-             until this provider resolves the Image Registry (§8.4): the request is exactly \
-             what the spec allows, so the code says the provider cannot fetch it, not that \
-             the tenant got it wrong.",
+             authority — the entry is addressed by its signer. `availability` resolves \
+             this form through the entry (§8.4); a paid spawn is refused `refused_image` \
+             until this provider can run what it resolved, before any relay or gateway is \
+             read: the request is exactly what the spec allows, so the code says the \
+             provider cannot run it yet, not that the tenant got it wrong.",
         ),
         (
             "digest_only",
             ImageRef::by_digest(valid_digest()),
             "Form 3: `{ digest }` alone. The blobs are found by Blob Record lookup on the \
              provider's own Relay Set (§8.4 step 3), so anyone who knows a digest someone \
-             already uploaded can spawn it. Refused the same way as form 2, with the same \
-             message, and before capacity is counted or any container is created.",
+             already uploaded can spawn it. Refused `refused_image` until this provider \
+             looks Blob Records up, on `availability` and on a spawn alike, before \
+             capacity is counted or any container is created.",
         ),
     ] {
         let content = spawn_content_with(0xd2, image, None);
@@ -1509,7 +1513,8 @@ async fn one_spawn_per_image_form() {
             "Availability for an image named by digest alone. The free route runs the same \
              §6.2 step 5 a paid spawn does, so a tenant learns that this provider cannot \
              fetch the image BEFORE paying — the same `refused_image` and the same message \
-             `spawn_image.digest_only` was billed for.",
+             `spawn_image.digest_only` was billed for. (An image named with a \
+             `registry_entry` is resolved here instead, through its entry.)",
         ),
         &route("availability"),
         "/availability",
