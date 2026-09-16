@@ -101,6 +101,14 @@ ended_retention_s = 86400
 # exists, so a restart without it strands every paid workload.
 lease_state_path = "/var/lib/toon-provider/leases.json"
 
+# Where the TOON store's uploads are read from (spec §8.4): a Blob Record by
+# the txid of its own upload, and each of a blob's parts by its txid, with
+# `{txid}` standing for the id. Any Arweave gateway's `/raw/` path works;
+# the sandbox reads its local gateway. Unset, an image whose bytes are in
+# the TOON store is `refused_image` — this provider then serves only images
+# whose bytes are upstream.
+# gateway_url_pattern = "https://arweave.net/raw/{txid}"
+
 # What this provider's connector settles in, published in the Profile so a
 # tenant knows what it can pay with. `token` is a mint (Solana) or a contract
 # address (EVM); v1 prices everything in USDC at 6 decimals.
