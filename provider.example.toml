@@ -19,7 +19,11 @@ public_ip = "203.0.113.7"
 nostr_private_key = "nsec1..."
 
 # The Relay Set: every relay this provider publishes its Profile, Listings and
-# Liveness to, and the list the Profile itself carries.
+# Liveness to, and the list the Profile itself carries. It is ALSO what it
+# searches for Blob Records by digest (spec §8.4 step 3), which is how an
+# image named by `{ digest }` alone is resolved. Reads are free, so that
+# search needs no publish_url below — only relays; a provider with none
+# configured refuses every bare digest.
 relay_set = ["wss://relay.toon.network"]
 
 # ── The Provider Directory (spec §4) ─────────────────────────────────────────
@@ -106,7 +110,8 @@ lease_state_path = "/var/lib/toon-provider/leases.json"
 # `{txid}` standing for the id. Any Arweave gateway's `/raw/` path works;
 # the sandbox reads its local gateway. Unset, an image whose bytes are in
 # the TOON store is `refused_image` — this provider then serves only images
-# whose bytes are upstream.
+# whose bytes are upstream, whether the Blob Record came from an entry or
+# from the Relay Set.
 # gateway_url_pattern = "https://arweave.net/raw/{txid}"
 
 # Where verified image blobs are kept, by digest, across leases and restarts

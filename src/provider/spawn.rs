@@ -11,9 +11,10 @@
 // a tenant can rely on: the first reason is the one reported.
 //
 // Step 5 is the resolution `availability` also does (`image_policy::check`:
-// the entry, the index, the manifest for the listing's arch, its config).
-// For an image named through its Image Registry entry the bytes then have
-// to be FETCHED — every layer through the entry's sources, verified,
+// the entry if there is one, the index, the manifest for the listing's
+// arch, its config). For an image named by content address — through its
+// Image Registry entry or by digest alone — the bytes then have to be
+// FETCHED — every layer down §8.4's chain, verified,
 // cached, assembled into an OCI layout and loaded into the backend — and
 // that happens after the slot is reserved and outside the lease-table lock,
 // since a layer can take minutes and nothing else should wait on it. A
@@ -131,7 +132,7 @@ pub async fn spawn(
         image = SpawnImage::parse(&content.image)?;
         resolved = image_policy::check(
             &state.fetcher,
-            state.directory.as_ref(),
+            state.directory.clone(),
             &state.image_policy,
             &listing,
             &image,
@@ -281,9 +282,14 @@ pub async fn spawn(
     }
 }
 
-/// Fetch every layer of an image resolved through its Image Registry entry,
-/// assemble the verified blobs into an OCI layout and load it into the
-/// backend; answer the image id the backend runs it by (spec §8.4).
+/// Fetch every layer of an image whose bytes THIS PROVIDER holds — the two
+/// content-address forms, through an Image Registry entry or by digest
+/// alone — assemble the verified blobs into an OCI layout and load it into
+/// the backend; answer the image id the backend runs it by (spec §8.4).
+///
+/// Each layer goes down the same chain resolution came down, and down the
+/// same `BlobSources` value, so a Blob Record the Relay Set already
+/// answered for is not looked up twice.
 ///
 /// The manifest and the config are already in the cache — resolution put
 /// them there — so the layout is written straight out of the cache once
@@ -293,10 +299,7 @@ pub async fn spawn(
 /// the load.
 async fn materialise(state: &AppState, image: &ResolvedImage) -> Result<String, ErrorResponse> {
     for layer in image.layer_digests() {
-        state
-            .fetcher
-            .fetch(layer, &image.sources_for(layer)?)
-            .await?;
+        state.fetcher.fetch(layer, &image.sources).await?;
     }
 
     let cache = state.fetcher.cache().clone();

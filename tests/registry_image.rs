@@ -215,8 +215,10 @@ async fn an_entry_that_omits_a_blob_the_manifest_needs_is_refused_image() {
     let mut w = World::new().await;
     let config = config_bytes();
     let config_digest = w.store(&config, CONFIG, 64).await;
-    // The layer exists nowhere the entry knows of: the manifest names it
-    // and the entry does not list it.
+    // The layer exists nowhere at all: the manifest names it, the entry
+    // does not list it (§8.1 says it must) and no relay in this provider's
+    // Relay Set holds a Blob Record for it either. Refused on the free
+    // route, before a tenant pays to find out.
     let layer = layer_bytes(9);
     let layer_digest = digest_of(&layer);
     let manifest = manifest_bytes(
@@ -230,7 +232,16 @@ async fn an_entry_that_omits_a_blob_the_manifest_needs_is_refused_image() {
 
     let body = availability(&h, registry_image(&w, &manifest_digest)).await;
 
-    assert_refused(&body, &format!("does not list blob {}", layer_digest));
+    assert_refused(
+        &body,
+        &format!("no source is known for blob {}", layer_digest),
+    );
+    assert_refused(&body, "the Image Registry entry web:1.0 does not list it");
+    assert_eq!(
+        h.directory.blob_record_lookups(),
+        vec![layer_digest],
+        "the entry named no source for it, so the Relay Set was asked — and had none"
+    );
 }
 
 #[tokio::test]

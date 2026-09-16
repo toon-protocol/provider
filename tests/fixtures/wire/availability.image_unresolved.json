@@ -1,21 +1,21 @@
 {
   "fixture": {
     "case": "image_unresolved",
-    "description": "Availability for an image named by digest alone. The free route runs the same §6.2 step 5 a paid spawn does, so a tenant learns that this provider cannot fetch the image BEFORE paying — the same `refused_image` and the same message `spawn_image.digest_only` was billed for. (An image named with a `registry_entry` is resolved here instead, through its entry.)",
+    "description": "Availability for an image named by digest alone that this provider cannot resolve: no relay in its Relay Set holds a Blob Record for the digest, so there is nowhere for its bytes to come from. The free route runs the same §6.2 step 5 a paid spawn does — down the same chain, cache then the image's own sources then the Relay Set — so a tenant learns this BEFORE paying, instead of buying the identical `refused_image`. A digest the Relay Set does know is resolved and runs: `spawn_image.digest_only`.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "availability"
   },
   "http_path": "/availability",
   "request_body": {
     "image": {
-      "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126"
+      "digest": "sha256:7cebcc14f443bdea137b93d7e008b1312dab2998b46064c68f3846b18bed55d0"
     },
     "listing": "basic",
     "version": 1
   },
   "response_body": {
     "error": "refused_image",
-    "message": "image: this provider does not yet look up Blob Records on its Relay Set, so it cannot fetch an image named by digest alone; name its Image Registry entry (`registry_entry`) or an upstream `reference` as well",
+    "message": "no source is known for blob sha256:7cebcc14f443bdea137b93d7e008b1312dab2998b46064c68f3846b18bed55d0: the image was named by digest alone, so nothing names a source for it, and this provider's Relay Set holds no Blob Record for it",
     "would_run": false
   },
   "response_status": 200,

@@ -123,7 +123,7 @@ fn directory_from_config(config: &ProviderConfig) -> Result<Arc<dyn Directory>> 
             url.clone(),
             config.relay_set.clone(),
         )?)),
-        None => Ok(Arc::new(NullDirectory)),
+        None => Ok(Arc::new(NullDirectory::new(config.relay_set.clone()))),
     }
 }
 

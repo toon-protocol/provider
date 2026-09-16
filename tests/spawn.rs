@@ -296,9 +296,10 @@ async fn an_image_registry_form_this_provider_cannot_serve_is_refused_image() {
     // tenant that gets `invalid_request` would go and fix a request that is
     // already correct. A registry entry is resolved through the relay it
     // hints at (`tests/registry_spawn.rs` is where that succeeds); here the
-    // relay holds no such entry. A bare digest is not resolved at all yet.
-    // Either way the spawn is refused before capacity is counted and before
-    // any container is created.
+    // relay holds no such entry. A bare digest is resolved through Blob
+    // Records on this provider's Relay Set (`tests/bare_digest.rs`); here
+    // it holds none for it. Either way the spawn is refused before capacity
+    // is counted and before any container is created.
     let h = harness().await;
     for (label, image, expected) in [
         (
@@ -309,7 +310,7 @@ async fn an_image_registry_form_this_provider_cannot_serve_is_refused_image() {
         (
             "digest alone",
             ImageRef::by_digest(digest()),
-            "does not yet look up Blob Records",
+            "no source is known for blob",
         ),
     ] {
         let content = SpawnContent {

@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "digest_only",
-    "description": "Form 3: `{ digest }` alone. The blobs are found by Blob Record lookup on the provider's own Relay Set (§8.4 step 3), so anyone who knows a digest someone already uploaded can spawn it. Refused `refused_image` until this provider looks Blob Records up, on `availability` and on a spawn alike, before capacity is counted or any container is created.",
+    "description": "Form 3: `{ digest }` alone, and it runs. The image names no entry and no relay, so every blob — the manifest, the config and both layers — is found by asking this provider's own Relay Set for the Blob Records tagged `#x = <hex>`, whoever signed them (§8.4 step 3). Signers are not trusted: each part is checked against its recorded sha256 and size and each blob against the digest that was asked for, so a wrong record is discarded and the next is tried (ADR 0006). Anyone who knows a digest someone has uploaded can spawn it. Same success shape as forms 1 and 2.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "spawn_image"
   },
@@ -34,10 +34,21 @@
     }
   },
   "response_body": {
-    "error": "refused_image",
-    "message": "image: this provider does not yet look up Blob Records on its Relay Set, so it cannot fetch an image named by digest alone; name its Image Registry entry (`registry_entry`) or an upstream `reference` as well"
+    "access": {
+      "host": "203.0.113.7",
+      "ports": [
+        {
+          "container_port": 443,
+          "host_port": 41000
+        }
+      ],
+      "ssh_port": 40000
+    },
+    "expires_at": 1700003600,
+    "role": "standalone",
+    "workload_id": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3"
   },
-  "response_status": 422,
+  "response_status": 200,
   "route": "g.fixture.basic.v1.spawn",
   "spawn_content": {
     "args": [
@@ -62,6 +73,5 @@
     "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
     "volume_gb": 2,
     "workload_id": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3"
-  },
-  "validation_step": "§6.2 step 5: resolve the image (§8.4)"
+  }
 }

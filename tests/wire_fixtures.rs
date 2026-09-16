@@ -436,6 +436,12 @@ async fn fixture_provider(policy: ImagePolicyConfig, registry: MockServer) -> Fi
     // serve its bytes, whether or not a fixture goes on to ask for them.
     let directory = FakeDirectory::new();
     directory.seed_image_entry(image_entry());
+    // And its Relay Set holds a Blob Record for every blob of the image, as
+    // `#x` finds them — what `{ digest }` alone is resolved through (§8.4
+    // step 3).
+    for record in stored_blob_record_events() {
+        directory.seed_blob_record(record);
+    }
     let gateway = MockServer::start().await;
     mount_image_bytes(&gateway, &registry).await;
     let service = ProviderService::with_backend_clock_and_directory(
@@ -1245,6 +1251,13 @@ const CONFIG_RECORD_TXID: &str = "dG9vbi1zdG9yZS1jb25maWctcmVjb3Jk";
 const CONFIG_PART_TXIDS: [&str; 1] = ["dG9vbi1zdG9yZS1jb25maWctcGFydA"];
 const MANIFEST_RECORD_TXID: &str = "dG9vbi1zdG9yZS1tYW5pZmVzdC1yZWNvcmQ";
 const MANIFEST_PART_TXIDS: [&str; 1] = ["dG9vbi1zdG9yZS1tYW5pZmVzdC1wYXJ0"];
+/// The base layer is in the store TOO, though the entry cites its upstream
+/// registry instead (§8.1: a publisher pays for what exists nowhere else).
+/// Somebody else uploaded it and published the Blob Record, which is what
+/// makes the same image spawnable by `{ digest }` alone: §8.4 step 3 needs
+/// a record for EVERY blob, base layers included.
+const BASE_RECORD_TXID: &str = "dG9vbi1zdG9yZS1iYXNlLXJlY29yZA";
+const BASE_PART_TXIDS: [&str; 1] = ["dG9vbi1zdG9yZS1iYXNlLXBhcnQ"];
 
 fn publisher() -> Keys {
     keys(PUBLISHER_SECRET)
@@ -1379,7 +1392,34 @@ fn stored_blobs() -> Vec<(BlobRecordContent, &'static str, Vec<u8>)> {
             config_bytes(),
         ),
         (blob_record_content(), LAYER_RECORD_TXID, app_layer_bytes()),
+        (
+            blob_record_for(&base_layer_bytes(), &BASE_PART_TXIDS),
+            BASE_RECORD_TXID,
+            base_layer_bytes(),
+        ),
     ]
+}
+
+/// Every stored blob's Blob Record as its uploader published it: signed
+/// with zero aux randomness, so the one the gateway serves and the one a
+/// relay answers an `#x` lookup with are the same bytes.
+fn stored_blob_record_events() -> Vec<Event> {
+    stored_blobs()
+        .iter()
+        .map(|(record, ..)| {
+            with_reproducible_sig(
+                &blob_record_event(record, &publisher(), NOW).unwrap(),
+                &publisher(),
+            )
+        })
+        .collect()
+}
+
+/// A digest nobody has uploaded: no Blob Record on any relay, no entry
+/// listing it, no registry holding it. What `availability.image_unresolved`
+/// asks about.
+fn unstored_digest() -> String {
+    digest_of(b"an image nobody has ever uploaded")
 }
 
 fn image_entry_content() -> ImageEntryContent {
@@ -1442,11 +1482,9 @@ fn image_entry() -> Event {
 /// part at `/raw/<txid>`; and the upstream registry serving the base layer
 /// by digest.
 async fn mount_image_bytes(gateway: &MockServer, registry: &MockServer) {
-    for (record, record_txid, bytes) in stored_blobs() {
-        let event = with_reproducible_sig(
-            &blob_record_event(&record, &publisher(), NOW).unwrap(),
-            &publisher(),
-        );
+    for ((record, record_txid, bytes), event) in
+        stored_blobs().into_iter().zip(stored_blob_record_events())
+    {
         mount_raw(gateway, record_txid, serde_json::to_vec(&event).unwrap()).await;
         for (part, chunk) in record.parts.iter().zip(bytes.chunks(PART_SIZE as usize)) {
             mount_raw(gateway, &part.txid, chunk.to_vec()).await;
@@ -1667,63 +1705,67 @@ async fn one_spawn_per_image_form() {
     doc["spawn_content"] = content.clone();
     golden("spawn_image.registry_entry.json", doc);
 
-    // Form 3: `{ digest }` alone. Well-formed and allowed by §6.2, and
-    // refused `refused_image` on a paid spawn — never `invalid_request`,
-    // which would send a tenant off to fix a request that is already
-    // correct — because this provider does not resolve it yet.
+    // Form 3: `{ digest }` alone, and it RUNS — over a provider of its own,
+    // so that nothing is in the blob cache and the image really is resolved
+    // through the Relay Set rather than out of what form 2 left behind.
+    // The image is the same one; it names neither the entry nor the relay
+    // the entry is on.
+    let bare = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
     let content = spawn_content_with(0xd3, ImageRef::by_digest(image_digest()), None);
     let event = lease_request(
-        &f.tenant,
-        f.provider_pubkey(),
+        &bare.tenant,
+        bare.provider_pubkey(),
         "spawn",
         &content,
         NOW,
         NOW + TTL,
     );
     let (status, response, mut doc) = exchange(
-        &f,
+        &bare,
         (
             "spawn_image",
             "digest_only",
-            "Form 3: `{ digest }` alone. The blobs are found by Blob Record lookup on the \
-             provider's own Relay Set (§8.4 step 3), so anyone who knows a digest someone \
-             already uploaded can spawn it. Refused `refused_image` until this provider \
-             looks Blob Records up, on `availability` and on a spawn alike, before \
-             capacity is counted or any container is created.",
+            "Form 3: `{ digest }` alone, and it runs. The image names no entry and no \
+             relay, so every blob — the manifest, the config and both layers — is found \
+             by asking this provider's own Relay Set for the Blob Records tagged `#x = \
+             <hex>`, whoever signed them (§8.4 step 3). Signers are not trusted: each \
+             part is checked against its recorded sha256 and size and each blob against \
+             the digest that was asked for, so a wrong record is discarded and the next \
+             is tried (ADR 0006). Anyone who knows a digest someone has uploaded can \
+             spawn it. Same success shape as forms 1 and 2.",
         ),
         &spawn_route,
         spawn_path,
         envelope(&event),
     )
     .await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", response);
-    assert_eq!(error_of(&response), "refused_image");
+    assert_eq!(status, StatusCode::OK, "{}", response);
     doc["image"] = content["image"].clone();
     doc["spawn_content"] = content.clone();
-    golden(
-        "spawn_image.digest_only.json",
-        with_validation_step(doc, "§6.2 step 5: resolve the image (§8.4)"),
-    );
+    golden("spawn_image.digest_only.json", doc);
 
-    // The same refusal on the free route, which is where a tenant should
-    // meet it: `availability` answers it for nothing, a spawn bills for it.
+    // What a bare digest is refused for is a blob nothing can serve — and
+    // the free route is where a tenant should meet that: `availability`
+    // answers it for nothing, a spawn bills for it (ADR 0003).
     let (status, response, doc) = exchange(
-        &f,
+        &bare,
         (
             "availability",
             "image_unresolved",
-            "Availability for an image named by digest alone. The free route runs the same \
-             §6.2 step 5 a paid spawn does, so a tenant learns that this provider cannot \
-             fetch the image BEFORE paying — the same `refused_image` and the same message \
-             `spawn_image.digest_only` was billed for. (An image named with a \
-             `registry_entry` is resolved here instead, through its entry.)",
+            "Availability for an image named by digest alone that this provider cannot \
+             resolve: no relay in its Relay Set holds a Blob Record for the digest, so \
+             there is nowhere for its bytes to come from. The free route runs the same \
+             §6.2 step 5 a paid spawn does — down the same chain, cache then the image's \
+             own sources then the Relay Set — so a tenant learns this BEFORE paying, \
+             instead of buying the identical `refused_image`. A digest the Relay Set does \
+             know is resolved and runs: `spawn_image.digest_only`.",
         ),
         &route("availability"),
         "/availability",
         json!({
             "listing": "basic",
             "version": 1,
-            "image": ImageRef::by_digest(image_digest()),
+            "image": ImageRef::by_digest(unstored_digest()),
         }),
     )
     .await;

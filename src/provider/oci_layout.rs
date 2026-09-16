@@ -83,7 +83,7 @@ fn append_data<W: std::io::Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::fetcher::hex_sha256;
+    use crate::provider::fetcher::{hex_sha256, BlobSources};
     use std::collections::BTreeMap;
     use std::io::Read;
 
@@ -115,7 +115,7 @@ mod tests {
             manifest_digest: digest_of(&manifest_bytes),
             size_bytes: 0,
             manifest,
-            entry: None,
+            sources: BlobSources::nowhere(),
         };
         let out = dir.path().join("image.tar");
 
@@ -158,7 +158,7 @@ mod tests {
             manifest_digest: digest_of(b"never cached"),
             size_bytes: 0,
             manifest: json!({}),
-            entry: None,
+            sources: BlobSources::nowhere(),
         };
         let err = write_layout_tar(&cache, &image, &dir.path().join("image.tar")).unwrap_err();
         assert!(

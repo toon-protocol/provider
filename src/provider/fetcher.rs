@@ -5,11 +5,22 @@
 // manifest, a config, a layer — and wherever it lives:
 //
 // 1. the local cache;
-// 2. each candidate source in order, stopping at the first whose bytes hash
-//    to the digest that was asked for; a source that fails — unreachable,
-//    a part that does not hash to its recorded sha256, a whole blob that
-//    does not hash to its digest — is logged and the next is tried;
-// 3. exhaustion is `refused_image`.
+// 2. the source the IMAGE'S OWN DESCRIPTION names for that blob — the
+//    spawn's Image Registry entry, or Milestone 1's upstream reference;
+// 3. the Blob Records the provider's Relay Set holds for the digest, found
+//    by `#x` whoever signed them (`Directory::find_blob_records`);
+// 4. exhaustion is `refused_image`.
+//
+// It stops at the first source whose bytes hash to the digest that was
+// asked for; a source that fails — unreachable, a part that does not hash
+// to its recorded sha256, a whole blob that does not hash to its digest —
+// is logged and the next is tried. Fallthrough is PER BLOB: a gateway that
+// is down for one layer costs that layer its source, not the spawn, and a
+// blob already verified is never fetched again.
+//
+// Step 3 is taken LAZILY, and only for the blob that needs it: an image
+// whose blobs are all cached contacts no relay and no gateway, and one
+// whose entry describes every blob never asks the Relay Set at all.
 //
 // A `toon-store` source is a Blob Record: fetched by the txid of the
 // record's own upload from the gateway URL pattern the provider is
@@ -24,9 +35,10 @@
 // outliving every lease and every restart, so a popular layer is fetched
 // once. A blob that cannot be kept because the disk (or the configured cap)
 // is full is `no_capacity`, the spec's word for a provider that has run out
-// of room. What this leaves for the next ticket is the Relay Set lookup
-// that supplies `Candidate::BlobRecord`s for a bare digest.
+// of room.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -37,7 +49,8 @@ use tracing::warn;
 
 use super::blob_cache::{BlobCache, CacheError};
 use super::oci::{OciClient, OciEndpoint};
-use crate::nostr::image_events::{BlobRecord, BlobRecordContent, BlobSource};
+use crate::directory::Directory;
+use crate::nostr::image_events::{BlobRecord, BlobRecordContent, BlobSource, ImageEntry};
 use crate::nostr::wire::{ErrorCode, ErrorResponse};
 
 /// The placeholder a `gateway_url_pattern` must contain, replaced by the
@@ -99,6 +112,221 @@ impl Candidate {
     }
 }
 
+/// The §8.4 source chain for the blobs of ONE image: what the image's own
+/// description names for a blob (step 2), and the Blob Records the Relay
+/// Set holds for it (step 3). The cache — step 1 — is the fetcher's, since
+/// it is shared by every image.
+///
+/// The two steps are separate methods rather than one list because step 3
+/// costs a relay round trip: `named` is free and answered from memory,
+/// `discovered` is only awaited once everything cheaper has failed. Within
+/// one image a digest is looked up at most once however many times it is
+/// asked for, so resolving an image and then fetching its layers does not
+/// ask the Relay Set twice for the same blob.
+///
+/// Cloning is cheap and SHARES the memo: a clone handed to a spawn's fetch
+/// of the layers reuses what resolution already found.
+#[derive(Clone)]
+pub struct BlobSources {
+    describes: Description,
+    /// The Relay Set to search for Blob Records — `None` when §8.4 step 3
+    /// does not apply to this image at all: Milestone 1's `reference` form,
+    /// which §6.2 gives "No Image Registry lookup at all", and an image
+    /// nothing describes and no relay is asked about.
+    directory: Option<Arc<dyn Directory>>,
+    /// Blob Records found on the Relay Set, by digest. Absent for a digest
+    /// nobody has asked about yet.
+    found: Arc<Mutex<HashMap<String, Vec<Candidate>>>>,
+}
+
+impl std::fmt::Debug for BlobSources {
+    /// Written by hand only because `Arc<dyn Directory>` has none, and
+    /// `ResolvedImage` — which carries one of these — derives `Debug`. What
+    /// it prints is the part a reader would want: which form named the
+    /// image, not the port behind it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.describes {
+            Description::Upstream {
+                registry,
+                repository,
+            } => write!(f, "BlobSources(upstream {}/{})", registry, repository),
+            Description::Entry(entry) => {
+                write!(f, "BlobSources(entry {}:{})", entry.name, entry.tag)
+            }
+            Description::Nothing => write!(f, "BlobSources(Relay Set only)"),
+        }
+    }
+}
+
+/// What the image's own description says, which is one of the three forms
+/// §6.2 allows.
+#[derive(Clone)]
+enum Description {
+    /// `{ reference, digest }`: the repository the tenant named serves the
+    /// image's manifests. Its layers are the backend's to pull.
+    Upstream {
+        registry: String,
+        repository: String,
+    },
+    /// `{ digest, registry_entry }`: the entry names one source per blob
+    /// (§8.1). A blob it does not list is not an error here — the Relay Set
+    /// is asked for it next, like any other blob nothing nearer serves.
+    Entry(Box<ImageEntry>),
+    /// `{ digest }` alone: nothing is named, so every blob is found by `#x`
+    /// on the Relay Set.
+    Nothing,
+}
+
+impl BlobSources {
+    /// Milestone 1's form: one upstream repository for the whole image, and
+    /// NO Relay Set. That is §6.2's own word for it — "No Image Registry
+    /// lookup at all" — so a registry that will not serve a blob of it is
+    /// the end of the chain, not the start of a search for someone else's
+    /// copy.
+    pub fn upstream(registry: impl Into<String>, repository: impl Into<String>) -> Self {
+        Self::with(
+            Description::Upstream {
+                registry: registry.into(),
+                repository: repository.into(),
+            },
+            None,
+        )
+    }
+
+    /// The form that names an Image Registry entry.
+    pub fn entry(entry: ImageEntry, directory: Arc<dyn Directory>) -> Self {
+        Self::with(Description::Entry(Box::new(entry)), Some(directory))
+    }
+
+    /// `{ digest }` alone: the Relay Set is the only source.
+    pub fn relay_set(directory: Arc<dyn Directory>) -> Self {
+        Self::with(Description::Nothing, Some(directory))
+    }
+
+    /// Sources for an image nothing describes and no relay is asked about:
+    /// what a caller that only reads the cache hands in.
+    pub fn nowhere() -> Self {
+        Self::with(Description::Nothing, None)
+    }
+
+    fn with(describes: Description, directory: Option<Arc<dyn Directory>>) -> Self {
+        Self {
+            describes,
+            directory,
+            found: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// §8.4 step 2: what the image's own description names for `digest`.
+    /// Empty when it names nothing for it — a bare digest, or an entry that
+    /// does not list the blob.
+    pub fn named(&self, digest: &str) -> Vec<Candidate> {
+        match &self.describes {
+            Description::Upstream {
+                registry,
+                repository,
+            } => vec![Candidate::Oci {
+                registry: registry.clone(),
+                repository: repository.clone(),
+                endpoint: OciEndpoint::Manifests,
+            }],
+            Description::Entry(entry) => entry
+                .content
+                .blobs
+                .iter()
+                .find(|blob| blob.digest == digest)
+                .map(|blob| vec![Candidate::from_entry_source(&blob.source, &blob.media_type)])
+                .unwrap_or_default(),
+            Description::Nothing => Vec::new(),
+        }
+    }
+
+    /// Why nothing could serve `digest`, in the terms of the form that
+    /// named the image: an entry that should have listed the blob (§8.1) is
+    /// a different mistake from a bare digest nobody has uploaded every
+    /// blob of, and a tenant can only act on the difference.
+    pub fn no_source_message(&self, digest: &str) -> String {
+        let why = match &self.describes {
+            Description::Upstream {
+                registry,
+                repository,
+            } => format!("{}/{} does not serve it", registry, repository),
+            Description::Entry(entry) => format!(
+                "the Image Registry entry {}:{} does not list it",
+                entry.name, entry.tag
+            ),
+            Description::Nothing => {
+                "the image was named by digest alone, so nothing names a source for it".to_string()
+            }
+        };
+        let relay_set = match &self.directory {
+            Some(_) => ", and this provider's Relay Set holds no Blob Record for it",
+            None => "",
+        };
+        format!(
+            "no source is known for blob {}: {}{}",
+            digest, why, relay_set
+        )
+    }
+
+    /// §8.4 step 3: the Blob Records the Relay Set holds for `digest`, as
+    /// candidates. Looked up once per digest per image; a relay that cannot
+    /// be reached is logged and counts as "none", because a source that
+    /// cannot answer is a source that did not serve.
+    ///
+    /// A record whose content describes another blob is dropped here rather
+    /// than tried: a relay is free to answer an `#x` filter with anything,
+    /// and `BlobRecord::from_event` only proves the record is
+    /// self-consistent, not that it is about the blob that was asked for.
+    /// Nothing else about a record is judged — not its signer, not its
+    /// publisher — because the parts and the blob are checked by hash.
+    pub async fn discovered(&self, digest: &str) -> Vec<Candidate> {
+        let Some(directory) = &self.directory else {
+            return Vec::new();
+        };
+        if let Some(found) = self.found.lock().unwrap().get(digest) {
+            return found.clone();
+        }
+        let events = match directory.find_blob_records(digest).await {
+            Ok(events) => events,
+            Err(e) => {
+                warn!(
+                    "the Relay Set could not be searched for Blob Records of {}: {:#}",
+                    digest, e
+                );
+                Vec::new()
+            }
+        };
+        let candidates: Vec<Candidate> = events
+            .iter()
+            .filter_map(|event| match BlobRecord::from_event(event) {
+                Ok(record) if record.content.digest == digest => {
+                    Some(Candidate::BlobRecord(record.content))
+                }
+                Ok(record) => {
+                    warn!(
+                        "a Blob Record found for {} describes {} instead",
+                        digest, record.content.digest
+                    );
+                    None
+                }
+                Err(e) => {
+                    warn!(
+                        "an event found for {} is not a readable Blob Record: {:#}",
+                        digest, e
+                    );
+                    None
+                }
+            })
+            .collect();
+        self.found
+            .lock()
+            .unwrap()
+            .insert(digest.to_string(), candidates.clone());
+        candidates
+    }
+}
+
 /// One provider-wide fetcher, shared by `availability` and every spawn
 /// (`AppState`). Holds the HTTP client, the registry client, the gateway
 /// pattern and the cache of verified blobs.
@@ -140,41 +368,40 @@ impl BlobFetcher {
         &self.cache
     }
 
-    /// The verified bytes of `digest`: from the cache, or from the first
-    /// candidate whose bytes hash to it, which are then cached.
-    /// `refused_image` when none does, naming every source that was tried
-    /// and why it failed; `no_capacity` when the bytes were found but the
-    /// cache has no room for them.
-    pub async fn fetch(
-        &self,
-        digest: &str,
-        candidates: &[Candidate],
-    ) -> Result<Bytes, ErrorResponse> {
+    /// The verified bytes of `digest`, down the whole of §8.4: the cache,
+    /// then the source the image's description names, then the Relay Set's
+    /// Blob Records — stopping at the first whose bytes hash to `digest`,
+    /// which are then cached. `refused_image` when none does, naming every
+    /// source that was tried and why it failed; `no_capacity` when the
+    /// bytes were found but the cache has no room for them.
+    ///
+    /// The Relay Set is only asked once the cache and the named source have
+    /// failed, so a blob already on disk costs no network at all.
+    pub async fn fetch(&self, digest: &str, sources: &BlobSources) -> Result<Bytes, ErrorResponse> {
         if let Some(cached) = self.cache.get(digest).await {
             return Ok(cached);
         }
         let mut failures = Vec::new();
-        for candidate in candidates {
-            match self.fetch_from(digest, candidate).await {
-                Ok(bytes) => {
-                    self.keep(digest, &bytes).await?;
-                    return Ok(bytes);
-                }
-                Err(e) => {
-                    warn!(
-                        "blob {} could not be served by {}: {:#}",
-                        digest,
-                        candidate.describe(),
-                        e
-                    );
-                    failures.push(format!("{}: {:#}", candidate.describe(), e));
-                }
+        for candidate in sources.named(digest) {
+            if let Some(bytes) = self
+                .try_candidate(digest, &candidate, &mut failures)
+                .await?
+            {
+                return Ok(bytes);
+            }
+        }
+        for candidate in sources.discovered(digest).await {
+            if let Some(bytes) = self
+                .try_candidate(digest, &candidate, &mut failures)
+                .await?
+            {
+                return Ok(bytes);
             }
         }
         Err(ErrorResponse::new(
             ErrorCode::RefusedImage,
             if failures.is_empty() {
-                format!("no source is known for blob {}", digest)
+                sources.no_source_message(digest)
             } else {
                 format!(
                     "no source could serve blob {} ({})",
@@ -183,6 +410,50 @@ impl BlobFetcher {
                 )
             },
         ))
+    }
+
+    /// Whether some source could serve `digest`, WITHOUT fetching it: it is
+    /// in the cache, or the image names a source for it, or the Relay Set
+    /// holds a Blob Record for it.
+    ///
+    /// This is what lets `availability` refuse an image with a layer
+    /// nothing can serve for free (§6.4) instead of leaving a tenant to buy
+    /// the discovery. It is the same chain in the same order, so it asks
+    /// the Relay Set only about blobs the cache and the image's own
+    /// description do not account for — and the answer is memoised, so the
+    /// paid fetch that follows does not ask again.
+    pub async fn can_serve(&self, digest: &str, sources: &BlobSources) -> bool {
+        self.cache.contains(digest)
+            || !sources.named(digest).is_empty()
+            || !sources.discovered(digest).await.is_empty()
+    }
+
+    /// One candidate: `Some(bytes)` if it served, `None` (with the failure
+    /// recorded) if it did not, and `Err` only for a failure that is not
+    /// the candidate's fault — a cache with no room, which no other source
+    /// would fix.
+    async fn try_candidate(
+        &self,
+        digest: &str,
+        candidate: &Candidate,
+        failures: &mut Vec<String>,
+    ) -> Result<Option<Bytes>, ErrorResponse> {
+        match self.fetch_from(digest, candidate).await {
+            Ok(bytes) => {
+                self.keep(digest, &bytes).await?;
+                Ok(Some(bytes))
+            }
+            Err(e) => {
+                warn!(
+                    "blob {} could not be served by {}: {:#}",
+                    digest,
+                    candidate.describe(),
+                    e
+                );
+                failures.push(format!("{}: {:#}", candidate.describe(), e));
+                Ok(None)
+            }
+        }
     }
 
     /// Cache verified bytes. A cache that cannot take them is an answer,
