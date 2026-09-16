@@ -29,7 +29,9 @@ use nostr_sdk::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, TagKind, Timest
 use serde::{Deserialize, Serialize};
 
 use super::kinds::{K_BLOB, K_IMAGE, K_TEMPLATE, TOON_LABEL};
-use super::wire::{ErrorCode, ErrorResponse, ImageRef, PortRequest, RegistryEntryRef, Resources};
+use super::wire::{
+    is_lower_hex, ErrorCode, ErrorResponse, ImageRef, PortRequest, RegistryEntryRef, Resources,
+};
 
 // ── Image Registry entry (spec §8.1) ─────────────────────────────────────────
 
@@ -454,13 +456,6 @@ pub fn is_sha256_digest(digest: &str) -> bool {
     digest
         .strip_prefix("sha256:")
         .is_some_and(|hex| is_lower_hex(hex, 64))
-}
-
-/// Exactly `len` lowercase hex characters.
-fn is_lower_hex(s: &str, len: usize) -> bool {
-    s.len() == len
-        && s.chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
 }
 
 /// `[registry[:port]/]repo[/path…]` in the character set OCI references

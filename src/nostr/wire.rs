@@ -61,6 +61,15 @@ pub struct PortRequest {
     pub protocol: Protocol,
 }
 
+/// Exactly `len` lowercase hex characters: the one shape check a workload
+/// id (64 of them) and a digest's hex (also 64) share, so there is one
+/// answer to "is this hex?" rather than one per caller.
+pub fn is_lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len
+        && s.chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+}
+
 /// The Image Registry entry a spawn or a Template points at: the NIP-01
 /// coordinate `30434:<publisher pubkey>:<name>:<tag>` and a relay to look it
 /// up on (spec §6.2, §8.3).

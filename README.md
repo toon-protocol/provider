@@ -414,9 +414,10 @@ always answers HTTP 200 — the answer *is* the payload:
 
 It applies, in order: the listing version exists (`wrong_listing_version`),
 the image — its form first, then the image policy below (`invalid_request` /
-`refused_image` / `no_matching_arch`) — and capacity (`no_capacity`). A paid spawn applies the identical image-policy check at the
-same point in its own validation order (§6.2 step 5, between
-`workload_id_taken` and `no_capacity`), so a positive `availability` answer
+`refused_image` / `no_matching_arch`) — and capacity (`no_capacity`). A paid
+spawn applies the identical image-policy check at the same point in its own
+validation order (§6.2 step 5, between `workload_id_taken` and
+`no_capacity`), so a positive `availability` answer
 and a spawn's outcome never disagree, and `availability` never calls the
 compute backend.
 

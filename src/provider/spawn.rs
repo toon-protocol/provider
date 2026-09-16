@@ -21,7 +21,8 @@ use crate::compute::{container_name, ContainerConfig, PortMapping};
 use crate::nostr::image_events::{SpawnImage, IMAGE_REGISTRY_NOT_RESOLVED};
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
-    Access, ErrorCode, ErrorResponse, PortAccess, PortRequest, Role, SpawnContent, SpawnResponse,
+    is_lower_hex, Access, ErrorCode, ErrorResponse, PortAccess, PortRequest, Role, SpawnContent,
+    SpawnResponse,
 };
 use crate::provider_http::AppState;
 
@@ -317,14 +318,6 @@ fn check_ports(ports: &[PortRequest]) -> Result<(), ErrorResponse> {
         }
     }
     Ok(())
-}
-
-/// Exactly `len` lowercase hex characters: the shape of a workload id and
-/// of a digest's hex.
-fn is_lower_hex(s: &str, len: usize) -> bool {
-    s.len() == len
-        && s.chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
 }
 
 fn looks_like_ssh_public_key(key: &str) -> bool {
