@@ -66,7 +66,11 @@ fn listing(name: &str, version: u32, capacity: u32) -> Listing {
         arch: "amd64".to_string(),
         lease_interval_s: INTERVAL,
         price: 1000,
-        capabilities: vec!["docker".to_string()],
+        // An `x-` capability, not `docker`: this backend refuses to publish a
+        // grant of `docker` or `nesting` at all until it supplies one (spec
+        // §4.4, `capabilities::grant_refusal`), and what this file tests is the
+        // `t` tag, which is the same either way.
+        capabilities: vec!["x-ci-sandbox".to_string()],
         capacity,
     }
 }
@@ -220,7 +224,7 @@ async fn one_listing_event_per_configured_listing() {
 async fn a_listing_names_its_tier_its_profile_and_everything_a_relay_filters_on() {
     let mut tier = listing("basic", 3, 4);
     tier.resources.gpu = Some("rtx4090".to_string());
-    tier.capabilities = vec!["docker".to_string(), "nesting".to_string()];
+    tier.capabilities = vec!["x-ci-sandbox".to_string(), "x-lxc".to_string()];
     let h = harness_with(vec![tier]).await;
     h.service.publish_directory().await.unwrap();
 
@@ -247,8 +251,8 @@ async fn a_listing_names_its_tier_its_profile_and_everything_a_relay_filters_on(
     ));
     assert!(has_tag(event, &["l", "arch:amd64", TOON_LABEL]));
     assert!(has_tag(event, &["l", "gpu:rtx4090", TOON_LABEL]));
-    assert!(has_tag(event, &["t", "docker"]));
-    assert!(has_tag(event, &["t", "nesting"]));
+    assert!(has_tag(event, &["t", "x-ci-sandbox"]));
+    assert!(has_tag(event, &["t", "x-lxc"]));
     assert!(has_tag(event, &["g", "u4pruy"]));
 
     // Numbers stay in content; a relay cannot filter on them anyway.
@@ -257,7 +261,7 @@ async fn a_listing_names_its_tier_its_profile_and_everything_a_relay_filters_on(
     assert_eq!(content.arch, "amd64");
     assert_eq!(content.lease_interval_s, INTERVAL);
     assert_eq!(content.price, 1000);
-    assert_eq!(content.capabilities, vec!["docker", "nesting"]);
+    assert_eq!(content.capabilities, vec!["x-ci-sandbox", "x-lxc"]);
     assert_eq!(content.resources.cpu_millicores, 500);
     assert_eq!(content.resources.memory_mb, 256);
     assert_eq!(content.resources.storage_gb, 4);

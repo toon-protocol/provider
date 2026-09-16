@@ -3,6 +3,23 @@
 // No state is persisted here: the container's existence on the host IS the
 // state, and `find_available_id` scans for `toon-<n>`. The lease that pays for
 // it is bookkeeping the provider keeps separately (`provider::persistence`).
+//
+// CAPABILITIES (spec §4.4). This backend grants none, and `run_args` is the
+// whole reason: a workload gets a name, CPU and memory limits, its port
+// forwards, its environment and a NAMED VOLUME — never `--privileged`, never a
+// `--device`, and never a host path. In particular the daemon socket this
+// backend itself drives is on the provider's side of the workload boundary and
+// is never mounted into a workload; a provider that did mount it would be
+// handing one tenant every other tenant's containers.
+//
+// So `docker` is not deliverable here yet: it obliges the provider to run a
+// daemon of the LEASE'S OWN at /var/run/docker.sock — the reference shape is a
+// per-lease `dind` sidecar sharing a private network with the workload —
+// accounted, with everything it runs, against the listing's `resources`.
+// `capabilities::grant_refusal` refuses the grant at config load until that
+// exists, so no listing published from this backend carries a `t` tag it
+// cannot honour. `nesting` is refused for the same reason: it would mean
+// tenant code holding kernel privileges this backend never hands out.
 
 use std::process::Stdio;
 
@@ -285,6 +302,73 @@ mod tests {
             &["sleep".to_string(), "300".to_string()]
         );
         assert!(args[..image_at].contains(&"--entrypoint".to_string()));
+    }
+
+    #[test]
+    fn the_workload_argv_never_exposes_the_host_daemon_or_any_privilege() {
+        // Spec §4.4: the provider MUST NOT expose the daemon it runs its own
+        // workloads with — not by bind-mounting its socket, not through a
+        // device, not over TCP. Asserted on the argv rather than by reading
+        // the code, because this is the line a future capability ticket is
+        // most likely to cross by accident.
+        let cfg = ContainerConfig {
+            id: 42,
+            name: "toon-42".to_string(),
+            image: "alpine:latest".to_string(),
+            cpu_millicores: 1500,
+            memory_mb: 256,
+            storage_gb: 1,
+            ssh_key: Some("ssh-ed25519 AAAA tenant".to_string()),
+            host_port: Some(30042),
+            ports: vec![],
+            env: std::collections::HashMap::from([("FOO".to_string(), "bar".to_string())]),
+            entrypoint: None,
+            args: vec![],
+            data_path: Some("/data".to_string()),
+        };
+
+        let args = DockerBackend::with_network("toon-net").run_args(&cfg);
+
+        for arg in &args {
+            assert!(
+                !arg.contains("docker.sock"),
+                "the host daemon's socket is never a workload's: {}",
+                arg
+            );
+            assert!(
+                !arg.contains("/var/run"),
+                "nothing of the host's runtime dir reaches a workload: {}",
+                arg
+            );
+            assert!(
+                !arg.starts_with("DOCKER_HOST="),
+                "no workload is pointed at a daemon it was not given: {}",
+                arg
+            );
+        }
+        for flag in [
+            "--privileged",
+            "--device",
+            "--cap-add",
+            "--pid",
+            "--userns",
+            "--security-opt",
+        ] {
+            assert!(
+                !args.iter().any(|a| a == flag),
+                "{} is a privilege no listing on this backend grants",
+                flag
+            );
+        }
+        // The only mount is the lease's own named volume, never a host path.
+        let mounts: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i > 0 && args[i - 1] == "-v")
+            .map(|(_, a)| a)
+            .collect();
+        assert_eq!(mounts, vec![&"toon-42-data:/data".to_string()]);
+        assert!(!mounts.iter().any(|m| m.starts_with('/')));
     }
 
     #[test]

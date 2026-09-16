@@ -72,7 +72,9 @@ parts:
   suffix of it.
 - `[[listings]]`: one per tier and version — `name`, `version`, `resources
   {cpu_millicores, memory_mb, storage_gb, gpu?}`, `arch`, `lease_interval_s`,
-  `price` (integer µUSDC per Lease Interval), `capabilities`, `capacity`.
+  `price` (integer µUSDC per Lease Interval), `capabilities` (see
+  [Capabilities](#capabilities) — `docker` and `nesting` are refused at load),
+  `capacity`.
   A price change is a new version with its own routes (ADR 0009). `capacity`
   is how many leases of that name may run at once, across its versions.
 - `handler_base_url`: where the *connector* reaches this app; the origin of
@@ -206,7 +208,9 @@ whose content is
 The image is pulled as `reference@digest`, so the daemon verifies the bytes
 and picks the manifest for its own architecture. Anything else in the
 content — a runtime flag, a host mount, a device, a capability — is refused
-as `invalid_request`; privileges come only from the listing (ADR 0004).
+as `invalid_request`; privileges come only from the listing (ADR 0004). That
+includes every way of asking for a Docker daemon inside the workload: see
+[Capabilities](#capabilities).
 
 **SSH.** The tenant's key is handed to the workload as the environment
 variable `SSH_PUBLIC_KEY`, and `access.ssh_port` forwards to the workload's
@@ -215,6 +219,43 @@ image can bridge it with the spawn's own `entrypoint` and `args` (e.g.
 `["/bin/sh"]` + `["-c", "PUBLIC_KEY=\"$SSH_PUBLIC_KEY\" exec /init"]` for
 `linuxserver/openssh-server`). No password is ever issued. A volume, when
 asked for, is mounted at `/data`.
+
+## Capabilities
+
+A capability is a privilege beyond an ordinary workload that a **listing**
+grants, never a spawn (ADR 0004). Spec §4.4 defines two, and **this backend
+delivers neither yet**:
+
+| Capability | What granting it obliges | Here |
+|---|---|---|
+| `docker` | A Docker-compatible daemon of the **lease's own** at `/var/run/docker.sock`, scoped to that lease, with everything it runs counted against the listing's `resources` | Not built |
+| `nesting` | The workload may create containers or VMs of its own, which means tenant code holding kernel privileges | Not built |
+
+So `capabilities = ["docker"]` **fails at config load**, on the operator who
+wrote it, rather than on the first tenant who buys the tier and finds nothing
+on the socket: a tenant picks a listing by its `t` tags alone, so a tag this
+provider cannot honour is a listing that lies. A capability of your own —
+between you and your tenants until the spec defines one — goes in prefixed
+`x-`, and loads.
+
+**The host daemon is never a workload's.** This app drives the host's Docker
+daemon to create workloads, which is why its own container mounts
+`/var/run/docker.sock`. That socket is on the provider's side of the workload
+boundary and is never passed through: `DockerBackend::run_args` gives a
+workload a name, CPU and memory limits, port forwards, environment and a
+*named volume* — no `--privileged`, no `--device`, no host path, no
+`DOCKER_HOST`. Mounting it into a workload would hand one tenant every other
+tenant's containers, and the spec forbids it outright (§4.4). A unit test
+asserts on the real argv so a future ticket cannot cross that line by
+accident.
+
+**What building `docker` would take** (not in this milestone): a per-lease
+`dind` sidecar sharing a private network with the workload, whose socket is
+the only one the workload sees, torn down with the lease — plus resource
+accounting across the pair, since §4.4 requires the listing's
+`cpu_millicores` and `memory_mb` to bound the workload, its daemon and every
+container that daemon runs *as one unit*, which is the part the current
+one-container-per-lease shape has no answer for.
 
 ## Extending, checking and ending a lease
 

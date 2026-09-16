@@ -49,8 +49,15 @@ liveness_cadence_s = 60
 # publishes nothing — legal, it simply does not appear in the directory.
 publish_url = "http://directory-publisher:8081/publish"
 
-# Capabilities this provider grants: privileges beyond an ordinary workload.
-capabilities = ["docker"]
+# Capabilities this provider grants: privileges beyond an ordinary workload
+# (spec §4.4). EMPTY on purpose, and validated at load: the two the spec
+# defines both oblige this provider to give the workload something the Docker
+# backend does not build. `docker` means a Docker daemon of the LEASE'S OWN at
+# /var/run/docker.sock — never this host's, which is the daemon the provider
+# creates workloads with — and `nesting` means tenant code holding kernel
+# privileges. Granting either here fails at startup rather than publishing a
+# `t` tag no workload can use. A capability of your own goes in prefixed `x-`.
+capabilities = []
 
 # Where the HTTP app listens. Only this provider's TOON connector should be
 # able to reach it.
@@ -124,7 +131,7 @@ version = 1
 arch = "amd64"            # amd64 | arm64
 lease_interval_s = 3600   # one payment buys this many seconds
 price = 1000              # µUSDC per Lease Interval, on spawn and on extend
-capabilities = []         # granted to every workload of this tier
+capabilities = []         # granted to every workload of this tier (spec §4.4)
 capacity = 4              # leases of this tier that may run at once, all versions
 [listings.resources]
 cpu_millicores = 500
