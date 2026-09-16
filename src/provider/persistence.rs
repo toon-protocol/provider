@@ -90,6 +90,18 @@ pub struct LeaseRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub takeover: Option<TakeoverAnnouncement>,
 
+    /// Set on a PRIMARY whose Standby Set has moved past it: a Takeover for
+    /// this lease's `workload_id` was found on the Relay Set, signed by a
+    /// member of the set (spec §7.1). Its workload is never started again
+    /// for the rest of the lease, whatever the relays say later.
+    ///
+    /// Persisted, and persisted as a FACT rather than re-derived, because
+    /// the guarantee is for the rest of the lease: a relay that has since
+    /// dropped the claim, or a provider that restarts and cannot read one,
+    /// must not put a second copy of the workload beside the new primary's.
+    #[serde(default)]
+    pub taken_over: bool,
+
     pub created_at: u64,
 
     /// The first instant the lease no longer applies. The expiry sweep reaps
@@ -222,6 +234,7 @@ mod tests {
             standby_set: None,
             reserved_spawn: None,
             takeover: None,
+            taken_over: false,
             created_at: 1000,
             expires_at,
             ended_at: None,
@@ -319,6 +332,36 @@ mod tests {
         assert_eq!(loaded[&2000].standby_set, None);
         assert_eq!(loaded[&2000].reserved_spawn, None);
         assert_eq!(loaded[&2000].takeover, None);
+        assert!(!loaded[&2000].taken_over);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_self_stopped_primary_survives_a_restart() {
+        // What a primary that stopped its own workload cannot re-derive
+        // after a restart (spec §7.1): that the workload is off, and that a
+        // member of its Standby Set has claimed the workload id — which is
+        // why it must never be started again for this lease, whatever the
+        // relays hold by then.
+        let p = temp_path("self-stopped");
+        let mut stopped = lease(2000, 9999);
+        stopped.role = Role::Primary;
+        stopped.state = LeaseState::Stopped;
+        stopped.standby_set = Some(StandbySet {
+            members: vec!["aa".repeat(32), "bb".repeat(32)],
+            index: 0,
+        });
+        stopped.taken_over = true;
+        persist_leases(&HashMap::from([(2000, stopped.clone())]), &p);
+
+        let loaded = load_leases(&p);
+        assert_eq!(loaded[&2000], stopped);
+        assert_eq!(loaded[&2000].state, LeaseState::Stopped);
+        // Still a lease: it holds its slot and its workload, and only the
+        // ending destroys the container the stop left behind.
+        assert!(loaded[&2000].state.is_live());
+        assert!(loaded[&2000].state.has_workload());
+        assert!(!loaded[&2000].state.is_reachable());
         let _ = std::fs::remove_file(&p);
     }
 

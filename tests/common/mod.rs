@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use nostr_sdk::PublicKey;
 use sha2::{Digest, Sha256};
 use toon_provider::compute::{ComputeBackend, ContainerConfig, ContainerStatus, NodeStatus};
-use toon_provider::nostr::kinds::{K_PROFILE, K_TAKEOVER};
+use toon_provider::nostr::kinds::{K_LIVENESS, K_PROFILE, K_TAKEOVER};
 use toon_provider::{Clock, Directory, LivenessState, PublishReport, RelayLiveness};
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -299,6 +299,14 @@ pub struct FakeDirectory {
     /// When set, every publish is recorded but reports this relay as having
     /// refused — a Relay Set reached only in part.
     relay_always_refuses: Mutex<Option<String>>,
+    /// The Relay Set every publication is offered to, when a test says so
+    /// (`publishes_to`). Unset, the fake answers as it always has: one
+    /// nameless relay took it.
+    relay_set: Mutex<Option<Vec<String>>>,
+    /// Relays of that set which refuse every LIVENESS from now on
+    /// (`refuse_liveness_on`), taking everything else. What a primary's own
+    /// majority count reads (spec §7.1).
+    liveness_refusals: Mutex<Vec<String>>,
     /// Image Registry entries `get_image_entry` answers with, as relays
     /// holding them would: matched by kind, signer and `d`, newest first.
     image_entries: Mutex<Vec<nostr_sdk::Event>>,
@@ -381,6 +389,24 @@ impl FakeDirectory {
         *self.relay_always_refuses.lock().unwrap() = Some(relay.to_string());
     }
 
+    /// Every publication from now on is offered to exactly these relays, and
+    /// the report names them one by one. Set it to the provider's own
+    /// `relay_set` whenever the per-relay outcome has to MEAN something: a
+    /// primary counts the relays of its own Relay Set that took its Liveness
+    /// (spec §7.1), which a report about one nameless relay says nothing
+    /// about.
+    pub fn publishes_to(&self, relays: &[&str]) {
+        *self.relay_set.lock().unwrap() = Some(relays.iter().map(|r| r.to_string()).collect());
+    }
+
+    /// These relays refuse every LIVENESS from now on and take everything
+    /// else — one relay of three is a primary that still has its majority,
+    /// two of three is one that has lost it. Only meaningful beside
+    /// `publishes_to`, which says what the whole Relay Set is.
+    pub fn refuse_liveness_on(&self, relays: &[&str]) {
+        *self.liveness_refusals.lock().unwrap() = relays.iter().map(|r| r.to_string()).collect();
+    }
+
     /// A relay holds this Image Registry entry (or any addressable event):
     /// `get_image_entry` will answer with it for its own address.
     pub fn seed_image_entry(&self, event: nostr_sdk::Event) {
@@ -453,16 +479,40 @@ impl FakeDirectory {
 
 impl FakeDirectory {
     /// What every publication through the fake answers: recorded, then
-    /// accepted by one relay and refused by the one `relay_always_refuses`
-    /// names, if any — unless the next publication was told to fail.
+    /// accepted by one nameless relay — or, once `publishes_to` has named a
+    /// Relay Set, by every relay of it but those refusing this kind — and
+    /// refused by the one `relay_always_refuses` names, if any, unless the
+    /// next publication was told to fail.
     fn record_publication(&self, event: nostr_sdk::Event) -> Result<PublishReport> {
         if let Some(why) = self.fail_next_publish.lock().unwrap().take() {
             anyhow::bail!("{}", why);
         }
+        let kind = event.kind.as_u16();
         self.published.lock().unwrap().push(event);
-        let mut report = PublishReport {
-            accepted: vec!["wss://relay.example".to_string()],
-            failed: Default::default(),
+
+        let mut report = match self.relay_set.lock().unwrap().clone() {
+            // A named Relay Set: every relay of it took the event, except
+            // those refusing this kind.
+            Some(relays) => {
+                let refuses: Vec<String> = if kind == K_LIVENESS {
+                    self.liveness_refusals.lock().unwrap().clone()
+                } else {
+                    Vec::new()
+                };
+                let (failed, accepted): (Vec<String>, Vec<String>) =
+                    relays.into_iter().partition(|r| refuses.contains(r));
+                PublishReport {
+                    accepted,
+                    failed: failed
+                        .into_iter()
+                        .map(|r| (r, "relay refused".to_string()))
+                        .collect(),
+                }
+            }
+            None => PublishReport {
+                accepted: vec!["wss://relay.example".to_string()],
+                failed: Default::default(),
+            },
         };
         if let Some(relay) = self.relay_always_refuses.lock().unwrap().clone() {
             report.failed.insert(relay, "relay refused".to_string());

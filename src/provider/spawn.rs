@@ -240,6 +240,9 @@ async fn serve(
                 // needs nothing kept.
                 reserved_spawn: reserving.then(|| content.clone()),
                 takeover: None,
+                // Nothing has taken this workload over: a spawn is the
+                // start of the lease, not a restart after one (spec §7.1).
+                taken_over: false,
                 created_at: now,
                 // The same interval buys either role (spec §6.2): the
                 // standby paid less for it, at the listing's standby price.

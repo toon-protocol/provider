@@ -53,8 +53,8 @@ This is a hard fork of [Paygress](https://github.com/DhananjayPurohit/Paygress)
 
 **Kept:** the `ComputeBackend` trait and the Docker backend, lease accounting
 and the expiry sweep, workload persistence across restarts, and the axum HTTP
-app. Warm Standby is wired as far as roles, reservations and the watch that
-announces a Takeover (Milestone 3). Paygress's takeover state machine
+app. Warm Standby is wired as far as roles, reservations, the watch that
+announces a Takeover and a primary's own self-stop (Milestone 3). Paygress's takeover state machine
 (`durable_workload`) is gone: its lease-revocation event — published by a
 primary on its own eviction — and the respawn path it drove are replaced by
 ADR 0010's Takeover on Liveness expiry, which a crashed primary need not
@@ -396,11 +396,52 @@ A provider with no `publish_url` watches and decides like any other, and
 announces nothing, exactly as it publishes nothing. A step for a provider
 holding no reservation reads nothing at all.
 
-**Still to come in Milestone 3:** paying a reservation (`.standby.extend`, and
-the `not_standby` refusals that go with it); settling the race after two
-cadences and starting the workload from the image if this provider won, or
-watching the winner if it lost; and a primary stopping its own workload
-after five cadences without a relay majority.
+### Stopping itself
+
+The same rule from the primary's end (spec §7.1, *Primary self-stop*). A
+partitioned primary cannot see that its standbys have stopped seeing it, but
+it can see the half of the silence that is its own: every Liveness
+publication reports which relays of the Relay Set took it, and the provider
+counts that report each cadence.
+
+- **Five cadences** in a row that reached less than a **strict majority** of
+  its own Relay Set stop the workload of every **primary** lease it holds.
+  One publication that reached a majority, anywhere inside the five, starts
+  the count again; a publication that could not be attempted at all — no
+  publisher, an event that would not build — is a cadence on which no relay
+  took it. A **standalone** lease is never stopped by this rule: it is in no
+  Standby Set, so nobody is waiting to take it over. A provider with **no
+  Relay Set** is exempt entirely — nothing it publishes reaches anyone, so
+  nothing can take its workloads over either.
+- **Stopping is not ending.** The lease stays live and paid to its
+  `expires_at`: it holds its capacity slot, its workload id and its host
+  ports, `.extend` still buys it another interval at the running price, and
+  the sweep still ends it — destroying the stopped container — when nobody
+  pays. `status` answers `state: "stopped"` with no `access`, and the state
+  is persisted, so a provider that restarts does not start again what it
+  stopped.
+- **Starting again.** The cadence that regains a majority asks the Relay Set
+  for a Takeover of that workload id from a pubkey in the lease's
+  `standby_set` (kind `30433`, `d` = the workload id). None, and the same
+  container — never a new one — is started again. One found, and the lease is
+  marked `taken_over` on disk and stays stopped **for the rest of the
+  lease**: another provider is running that workload now, and the claim is
+  remembered as a fact rather than re-read, so a relay that later drops it
+  cannot put a second copy beside the new primary's. A Relay Set that cannot
+  be read at all leaves the workload stopped and is asked again next cadence.
+- **At startup**, before anything is served, every live primary lease with a
+  Standby Set asks the same question: a provider whose PROCESS was down is
+  the loudest partition there is — its containers keep running on the host
+  daemon beside it, its standbys see no Liveness and take over, and it comes
+  back to a lease table that says `running`. A Takeover found there stops the
+  workload and marks the lease `taken_over`. None found, or a Relay Set that
+  cannot be read, changes nothing: a primary is innocent until a claim says
+  otherwise, because the alternative is stopping a healthy workload over an
+  unreachable relay.
+
+**Still to come in Milestone 3:** settling the race after two cadences and
+starting the workload from the image if this provider won, or watching the
+winner if it lost.
 
 ## Capabilities
 
@@ -470,9 +511,12 @@ Status answers:
 ```
 
 `state` is the §6.7 lease state: `"provisioning"`, `"reserved"`, `"running"`,
-or `{ "ended": "expiry" | "termination" | "eviction" }`. `"reserved"` is a
-Warm Standby before Takeover — capacity held and paid for, with nothing
-running and so no `access` (see [Standby Sets](#standby-sets)). It is the
+`"stopped"`, or `{ "ended": "expiry" | "termination" | "eviction" }`.
+`"reserved"` is a Warm Standby before Takeover — capacity held and paid for,
+with nothing running and so no `access`; `"stopped"` is a primary that stopped
+its own workload after five cadences without a relay majority — the lease is
+paid and live, and there is nothing to reach until it starts again (see
+[Standby Sets](#standby-sets)). It is the
 lease record
 as it stands, so between an expiry and the sweep that reaps it a lease still
 reads `"running"` with an `expires_at` in the past — extend and terminate
