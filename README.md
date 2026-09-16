@@ -27,10 +27,12 @@ resources can be changed without repricing the leases already running (see
 acceptance test is `make smoke-m1` in the sandbox — see
 [Milestone 1 acceptance test](#milestone-1-acceptance-test).
 
-Milestone 2 is in progress: an image named by its **Image Registry entry**
-is resolved and fetched through the TOON store and upstream registries,
+Milestone 2 is in progress: an image named by its **Image Registry entry**,
+or by its **digest alone**, is resolved and fetched through the TOON store,
+upstream registries and the **Blob Records** on this provider's Relay Set,
 verified blob by blob, cached across leases, and run — see
-[Spawning](#spawning). An image named by digest alone is not resolved yet.
+[Spawning](#spawning) and
+[the resolution order](#availability-and-image-policy).
 
 ## Spec, decisions and vocabulary
 
@@ -222,34 +224,36 @@ whose content is
   "entrypoint": ["/bin/sh"], "args": ["-c", "…"] }
 ```
 
-`image` may take any of the three forms spec §6.2 allows, and two of them
-run today:
+`image` may take any of the three forms spec §6.2 allows, and all three run:
 
-| Form | Meaning | Today |
+| Form | Meaning | Where the bytes come from |
 |---|---|---|
-| `{ "reference", "digest" }` | Pull `reference@digest` from an upstream OCI registry | Runs: the daemon pulls it |
-| `{ "digest", "registry_entry": { "address", "relay" } }` | The Image Registry entry at `address` lists every blob and where its bytes are (spec §8.1) | Runs: this provider fetches it |
-| `{ "digest" }` | The blobs are found by Blob Record lookup on the Relay Set (spec §8.4) | `refused_image` |
+| `{ "reference", "digest" }` | Pull `reference@digest` from an upstream OCI registry | The daemon pulls it |
+| `{ "digest", "registry_entry": { "address", "relay" } }` | The Image Registry entry at `address` lists every blob and where its bytes are (spec §8.1) | This provider fetches each blob from the source the entry names |
+| `{ "digest" }` | Nothing but the content address (spec §8.4) | This provider finds each blob's Blob Record on its own Relay Set |
 
 Anything else — a `reference` and a `registry_entry` together, a `digest`
 that is not `sha256:` plus 64 lowercase hex, a `registry_entry` whose
 `address` is not `30434:<pubkey>:<name>:<tag>` — is a fourth shape and
-`invalid_request`. A bare digest is `refused_image` rather than
-`invalid_request` because the request is exactly what the spec allows; this
-provider simply does not resolve it yet, and `availability` reports that
-for free before a tenant pays for the same answer.
+`invalid_request`. An image this provider cannot find the bytes of is
+`refused_image` rather than `invalid_request`: the request is exactly what
+the spec allows, and it is the provider that has nowhere to fetch from.
+`availability` reports that for free before a tenant pays for the same
+answer.
 
-**Through the Image Registry.** An image named by its entry is resolved the
-way §8.4 says — the entry is read from the relay hinted at, and the index,
-the manifest for the listing's `arch` and its config are fetched and
-verified through the entry's sources (see
-[Availability and image policy](#availability-and-image-policy)); that
-much `availability` does too. A paid spawn then, once the slot is reserved,
+**Through the Image Registry.** An image named by its entry, or by its
+digest alone, is resolved the way §8.4 says — for the entry form the entry
+is read from the relay hinted at first — and the index, the manifest for
+the listing's `arch` and its config are fetched and verified down
+[the resolution order](#availability-and-image-policy); that much
+`availability` does too, and it also checks that every remaining blob has
+somewhere to come from. A paid spawn then, once the slot is reserved,
 fetches every layer the same way — a `toon-store` source as its Blob
 Record and parts from `gateway_url_pattern`, an `oci` source by digest from
-the registry the entry names — checks each part against its recorded
-sha256 and size and each blob against its digest, and keeps every verified
-blob in the [blob cache](#configuration) (`blob_cache_dir`). The blobs are
+the registry the entry names, a Blob Record from the Relay Set as its parts
+— checks each part against its recorded sha256 and size and each blob
+against its digest, and keeps every verified blob in the
+[blob cache](#configuration) (`blob_cache_dir`). The blobs are
 then assembled into an OCI image layout, loaded into the backend (`docker
 load`), and the workload is started by the image id the load produced:
 never by a tag, and never from bytes this provider did not check. A layer
@@ -262,6 +266,14 @@ only on the full fetch can only be found out on the paid route — which is
 why `availability` resolves the manifest and config first. The Docker
 backend needs a daemon whose `docker load` reads an OCI image layout (any
 current Docker; verified on 29 with the containerd image store).
+
+**By digest alone**, nothing names a source, so every blob is found by
+asking each relay in [`relay_set`](#configuration) for the Blob Records
+tagged `#x = <hex>`, whoever signed them. That is safe because no signer is
+trusted: each part is checked against its recorded sha256 and size and each
+blob against the digest that was asked for, so a wrong record is discarded
+and the next one is tried (ADR 0006). A provider with no Relay Set
+configured finds none and refuses every bare digest.
 
 **Through an upstream reference**, the image is pulled by the daemon as
 `reference@digest`, so the daemon verifies the bytes and picks the manifest
@@ -477,32 +489,47 @@ outcome never disagree, and `availability` never calls the compute backend.
 **Resolving the image** (spec §8.4) finds the manifest that would actually
 run and fetches only what that takes — an index, the manifest matching the
 listing's `arch` (`no_matching_arch` if none matches), and its config; never
-a layer. Where the bytes come from depends on the form:
+a layer. It also checks that every remaining blob the manifest names has
+*somewhere* to come from, so an image with an unfetchable layer is refused
+here rather than on the paid spawn that would have discovered it.
 
-- `{ reference, digest }`: from the upstream OCI registry the reference
-  names, over plain HTTP(S) (`docker.io` references resolve against
-  `registry-1.docker.io`, with an anonymous token from the challenge in
-  `Www-Authenticate` when the registry answers 401 — the generic bearer flow
-  every OCI-distribution registry supports; other registries are tried
-  anonymously first).
-- `{ digest, registry_entry }`: the Image Registry entry is read from the
-  relay the request hints at, and must be the entry named — signed by the
-  address's pubkey, under its `<name>:<tag>`, describing this digest. Each
-  blob is then fetched from the source the entry lists for it: a
-  `toon-store` source is a Blob Record read from the TOON store by its own
-  upload's txid at `gateway_url_pattern`, then each part from the same
-  pattern, each checked against its recorded sha256 and size and
-  concatenated in order; an `oci` source is a pull by digest from the
-  registry and repository the entry names. An entry that omits a blob the
-  manifest needs, a relay that holds no entry at the address, or a source
-  that cannot serve a blob is `refused_image`.
+**The resolution order** is the same for every blob, whatever it is — an
+index, a manifest, a config, a layer — and whichever form named the image:
 
-Every blob, wherever it came from, is verified against its digest before
-anything is read out of it; bytes that do not match are discarded. A
-mismatch, or a gateway or registry that cannot be reached at all, is
-`refused_image` — there is no distinct "registry down" code, since a
-tenant's availability check or spawn has no use for anything but a refusal
-right now. Verified blobs are kept on disk in the blob cache
+1. **The blob cache.** Bytes already verified for any earlier lease. A hit
+   here contacts nothing: no relay, no gateway, no registry.
+2. **The source the image's own description names.** For
+   `{ reference, digest }` that is the upstream OCI registry the reference
+   names, over plain HTTP(S) (`docker.io` references resolve against
+   `registry-1.docker.io`, with an anonymous token from the challenge in
+   `Www-Authenticate` when the registry answers 401 — the generic bearer
+   flow every OCI-distribution registry supports; other registries are
+   tried anonymously first). For `{ digest, registry_entry }` it is the
+   `source` the entry lists for that blob: a `toon-store` source is a Blob
+   Record read from the TOON store by its own upload's txid at
+   `gateway_url_pattern`, then each part from the same pattern; an `oci`
+   source is a pull by digest from the registry and repository the entry
+   names. The entry itself is read from the relay the request hints at, and
+   must be the entry named — signed by the address's pubkey, under its
+   `<name>:<tag>`, describing this digest. A bare digest names nothing, so
+   this step is skipped.
+3. **Blob Records on the Relay Set.** Every relay in `relay_set` is asked
+   for the kind-30435 events tagged `#x = <hex>`, and each is tried as a
+   part list. **Any signer's record is safe to try**: the provider checks
+   each part against its recorded sha256 and size and the reassembled blob
+   against the digest that was asked for, so a record from a stranger — or
+   a deliberately wrong one — fails verification and the next is tried
+   (ADR 0006). This step is taken lazily and per blob: it costs a relay
+   round trip, so it happens only for a blob the cache and step 2 did not
+   serve.
+
+Fallthrough is per blob, not per image: a gateway that is 5xx for one part,
+a part that does not hash to its record, an upstream registry that refuses
+— each sends that one blob to its next source, leaves blobs already
+verified alone, and fails nothing. Only when every source for a blob is
+exhausted is the image `refused_image`. There is no distinct "registry
+down" code: a tenant's availability check or spawn has no use for anything
+but a refusal right now. Verified blobs are kept on disk in the blob cache
 (`blob_cache_dir`), keyed by digest and checked again on every read, across
 leases and restarts, so a repeated check — or a spawn of an image already
 fetched — reads nothing from the network.
