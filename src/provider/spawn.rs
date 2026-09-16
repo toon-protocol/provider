@@ -115,10 +115,7 @@ pub async fn spawn(
     // Every spawn here is standalone: a `standby_set` is parsed only so it
     // can be refused by name rather than dropped (ADR 0004).
     if content.standby_set.is_some() {
-        return Err(invalid(format!(
-            "standby_set: {}",
-            STANDBY_SETS_LAND_LATER
-        )));
+        return Err(invalid(format!("standby_set: {}", STANDBY_SETS_LAND_LATER)));
     }
 
     // ── 4. the workload id, 5. the image, 6. capacity ───────────────────

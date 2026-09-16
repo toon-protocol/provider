@@ -205,7 +205,9 @@ fn a_listing_that_prices_no_standby_gets_no_standby_rows() {
     ));
     let prefixes: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
     assert!(prefixes.contains(&"g.acme.basic.v1.spawn"));
-    assert!(!prefixes.iter().any(|p| p.starts_with("g.acme.basic.v1.standby")));
+    assert!(!prefixes
+        .iter()
+        .any(|p| p.starts_with("g.acme.basic.v1.standby")));
 
     // And the count is exact: two rows for basic v1, four for each live
     // `warm` version, then the three free rows.

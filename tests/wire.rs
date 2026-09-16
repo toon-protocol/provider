@@ -995,13 +995,17 @@ fn primary() -> nostr_sdk::Keys {
 
 #[test]
 fn a_takeover_event_round_trips_byte_identically_through_its_builder() {
-    let standby = nostr_sdk::Keys::parse(
-        "6666666666666666666666666666666666666666666666666666666666666666",
-    )
-    .unwrap();
+    let standby =
+        nostr_sdk::Keys::parse("6666666666666666666666666666666666666666666666666666666666666666")
+            .unwrap();
     let workload_id = "ab".repeat(32);
-    let event = takeover_event(&workload_id, &primary().public_key(), &standby, 1_700_000_000)
-        .expect("a Takeover signs");
+    let event = takeover_event(
+        &workload_id,
+        &primary().public_key(),
+        &standby,
+        1_700_000_000,
+    )
+    .expect("a Takeover signs");
 
     assert_eq!(event.kind.as_u16(), K_TAKEOVER);
     assert_eq!(
