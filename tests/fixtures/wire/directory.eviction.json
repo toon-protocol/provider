@@ -1,0 +1,33 @@
+{
+  "content": {
+    "message": "host maintenance window",
+    "reason": "maintenance",
+    "workload_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "event": {
+    "content": "{\"workload_id\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"reason\":\"maintenance\",\"message\":\"host maintenance window\"}",
+    "created_at": 1700000000,
+    "id": "a81cdfb37add73ee7d85fdb7051411e00efd6d1aae05df35f897ef6bba6d4aab",
+    "kind": 4433,
+    "pubkey": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+    "sig": "a2a0107138ef866b46df64f74661a03a5dc9f206cd3344b0e8c8ce6faeb2e6f6a00b8d54122798a13ffc18ccc5b2bd2456653923a79a5a846802a1cea9f6016a",
+    "tags": [
+      [
+        "x",
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ],
+      [
+        "L",
+        "toon.network"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "eviction",
+    "description": "An Eviction Notice (spec §6.7): a regular event with the workload id in an `x` tag and `{ workload_id, reason, message }` as content. `reason` is this provider's own vocabulary (abuse | policy | maintenance | other).",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "directory"
+  },
+  "kind_name": "K_EVICTION",
+  "nip01_serialization": "[0,\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\",1700000000,4433,[[\"x\",\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"],[\"L\",\"toon.network\"]],\"{\\\"workload_id\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\",\\\"reason\\\":\\\"maintenance\\\",\\\"message\\\":\\\"host maintenance window\\\"}\"]"
+}

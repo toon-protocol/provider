@@ -1,0 +1,17 @@
+{
+  "fixture": {
+    "case": "not_standby",
+    "description": "The `not_standby` refusal as this provider renders it. No Milestone 1 route can produce it: it belongs to `.standby.extend` (spec §6.3), which arrives with Warm Standby in Milestone 3. Shape and status only.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": null,
+  "request_body": null,
+  "response_body": {
+    "error": "not_standby",
+    "message": "this lease is not a Warm Standby; extend it on .extend"
+  },
+  "response_status": 409,
+  "route": null,
+  "validation_step": "§6.3: on `.standby.extend` the lease MUST be a standby before Takeover"
+}

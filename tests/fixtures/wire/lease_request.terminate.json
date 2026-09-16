@@ -1,0 +1,60 @@
+{
+  "content": {
+    "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "event": {
+    "content": "{\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+    "created_at": 1700000000,
+    "id": "170934070b80a0ea47864129ca3b959219ba8fc73e87ed137df51ada19fb4fd1",
+    "kind": 4432,
+    "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+    "sig": "54083c9f9168238bc7d251439d46cdb5343f879caf106986eced8f0cae57b2e5192408a279f44a1a7e9a4b87bed93c5d940952989aef6f5caf7ecbb1e7a7c5c6",
+    "tags": [
+      [
+        "p",
+        "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+      ],
+      [
+        "op",
+        "terminate"
+      ],
+      [
+        "expiration",
+        "1700000060"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "terminate",
+    "description": "Ends the lease on the free `<addr>.terminate` route. The body of `terminate.ok`.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "lease_request"
+  },
+  "kind_name": "K_LEASE_REQUEST",
+  "nip01_serialization": "[0,\"4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa\",1700000000,4432,[[\"p\",\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\"],[\"op\",\"terminate\"],[\"expiration\",\"1700000060\"]],\"{\\\"workload_id\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"}\"]",
+  "packet_body": {
+    "request": {
+      "content": "{\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "created_at": 1700000000,
+      "id": "170934070b80a0ea47864129ca3b959219ba8fc73e87ed137df51ada19fb4fd1",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "54083c9f9168238bc7d251439d46cdb5343f879caf106986eced8f0cae57b2e5192408a279f44a1a7e9a4b87bed93c5d940952989aef6f5caf7ecbb1e7a7c5c6",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "terminate"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "packet_body_encoding": "The HTTP request body is this JSON object: the signed event, unmodified, as the value of the single key `request`. No other key is allowed. The connector carries the whole HTTP request inside its sealed envelope; the provider app receives this body as plaintext JSON."
+}

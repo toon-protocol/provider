@@ -1,0 +1,43 @@
+{
+  "content": {
+    "connector_seal_key": "0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188",
+    "connector_url": "http://connector.fixture.example:3300/ilp",
+    "hidden": false,
+    "host": "203.0.113.7",
+    "ilp_address": "g.fixture",
+    "isolation": "shared-kernel",
+    "liveness_cadence_s": 60,
+    "relays": [
+      "ws://relay.fixture.example:7100"
+    ],
+    "settlement": [
+      {
+        "chain": "solana",
+        "decimals": 6,
+        "token": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+      }
+    ]
+  },
+  "event": {
+    "content": "{\"ilp_address\":\"g.fixture\",\"connector_url\":\"http://connector.fixture.example:3300/ilp\",\"connector_seal_key\":\"0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188\",\"relays\":[\"ws://relay.fixture.example:7100\"],\"settlement\":[{\"chain\":\"solana\",\"token\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"decimals\":6}],\"isolation\":\"shared-kernel\",\"hidden\":false,\"host\":\"203.0.113.7\",\"liveness_cadence_s\":60}",
+    "created_at": 1700000000,
+    "id": "ae5108917e74ead8453feac69e90546240c4b2624d0ff0ffb277afa1535fd6e6",
+    "kind": 10432,
+    "pubkey": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+    "sig": "744c4551bd598ad2c32f3814c2f55b909b208894ea34f45435b2d71c5224034168b6c85f8351cf24ba5f77acaffe4fb104004db47b64973c6a9db3c4afc5a34e",
+    "tags": [
+      [
+        "L",
+        "toon.network"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "profile",
+    "description": "The Provider Profile (spec §4.1): replaceable, one per provider, tagged `L toon.network`. `connector_seal_key` is what a tenant seals to (ADR 0011).",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "directory"
+  },
+  "kind_name": "K_PROFILE",
+  "nip01_serialization": "[0,\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\",1700000000,10432,[[\"L\",\"toon.network\"]],\"{\\\"ilp_address\\\":\\\"g.fixture\\\",\\\"connector_url\\\":\\\"http://connector.fixture.example:3300/ilp\\\",\\\"connector_seal_key\\\":\\\"0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188\\\",\\\"relays\\\":[\\\"ws://relay.fixture.example:7100\\\"],\\\"settlement\\\":[{\\\"chain\\\":\\\"solana\\\",\\\"token\\\":\\\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\\\",\\\"decimals\\\":6}],\\\"isolation\\\":\\\"shared-kernel\\\",\\\"hidden\\\":false,\\\"host\\\":\\\"203.0.113.7\\\",\\\"liveness_cadence_s\\\":60}\"]"
+}

@@ -1,0 +1,40 @@
+{
+  "fixture": {
+    "case": "no_matching_arch",
+    "description": "A spawn naming an OCI index that has no manifest for the listing's `arch` (the index lists arm64 only; `basic` is amd64).",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/listings/basic/v1/spawn",
+  "request_body": {
+    "request": {
+      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:78050d0f4e11caadd6a7e65066573016af79f5b6dfb909b7cc0d42daf8c35fcc\",\"reference\":\"docker.io/library/alpine\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"volume_gb\":2,\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "created_at": 1700000000,
+      "id": "3b0db02d5dca66c586ee524253c28ffc62287340c9c74f6157e9dc3196051e10",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "d19d5128a2e04c875a1ad5f820f8c782216225b977f79d282fb4c22bfef8c565e113ad5d7a0631d88b03ea7bbe14a518264b0040596ff00fb76a329415851b58",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "spawn"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "error": "no_matching_arch",
+    "message": "image index sha256:78050d0f4e11caadd6a7e65066573016af79f5b6dfb909b7cc0d42daf8c35fcc has no manifest for arch \"amd64\""
+  },
+  "response_status": 422,
+  "route": "g.fixture.basic.v1.spawn",
+  "validation_step": "§6.2 step 5: pick the manifest for the listing's arch"
+}

@@ -1,0 +1,41 @@
+{
+  "fixture": {
+    "case": "ok",
+    "description": "Termination (spec §6.6) by the tenant with `lease_request.terminate` as its body. The answer echoes the ended state so no second call is needed.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "terminate"
+  },
+  "http_path": "/terminate",
+  "request_body": {
+    "request": {
+      "content": "{\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "created_at": 1700000000,
+      "id": "170934070b80a0ea47864129ca3b959219ba8fc73e87ed137df51ada19fb4fd1",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "54083c9f9168238bc7d251439d46cdb5343f879caf106986eced8f0cae57b2e5192408a279f44a1a7e9a4b87bed93c5d940952989aef6f5caf7ecbb1e7a7c5c6",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "terminate"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "state": {
+      "ended": "termination"
+    },
+    "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "response_status": 200,
+  "route": "g.fixture.terminate"
+}

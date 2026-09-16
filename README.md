@@ -520,6 +520,32 @@ ticket-level smokes — `make smoke-provider`, `make smoke-directory`,
 provider (terminate, eviction), and can be run back to back with
 `make smoke-m1` in any order.
 
+## Wire fixtures for tenant implementations
+
+`tests/wire_fixtures.rs` generates golden files under `tests/fixtures/wire/`
+from the real HTTP surface and the real event builders: a signed Lease
+Request per `op` with its packet body, request and response bodies for
+spawn, extend, availability, status and terminate, one refusal per spec §5
+error code in validation order, one Profile, Listing, Liveness and Eviction
+Notice each, and the route table a Listing generates. Everything is produced
+over fixed test-only keys, a fixed clock and BIP-340 signatures with all-zero
+auxiliary randomness, so the bytes are reproducible and a tenant can re-derive
+every id and signature (TOON_Network #16).
+
+`cargo test` verifies the files byte-for-byte and fails on drift, so a wire
+change that is not reflected in the fixtures fails CI. After an intended
+change:
+
+```sh
+make fixtures                                  # regenerate tests/fixtures/wire/
+make fixtures TOON_SPEC_DIR=../TOON_Network    # ... and sync the spec's docs/spec/fixtures/wire/
+make fixtures-check                            # verify without touching them (what CI runs)
+```
+
+The spec repository's copy and its README (`docs/spec/fixtures/README.md`
+there) are what tenant implementations test against; keep them in sync with
+the same commit that changes the wire.
+
 ## Build, test and run
 
 ```sh

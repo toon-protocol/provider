@@ -1,0 +1,40 @@
+{
+  "fixture": {
+    "case": "unknown_workload",
+    "description": "Status for a workload id this provider holds no lease for.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/status",
+  "request_body": {
+    "request": {
+      "content": "{\"workload_id\":\"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"}",
+      "created_at": 1700000000,
+      "id": "86cbd05cd34cf52bb85d9a09542e19911e3a62110984cd82e1758cbefb4584ac",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "11b3596b8a9192406d06790a9d93fff78c42396444544bc0fa54a3e488617c64398fb4b292c66be5f8152da7d921fcbee762283e8d2626bbe3c87b2bf1e6e11b",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "status"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "error": "unknown_workload",
+    "message": "this provider holds no lease with that workload_id"
+  },
+  "response_status": 404,
+  "route": "g.fixture.status",
+  "validation_step": "§6.3/§6.5/§6.6: the workload id names no lease here"
+}
