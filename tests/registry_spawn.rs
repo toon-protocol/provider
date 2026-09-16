@@ -367,7 +367,7 @@ async fn lifecycle(h: &StoreHarness, tenant: &Keys, workload_id: &str) -> Vec<Va
         async move {
             let request = common::harness::RequestSpec {
                 tenant,
-                provider,
+                providers: vec![provider],
                 op: "status",
                 content: about,
                 created_at: now,
@@ -387,7 +387,7 @@ async fn lifecycle(h: &StoreHarness, tenant: &Keys, workload_id: &str) -> Vec<Va
     seen.push(status(h, 61).await.1);
     let request = common::harness::RequestSpec {
         tenant: tenant(),
-        provider: h.provider,
+        providers: vec![h.provider],
         op: "terminate",
         content: about.clone(),
         created_at: h.clock.now(),

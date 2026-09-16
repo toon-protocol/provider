@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "not_standby",
-    "description": "The `not_standby` refusal as this provider renders it. No route can produce it yet: it belongs to `.standby.extend` (spec §6.3), which answers a reservation once the rest of Milestone 3 has reserved and paid one. Shape and status only.",
+    "description": "The `not_standby` refusal as this provider renders it. No route can produce it yet: it belongs to `.standby.extend` (spec §6.3), which pays a reservation once the next ticket of Milestone 3 lands. Reservations themselves are real — `spawn.standby` makes one — but nothing buys one an interval yet, so both extension routes still refuse a reserved lease with `invalid_request`. Shape and status only.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "error"
   },

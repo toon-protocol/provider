@@ -25,7 +25,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Json};
 use nostr_sdk::secp256k1::rand::{CryptoRng, RngCore};
 use nostr_sdk::secp256k1::SECP256K1;
 use nostr_sdk::{
@@ -47,8 +46,8 @@ use toon_provider::nostr::kinds::{
     K_TEMPLATE, TOON_LABEL,
 };
 use toon_provider::nostr::wire::{
-    ErrorCode, ErrorResponse, EvictionReason, ImageRef, LeaseState, PortRequest, Protocol,
-    RegistryEntryRef, Resources, Role, SpawnContent, StatusResponse,
+    ErrorCode, ErrorResponse, EvictionReason, ImageRef, PortRequest, Protocol, RegistryEntryRef,
+    Resources, SpawnContent,
 };
 use toon_provider::provider::{evict, route_table, ImagePolicyConfig};
 use toon_provider::provider_http::refuse;
@@ -77,6 +76,10 @@ const PUBLISHER_SECRET: &str = "444444444444444444444444444444444444444444444444
 /// another provider entirely. The fixture provider is the STANDBY that
 /// watches it, so a Takeover it announces names this key.
 const PRIMARY_SECRET: &str = "5555555555555555555555555555555555555555555555555555555555555555";
+/// The OTHER Warm Standby of a Standby Set: the peer the fixture provider
+/// stands beside when IT is the primary. It signs nothing here either; it is
+/// index 1 of the set `spawn.primary` forms.
+const STANDBY_SECRET: &str = "6666666666666666666666666666666666666666666666666666666666666666";
 
 const PROVIDER_NAME: &str = "Fixture Provider";
 const ILP_ADDRESS: &str = "g.fixture";
@@ -278,6 +281,12 @@ fn workload_id(seed: u8) -> String {
 /// one, so the two fixtures tell one story.
 const STANDBY_SET_WORKLOAD: u8 = 0xa0;
 
+/// The workload of the OTHER set in the fixtures: the one the fixture
+/// provider is the primary of (`spawn.primary`). A different id, because it
+/// is a different set — membership never changes, so a second set is always a
+/// second workload id (spec §7).
+const PRIMARY_WORKLOAD: u8 = 0xa1;
+
 fn spawn_content(seed: u8) -> Value {
     serde_json::to_value(SpawnContent {
         workload_id: workload_id(seed),
@@ -297,23 +306,35 @@ fn spawn_content(seed: u8) -> Value {
     .unwrap()
 }
 
+/// The spawn content of a Standby Set (spec §6.2, §7): the same
+/// `workload_id` and the same `standby_set`, primary first, at every member.
+fn standby_set_content(seed: u8, set: &[PublicKey]) -> Value {
+    let mut content = spawn_content(seed);
+    content["standby_set"] = json!(set.iter().map(|k| k.to_hex()).collect::<Vec<_>>());
+    content
+}
+
 /// A Lease Request exactly as spec §6.1 has a tenant sign it: kind
-/// `K_LEASE_REQUEST`, tags `p` (the provider), `op` and `expiration`, the
+/// `K_LEASE_REQUEST`, one `p` tag per addressee, `op` and `expiration`, the
 /// op's content object as the JSON `content` string.
+///
+/// `providers` is ordinarily one. A spawn that forms a Standby Set names
+/// every member of it, because the tenant signs the request ONCE and sends
+/// the same bytes to all of them (§6.1, §7); each member then reads its role
+/// off its own position and the route it was paid on.
 fn lease_request(
     tenant: &Keys,
-    provider: PublicKey,
+    providers: &[PublicKey],
     op: &str,
     content: &Value,
     created_at: u64,
     expiration: u64,
 ) -> Event {
+    let mut tags: Vec<Tag> = providers.iter().copied().map(Tag::public_key).collect();
+    tags.push(Tag::custom(TagKind::custom("op"), [op]));
+    tags.push(Tag::expiration(Timestamp::from(expiration)));
     let unsigned = EventBuilder::new(Kind::Custom(K_LEASE_REQUEST), content.to_string())
-        .tags([
-            Tag::public_key(provider),
-            Tag::custom(TagKind::custom("op"), [op]),
-            Tag::expiration(Timestamp::from(expiration)),
-        ])
+        .tags(tags)
         .custom_created_at(Timestamp::from(created_at))
         .build(tenant.public_key());
     sign_reproducibly(unsigned, tenant)
@@ -423,7 +444,7 @@ impl Fixture {
     fn spawn_request(&self, seed: u8, ttl: u64) -> Event {
         lease_request(
             &self.tenant,
-            self.provider_pubkey(),
+            &[self.provider_pubkey()],
             "spawn",
             &spawn_content(seed),
             NOW,
@@ -437,7 +458,7 @@ impl Fixture {
     fn about_request(&self, tenant: &Keys, op: &str, seed: u8, ttl: u64) -> Event {
         lease_request(
             tenant,
-            self.provider_pubkey(),
+            &[self.provider_pubkey()],
             op,
             &about(seed),
             NOW,
@@ -560,6 +581,7 @@ fn constants_and_test_keys() {
             "other_tenant": key(&other),
             "publisher": key(&keys(PUBLISHER_SECRET)),
             "primary_provider": key(&keys(PRIMARY_SECRET)),
+            "standby_provider": key(&keys(STANDBY_SECRET)),
             "kinds": {
                 "K_PROFILE": K_PROFILE,
                 "K_LISTING": K_LISTING,
@@ -605,7 +627,7 @@ fn a_lease_request_per_op() {
         ),
     ];
     for (op, content, description) in cases {
-        let event = lease_request(&tenant, provider, op, &content, NOW, NOW + TTL);
+        let event = lease_request(&tenant, &[provider], op, &content, NOW, NOW + TTL);
         assert!(event.verify().is_ok());
         let mut doc = event_fixture("lease_request", op, description, "K_LEASE_REQUEST", &event);
         doc["packet_body"] = envelope(&event);
@@ -860,11 +882,14 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
             "availability",
             "standby_role",
             "Availability with §6.4's optional `role`, asked about the one tier that sells \
-             Warm Standbys. `role` takes `primary` or `standby` and nothing else — \
-             `standalone` is a lease role, not a question, since every spawn with no \
-             Standby Set is standalone already — and an unknown value is `invalid_request` \
-             like any other shape. Omitting `role` asks the ordinary question, as every \
-             other availability fixture here does.",
+             Warm Standbys: would a standby be RESERVED here? Nothing is reserved by \
+             asking, and the answer is `false` with `wrong_listing_version` on a listing \
+             that prices no standby, exactly as its `.standby` route would have answered. \
+             `role` takes `primary` or `standby` and nothing else — `standalone` is a \
+             lease role, not a question, since every spawn with no Standby Set is \
+             standalone already — and an unknown value is `invalid_request` like any other \
+             shape. Omitting `role` asks the ordinary question, as every other \
+             availability fixture here does.",
         ),
         &route("availability"),
         "/availability",
@@ -1063,7 +1088,7 @@ async fn one_refusal_per_spawn_validation_step() {
     // Step 1: freshness.
     let stale = lease_request(
         &f.tenant,
-        f.provider_pubkey(),
+        &[f.provider_pubkey()],
         "spawn",
         &spawn_content(0xaa),
         NOW - 400,
@@ -1095,7 +1120,7 @@ async fn one_refusal_per_spawn_validation_step() {
     privileged["privileged"] = json!(true);
     let event = lease_request(
         &f.tenant,
-        f.provider_pubkey(),
+        &[f.provider_pubkey()],
         "spawn",
         &privileged,
         NOW,
@@ -1255,7 +1280,7 @@ async fn one_refusal_per_spawn_validation_step() {
     content["image"]["digest"] = json!(index_digest);
     let event = lease_request(
         &arm_only.tenant,
-        arm_only.provider_pubkey(),
+        &[arm_only.provider_pubkey()],
         "spawn",
         &content,
         NOW,
@@ -1302,8 +1327,11 @@ async fn one_refusal_per_spawn_validation_step() {
                     "not_standby",
                     "The `not_standby` refusal as this provider renders it. No route can \
                      produce it yet: it belongs to `.standby.extend` (spec §6.3), which \
-                     answers a reservation once the rest of Milestone 3 has reserved and \
-                     paid one. Shape and status only.",
+                     pays a reservation once the next ticket of Milestone 3 lands. \
+                     Reservations themselves are real — `spawn.standby` makes one — but \
+                     nothing buys one an interval yet, so both extension routes still \
+                     refuse a reserved lease with `invalid_request`. Shape and status \
+                     only.",
                 ),
                 status,
                 body,
@@ -1311,42 +1339,117 @@ async fn one_refusal_per_spawn_validation_step() {
             "§6.3: on `.standby.extend` the lease MUST be a standby before Takeover",
         ),
     );
+}
 
-    // The `reserved` state, likewise: `status` reads it straight off the
-    // lease, and no route writes a reservation onto the table until the next
-    // ticket. The BODY is the typed `StatusResponse` through the same
-    // serialiser `status.running` and `status.ended` came out of.
-    let (status, body) = rendered(
-        Json(StatusResponse {
-            workload_id: workload_id(STANDBY_SET_WORKLOAD),
-            role: Role::Standby,
-            state: LeaseState::Reserved,
-            expires_at: NOW + INTERVAL,
-            access: None,
-            template: None,
-        })
-        .into_response(),
+/// The two roles a Standby Set gives, each as a paid exchange: the same
+/// signed spawn reaches every member, and the route it lands on decides what
+/// this provider does with it (spec §6.2 step 3, §7).
+///
+/// Two fixture providers, because ONE provider can hold only one position in
+/// one set: in `spawn.primary` the fixture provider is index 0 of a set whose
+/// other member is `constants.standby_provider`, and in `spawn.standby` it is
+/// index 1 behind `constants.primary_provider` — the same primary the
+/// `directory.takeover` fixture names, for the same workload id, so the two
+/// tell one story.
+#[tokio::test]
+async fn a_spawn_and_a_status_per_standby_set_role() {
+    // ── index 0, on `.spawn`: the primary runs the workload ──────────────
+    let f = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let primary_set = [f.provider_pubkey(), keys(STANDBY_SECRET).public_key()];
+    let content = standby_set_content(PRIMARY_WORKLOAD, &primary_set);
+    let event = lease_request(&f.tenant, &primary_set, "spawn", &content, NOW, NOW + TTL);
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "spawn",
+            "primary",
+            "A paid spawn that forms a Standby Set (spec §6.2, §7), at the member it makes the \
+             PRIMARY. The content carries `standby_set` with this provider's key at index 0, and \
+             the request carries one `p` tag per member, because the tenant signs it once and \
+             sends the same bytes to every member. Index 0 must arrive on `.spawn`, and the lease \
+             that follows runs exactly as a standalone one does: `role` is `primary` and `access` \
+             is present. The tier is `warm`, the one that prices standbys, because the rest of \
+             the set is bought on its `.standby` route at `standby_price`.",
+        ),
+        &route("warm.v1.spawn"),
+        "/listings/warm/v1/spawn",
+        envelope(&event),
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["state"], "reserved");
-    golden(
-        "status.reserved.json",
-        shape_only(
-            header(
-                "status",
-                "reserved",
-                "Status of a Warm Standby before Takeover (spec §6.5, §6.7): `state` is the \
-                 one word `reserved`, `role` is `standby`, and there is NO `access` — the \
-                 capacity is held and paid for, and nothing is running to reach. A \
-                 reservation counts against the listing's capacity exactly as a running \
-                 lease does. No route produces one until the rest of Milestone 3 spawns a \
-                 Standby Set; shape only.",
-            ),
-            status,
-            body,
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["role"], "primary");
+    assert!(response.get("access").is_some());
+    golden("spawn.primary.json", doc);
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "status",
+            "primary",
+            "Status of that primary (spec §6.5): `role` is `primary` rather than `standalone`, \
+             `state` is `running`, and `access` is where the workload actually runs. A tenant \
+             asks every member of the set the same question to find out where its workload is.",
         ),
-    );
+        &route("status"),
+        "/status",
+        envelope(&f.about_request(&f.tenant, "status", PRIMARY_WORKLOAD, TTL)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["role"], "primary");
+    assert_eq!(response["state"], "running");
+    golden("status.primary.json", doc);
+
+    // ── any other index, on `.standby`: a Warm Standby reserves ──────────
+    let g = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let standby_set = [keys(PRIMARY_SECRET).public_key(), g.provider_pubkey()];
+    let content = standby_set_content(STANDBY_SET_WORKLOAD, &standby_set);
+    let event = lease_request(&g.tenant, &standby_set, "spawn", &content, NOW, NOW + TTL);
+    let (status, response, doc) = exchange(
+        &g,
+        (
+            "spawn",
+            "standby",
+            "The same kind of request at the member it makes a WARM STANDBY: this provider's key \
+             is at index 1 of the `standby_set`, so the spawn must arrive on `.standby` and is \
+             paid at the listing's `standby_price`. The provider reserves capacity and sets \
+             `expires_at` the same way a running lease does, and starts NOTHING: `role` is \
+             `standby` and there is no `access` at all, because there is nowhere to reach until a \
+             Takeover (spec §7.1). Index 0 here is `constants.primary_provider`, the primary \
+             whose Liveness this standby watches and whom `directory.takeover` claims the same \
+             workload id from.",
+        ),
+        &route("warm.v1.standby"),
+        "/listings/warm/v1/standby",
+        envelope(&event),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["role"], "standby");
+    assert!(response.get("access").is_none(), "{}", response);
+    golden("spawn.standby.json", doc);
+
+    let (status, response, doc) = exchange(
+        &g,
+        (
+            "status",
+            "reserved",
+            "Status of that Warm Standby before Takeover (spec §6.5, §6.7): `state` is the one \
+             word `reserved`, `role` is `standby`, and there is NO `access` — the capacity is \
+             held and paid for, and nothing is running to reach. The reservation counts against \
+             the listing's capacity exactly as a running lease does, so Liveness `available` and \
+             `availability` both subtract it.",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&g.about_request(&g.tenant, "status", STANDBY_SET_WORKLOAD, TTL)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["state"], "reserved");
+    assert_eq!(response["role"], "standby");
+    assert!(response.get("access").is_none(), "{}", response);
+    golden("status.reserved.json", doc);
 }
 
 /// A response the app builds, rendered the way a route would answer it:
@@ -1797,7 +1900,7 @@ async fn one_spawn_per_image_form() {
     );
     let event = lease_request(
         &f.tenant,
-        f.provider_pubkey(),
+        &[f.provider_pubkey()],
         "spawn",
         &content,
         NOW,
@@ -1836,7 +1939,7 @@ async fn one_spawn_per_image_form() {
     );
     let event = lease_request(
         &f.tenant,
-        f.provider_pubkey(),
+        &[f.provider_pubkey()],
         "spawn",
         &content,
         NOW,
@@ -1876,7 +1979,7 @@ async fn one_spawn_per_image_form() {
     let content = spawn_content_with(0xd3, ImageRef::by_digest(image_digest()), None);
     let event = lease_request(
         &bare.tenant,
-        bare.provider_pubkey(),
+        &[bare.provider_pubkey()],
         "spawn",
         &content,
         NOW,

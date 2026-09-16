@@ -44,6 +44,10 @@
     "sig": "BIP-340 Schnorr over the id, by the event's pubkey"
   },
   "standby_price": 400,
+  "standby_provider": {
+    "public_key": "5ab4689e400a4a160cf01cd44730845a54768df8547dcdf073d964f109f18c30",
+    "secret_key": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
   "tenant": {
     "public_key": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
     "secret_key": "1111111111111111111111111111111111111111111111111111111111111111"

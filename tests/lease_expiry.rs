@@ -24,6 +24,8 @@ fn lease(id: u32, expires_at: u64) -> LeaseRecord {
         listing_version: 1,
         role: Role::Standalone,
         state: LeaseState::Running,
+        standby_set: None,
+        reserved_spawn: None,
         created_at: NOW - 600,
         expires_at,
         ended_at: None,

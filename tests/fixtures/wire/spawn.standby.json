@@ -1,0 +1,44 @@
+{
+  "fixture": {
+    "case": "standby",
+    "description": "The same kind of request at the member it makes a WARM STANDBY: this provider's key is at index 1 of the `standby_set`, so the spawn must arrive on `.standby` and is paid at the listing's `standby_price`. The provider reserves capacity and sets `expires_at` the same way a running lease does, and starts NOTHING: `role` is `standby` and there is no `access` at all, because there is nowhere to reach until a Takeover (spec §7.1). Index 0 here is `constants.primary_provider`, the primary whose Liveness this standby watches and whom `directory.takeover` claims the same workload id from.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "spawn"
+  },
+  "http_path": "/listings/warm/v1/standby",
+  "request_body": {
+    "request": {
+      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd\",\"reference\":\"docker.io/library/alpine\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"standby_set\":[\"9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b\",\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\"],\"volume_gb\":2,\"workload_id\":\"a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0\"}",
+      "created_at": 1700000000,
+      "id": "1dbb95d67cf8f1210f55460ca5eceb5320648e2644a2528d2b38e0dda5363ce2",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "8a7d1438e1df1d865e4d7666e2bed8cc379d720ad5a03f7ac18755af46916697d75d7f2be35eae98ad2e44a5ce7ecd43ae0bcd701287989c6642904e51862750",
+      "tags": [
+        [
+          "p",
+          "9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b"
+        ],
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "spawn"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "expires_at": 1700003600,
+    "role": "standby",
+    "workload_id": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+  },
+  "response_status": 200,
+  "route": "g.fixture.warm.v1.standby"
+}

@@ -281,6 +281,18 @@ impl LeaseState {
     pub fn is_live(self) -> bool {
         !matches!(self, LeaseState::Ended(_))
     }
+
+    /// Whether a workload exists for this lease on the provider's backend.
+    ///
+    /// One question with two uses, and they must never disagree: it is what
+    /// `status` answers `access` for — a host and port that reach nothing
+    /// would be a lie — and what an ending destroys. A `Reserved` standby
+    /// has none until Takeover; an `Ended` lease's has been destroyed
+    /// already. `Provisioning` counts: the container may exist by the time
+    /// the question is asked.
+    pub fn has_workload(self) -> bool {
+        matches!(self, LeaseState::Provisioning | LeaseState::Running)
+    }
 }
 
 /// The answer to a successful status (spec §6.5).
