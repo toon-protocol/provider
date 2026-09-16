@@ -1,0 +1,19 @@
+{
+  "fixture": {
+    "case": "not_running",
+    "description": "`.extend` paid for a Warm Standby RESERVATION rather than a running lease (spec §6.3). A reservation is billed at `standby_price` on `.standby.extend`; a lease is always billed at the price for what it is doing.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/listings/warm/v1/extend",
+  "request_body": {
+    "workload_id": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+  },
+  "response_body": {
+    "error": "not_running",
+    "message": "this lease is a Warm Standby reservation, not a running lease; extend it on .standby.extend"
+  },
+  "response_status": 409,
+  "route": "g.fixture.warm.v1.extend",
+  "validation_step": "§6.3: on .extend the lease MUST be Running"
+}

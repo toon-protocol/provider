@@ -346,7 +346,8 @@ pub fn refuse(error: ErrorResponse) -> Response {
         ErrorCode::WorkloadIdTaken
         | ErrorCode::NoCapacity
         | ErrorCode::Expired
-        | ErrorCode::NotStandby => StatusCode::CONFLICT,
+        | ErrorCode::NotStandby
+        | ErrorCode::NotRunning => StatusCode::CONFLICT,
         ErrorCode::RefusedImage | ErrorCode::NoMatchingArch => StatusCode::UNPROCESSABLE_ENTITY,
     };
     (status, Json(error)).into_response()
