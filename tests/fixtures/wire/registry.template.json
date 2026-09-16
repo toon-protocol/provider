@@ -8,7 +8,7 @@
       "SITE_TITLE"
     ],
     "image": {
-      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126",
       "registry_entry": {
         "address": "30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0",
         "relay": "ws://relay.fixture.example:7100"
@@ -28,12 +28,12 @@
     "version": 1
   },
   "event": {
-    "content": "{\"version\":1,\"image\":{\"digest\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"registry_entry\":{\"address\":\"30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0\",\"relay\":\"ws://relay.fixture.example:7100\"}},\"ports\":[{\"container_port\":8080,\"protocol\":\"tcp\"}],\"data_path\":\"/data\",\"env_fixed\":{\"MODE\":\"production\"},\"env_tenant\":[\"SITE_TITLE\"],\"min_resources\":{\"cpu_millicores\":500,\"memory_mb\":256,\"storage_gb\":4}}",
+    "content": "{\"version\":1,\"image\":{\"digest\":\"sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126\",\"registry_entry\":{\"address\":\"30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0\",\"relay\":\"ws://relay.fixture.example:7100\"}},\"ports\":[{\"container_port\":8080,\"protocol\":\"tcp\"}],\"data_path\":\"/data\",\"env_fixed\":{\"MODE\":\"production\"},\"env_tenant\":[\"SITE_TITLE\"],\"min_resources\":{\"cpu_millicores\":500,\"memory_mb\":256,\"storage_gb\":4}}",
     "created_at": 1700000000,
-    "id": "7e7386634e141424eaf3657686c7555356fa646cd2bc20ecc1e8ab9a13de94e0",
+    "id": "1df425133e9fcb43716339898442c35f11ab874fecfd5c258252197adcc57395",
     "kind": 30436,
     "pubkey": "2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
-    "sig": "b86f942404f22f2d15d7303fb5f3ade723fef060d05372c4c2db826a0adfaf385d8aa973e164fe386d18e880c6c79ecdf246fa79433e1bd4fe97595e1a56cd56",
+    "sig": "76d1924cb70311a81786884f06575637394b52d4f0c97ea39ab610605eaa5b3b9857107ca3f2b783fef1f54f3068ceeaa96771684507fe36b4c800abdbf3d08e",
     "tags": [
       [
         "d",
@@ -52,5 +52,5 @@
     "surface": "registry"
   },
   "kind_name": "K_TEMPLATE",
-  "nip01_serialization": "[0,\"2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991\",1700000000,30436,[[\"d\",\"static-site\"],[\"L\",\"toon.network\"]],\"{\\\"version\\\":1,\\\"image\\\":{\\\"digest\\\":\\\"sha256:1111111111111111111111111111111111111111111111111111111111111111\\\",\\\"registry_entry\\\":{\\\"address\\\":\\\"30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0\\\",\\\"relay\\\":\\\"ws://relay.fixture.example:7100\\\"}},\\\"ports\\\":[{\\\"container_port\\\":8080,\\\"protocol\\\":\\\"tcp\\\"}],\\\"data_path\\\":\\\"/data\\\",\\\"env_fixed\\\":{\\\"MODE\\\":\\\"production\\\"},\\\"env_tenant\\\":[\\\"SITE_TITLE\\\"],\\\"min_resources\\\":{\\\"cpu_millicores\\\":500,\\\"memory_mb\\\":256,\\\"storage_gb\\\":4}}\"]"
+  "nip01_serialization": "[0,\"2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991\",1700000000,30436,[[\"d\",\"static-site\"],[\"L\",\"toon.network\"]],\"{\\\"version\\\":1,\\\"image\\\":{\\\"digest\\\":\\\"sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126\\\",\\\"registry_entry\\\":{\\\"address\\\":\\\"30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0\\\",\\\"relay\\\":\\\"ws://relay.fixture.example:7100\\\"}},\\\"ports\\\":[{\\\"container_port\\\":8080,\\\"protocol\\\":\\\"tcp\\\"}],\\\"data_path\\\":\\\"/data\\\",\\\"env_fixed\\\":{\\\"MODE\\\":\\\"production\\\"},\\\"env_tenant\\\":[\\\"SITE_TITLE\\\"],\\\"min_resources\\\":{\\\"cpu_millicores\\\":500,\\\"memory_mb\\\":256,\\\"storage_gb\\\":4}}\"]"
 }

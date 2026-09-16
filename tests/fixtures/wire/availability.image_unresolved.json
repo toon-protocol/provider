@@ -8,7 +8,7 @@
   "http_path": "/availability",
   "request_body": {
     "image": {
-      "digest": "sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd"
+      "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126"
     },
     "listing": "basic",
     "version": 1

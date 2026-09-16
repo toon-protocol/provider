@@ -1,13 +1,13 @@
 {
   "fixture": {
     "case": "registry_entry",
-    "description": "Form 2: `{ digest, registry_entry }`. The entry at `address` lists every blob and where its bytes are (§8.1); `relay` is a hint for finding it, not an authority — the entry is addressed by its signer. `availability` resolves this form through the entry (§8.4); a paid spawn is refused `refused_image` until this provider can run what it resolved, before any relay or gateway is read: the request is exactly what the spec allows, so the code says the provider cannot run it yet, not that the tenant got it wrong.",
+    "description": "Form 2 of §6.2's `image`: `{ digest, registry_entry }`. The entry at `address` (`registry.image_entry`) lists every blob and where its bytes are (§8.1); `relay` is a hint for finding it, not an authority — the entry is addressed by its signer. The provider resolves the image through the entry (§8.4): the manifest and config for `availability`, then every layer for the paid spawn, each blob fetched from the source the entry names — the Blob Record and its parts from the TOON store, the base layer from the upstream registry by digest — verified against its digest, cached, assembled into an OCI layout, loaded into the backend and run by image id. Same success shape as form 1.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "spawn_image"
   },
   "http_path": "/listings/basic/v1/spawn",
   "image": {
-    "digest": "sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd",
+    "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126",
     "registry_entry": {
       "address": "30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0",
       "relay": "ws://relay.fixture.example:7100"
@@ -15,12 +15,12 @@
   },
   "request_body": {
     "request": {
-      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd\",\"registry_entry\":{\"address\":\"30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0\",\"relay\":\"ws://relay.fixture.example:7100\"}},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"volume_gb\":2,\"workload_id\":\"d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2\"}",
+      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126\",\"registry_entry\":{\"address\":\"30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0\",\"relay\":\"ws://relay.fixture.example:7100\"}},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"volume_gb\":2,\"workload_id\":\"d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2\"}",
       "created_at": 1700000000,
-      "id": "25a87e90810fe8c97333abbe9052cfc246fda21c88478ed4ac7f98870d3f7892",
+      "id": "3129a2021ba6fd6b62055e6e690334dd5e88c6c0663781ebe085ee56e7f57e04",
       "kind": 4432,
       "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
-      "sig": "0504edb72959809a17f10d402e074251f587f588548f9d4d01b1cb789f45eb9480d741c1875a2e2581e8958f25a2f1a7f390f1ef29ba6962633dee49256c31b5",
+      "sig": "fac2ec02c96bb8595c83a7ce168631df63f0b9f94828ea2a49721e4855237bc306b7f3ee2131e1846df060b3a6a8dfbd7c049d01d4ed98deb685448d43779734",
       "tags": [
         [
           "p",
@@ -38,10 +38,21 @@
     }
   },
   "response_body": {
-    "error": "refused_image",
-    "message": "image: this provider resolves an Image Registry entry on `availability` but cannot yet run an image fetched through one; name the image with an upstream `reference` to spawn it"
+    "access": {
+      "host": "203.0.113.7",
+      "ports": [
+        {
+          "container_port": 443,
+          "host_port": 41016
+        }
+      ],
+      "ssh_port": 40001
+    },
+    "expires_at": 1700003600,
+    "role": "standalone",
+    "workload_id": "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2"
   },
-  "response_status": 422,
+  "response_status": 200,
   "route": "g.fixture.basic.v1.spawn",
   "spawn_content": {
     "args": [
@@ -55,7 +66,7 @@
       "GREETING": "hello"
     },
     "image": {
-      "digest": "sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd",
+      "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126",
       "registry_entry": {
         "address": "30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0",
         "relay": "ws://relay.fixture.example:7100"
@@ -70,6 +81,5 @@
     "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
     "volume_gb": 2,
     "workload_id": "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2"
-  },
-  "validation_step": "§6.2 step 5: resolve the image (§8.4)"
+  }
 }

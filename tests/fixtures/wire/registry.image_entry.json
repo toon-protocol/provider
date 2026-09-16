@@ -2,9 +2,27 @@
   "content": {
     "blobs": [
       {
-        "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126",
         "media_type": "application/vnd.oci.image.manifest.v1+json",
-        "size": 1234,
+        "size": 549,
+        "source": {
+          "blob_record_txid": "dG9vbi1zdG9yZS1tYW5pZmVzdC1yZWNvcmQ",
+          "type": "toon-store"
+        }
+      },
+      {
+        "digest": "sha256:b4c7e6f20318a27249daff2e0455a76e8ce7591c220a0ee3693b52e67864a68d",
+        "media_type": "application/vnd.oci.image.config.v1+json",
+        "size": 254,
+        "source": {
+          "blob_record_txid": "dG9vbi1zdG9yZS1jb25maWctcmVjb3Jk",
+          "type": "toon-store"
+        }
+      },
+      {
+        "digest": "sha256:1a482cd82f8fce0baa4053ab6066b8283607a67c5c479f4a9bb782ac598f5b76",
+        "media_type": "application/vnd.oci.image.layer.v1.tar",
+        "size": 2048,
         "source": {
           "registry": "registry-1.docker.io",
           "repository": "library/alpine",
@@ -12,25 +30,25 @@
         }
       },
       {
-        "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
-        "media_type": "application/vnd.oci.image.layer.v1.tar+gzip",
-        "size": 235520,
+        "digest": "sha256:7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4",
+        "media_type": "application/vnd.oci.image.layer.v1.tar",
+        "size": 235008,
         "source": {
           "blob_record_txid": "dG9vbi1zdG9yZS1ibG9iLXJlY29yZC10eGlk",
           "type": "toon-store"
         }
       }
     ],
-    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
-    "media_type": "application/vnd.oci.image.index.v1+json"
+    "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126",
+    "media_type": "application/vnd.oci.image.manifest.v1+json"
   },
   "event": {
-    "content": "{\"digest\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"media_type\":\"application/vnd.oci.image.index.v1+json\",\"blobs\":[{\"digest\":\"sha256:2222222222222222222222222222222222222222222222222222222222222222\",\"size\":1234,\"media_type\":\"application/vnd.oci.image.manifest.v1+json\",\"source\":{\"type\":\"oci\",\"registry\":\"registry-1.docker.io\",\"repository\":\"library/alpine\"}},{\"digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"size\":235520,\"media_type\":\"application/vnd.oci.image.layer.v1.tar+gzip\",\"source\":{\"type\":\"toon-store\",\"blob_record_txid\":\"dG9vbi1zdG9yZS1ibG9iLXJlY29yZC10eGlk\"}}]}",
+    "content": "{\"digest\":\"sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126\",\"media_type\":\"application/vnd.oci.image.manifest.v1+json\",\"blobs\":[{\"digest\":\"sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126\",\"size\":549,\"media_type\":\"application/vnd.oci.image.manifest.v1+json\",\"source\":{\"type\":\"toon-store\",\"blob_record_txid\":\"dG9vbi1zdG9yZS1tYW5pZmVzdC1yZWNvcmQ\"}},{\"digest\":\"sha256:b4c7e6f20318a27249daff2e0455a76e8ce7591c220a0ee3693b52e67864a68d\",\"size\":254,\"media_type\":\"application/vnd.oci.image.config.v1+json\",\"source\":{\"type\":\"toon-store\",\"blob_record_txid\":\"dG9vbi1zdG9yZS1jb25maWctcmVjb3Jk\"}},{\"digest\":\"sha256:1a482cd82f8fce0baa4053ab6066b8283607a67c5c479f4a9bb782ac598f5b76\",\"size\":2048,\"media_type\":\"application/vnd.oci.image.layer.v1.tar\",\"source\":{\"type\":\"oci\",\"registry\":\"registry-1.docker.io\",\"repository\":\"library/alpine\"}},{\"digest\":\"sha256:7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4\",\"size\":235008,\"media_type\":\"application/vnd.oci.image.layer.v1.tar\",\"source\":{\"type\":\"toon-store\",\"blob_record_txid\":\"dG9vbi1zdG9yZS1ibG9iLXJlY29yZC10eGlk\"}}]}",
     "created_at": 1700000000,
-    "id": "383713add0c3156c9d898872eeeac75e4266b1da458ccc25ddd19e31735c5cf8",
+    "id": "56938a1c7d92bfb77e329701a9eb085f683e612ba5390934980f19a197e4927c",
     "kind": 30434,
     "pubkey": "2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
-    "sig": "7ae77e14760c60361eb86c7f6fa84e485ca4413377d82e2eb3312cb96e1d5b305d5b1cbb8ee075d21daeab101887cf22118b2973e502629ad65349d8cf8216d4",
+    "sig": "f18fc32dbc353ccf0dacd2cae2d42f14c26bccdd480e76983b97c8aab19beb6a6801ce48e3c375aeb5ac69f9eba03466fd319e5e4fd6bb443ae2b92562238173",
     "tags": [
       [
         "d",
@@ -38,7 +56,7 @@
       ],
       [
         "x",
-        "1111111111111111111111111111111111111111111111111111111111111111"
+        "c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126"
       ],
       [
         "L",
@@ -48,10 +66,10 @@
   },
   "fixture": {
     "case": "image_entry",
-    "description": "An Image Registry entry (spec §8.1), signed by the PUBLISHER and not by any provider: `d` is `<name>:<tag>`, `x` is the image digest's hex, and `blobs` lists every blob reachable from `digest` with the source of each. Both source types are shown: a manifest still upstream (`oci`) and a layer in the TOON store (`toon-store`, naming the Blob Record's own upload). The canonical name of this image is `<publisher npub>/web:1.0`.",
+    "description": "An Image Registry entry (spec §8.1), signed by the PUBLISHER and not by any provider: `d` is `<name>:<tag>`, `x` is the image digest's hex, and `blobs` lists EVERY blob reachable from `digest` — the manifest, its config and both layers — with the source of each. Both source types are shown: a base layer still upstream (`oci`) and the manifest, config and application layer in the TOON store (`toon-store`, each naming its Blob Record's own upload). The canonical name of this image is `<publisher npub>/web:1.0`, and its bytes are real: `spawn_image.registry_entry` is a spawn fetched through this entry.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "registry"
   },
   "kind_name": "K_IMAGE",
-  "nip01_serialization": "[0,\"2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991\",1700000000,30434,[[\"d\",\"web:1.0\"],[\"x\",\"1111111111111111111111111111111111111111111111111111111111111111\"],[\"L\",\"toon.network\"]],\"{\\\"digest\\\":\\\"sha256:1111111111111111111111111111111111111111111111111111111111111111\\\",\\\"media_type\\\":\\\"application/vnd.oci.image.index.v1+json\\\",\\\"blobs\\\":[{\\\"digest\\\":\\\"sha256:2222222222222222222222222222222222222222222222222222222222222222\\\",\\\"size\\\":1234,\\\"media_type\\\":\\\"application/vnd.oci.image.manifest.v1+json\\\",\\\"source\\\":{\\\"type\\\":\\\"oci\\\",\\\"registry\\\":\\\"registry-1.docker.io\\\",\\\"repository\\\":\\\"library/alpine\\\"}},{\\\"digest\\\":\\\"sha256:3333333333333333333333333333333333333333333333333333333333333333\\\",\\\"size\\\":235520,\\\"media_type\\\":\\\"application/vnd.oci.image.layer.v1.tar+gzip\\\",\\\"source\\\":{\\\"type\\\":\\\"toon-store\\\",\\\"blob_record_txid\\\":\\\"dG9vbi1zdG9yZS1ibG9iLXJlY29yZC10eGlk\\\"}}]}\"]"
+  "nip01_serialization": "[0,\"2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991\",1700000000,30434,[[\"d\",\"web:1.0\"],[\"x\",\"c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126\"],[\"L\",\"toon.network\"]],\"{\\\"digest\\\":\\\"sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126\\\",\\\"media_type\\\":\\\"application/vnd.oci.image.manifest.v1+json\\\",\\\"blobs\\\":[{\\\"digest\\\":\\\"sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126\\\",\\\"size\\\":549,\\\"media_type\\\":\\\"application/vnd.oci.image.manifest.v1+json\\\",\\\"source\\\":{\\\"type\\\":\\\"toon-store\\\",\\\"blob_record_txid\\\":\\\"dG9vbi1zdG9yZS1tYW5pZmVzdC1yZWNvcmQ\\\"}},{\\\"digest\\\":\\\"sha256:b4c7e6f20318a27249daff2e0455a76e8ce7591c220a0ee3693b52e67864a68d\\\",\\\"size\\\":254,\\\"media_type\\\":\\\"application/vnd.oci.image.config.v1+json\\\",\\\"source\\\":{\\\"type\\\":\\\"toon-store\\\",\\\"blob_record_txid\\\":\\\"dG9vbi1zdG9yZS1jb25maWctcmVjb3Jk\\\"}},{\\\"digest\\\":\\\"sha256:1a482cd82f8fce0baa4053ab6066b8283607a67c5c479f4a9bb782ac598f5b76\\\",\\\"size\\\":2048,\\\"media_type\\\":\\\"application/vnd.oci.image.layer.v1.tar\\\",\\\"source\\\":{\\\"type\\\":\\\"oci\\\",\\\"registry\\\":\\\"registry-1.docker.io\\\",\\\"repository\\\":\\\"library/alpine\\\"}},{\\\"digest\\\":\\\"sha256:7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4\\\",\\\"size\\\":235008,\\\"media_type\\\":\\\"application/vnd.oci.image.layer.v1.tar\\\",\\\"source\\\":{\\\"type\\\":\\\"toon-store\\\",\\\"blob_record_txid\\\":\\\"dG9vbi1zdG9yZS1ibG9iLXJlY29yZC10eGlk\\\"}}]}\"]"
 }

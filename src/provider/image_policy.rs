@@ -42,14 +42,6 @@ pub const IMAGE_DIGEST_ONLY_NOT_RESOLVED: &str =
      fetch an image named by digest alone; name its Image Registry entry (`registry_entry`) \
      or an upstream `reference` as well";
 
-/// What a paid spawn says to `{ digest, registry_entry }` until the provider
-/// can run what it resolved: `availability` answers for such an image
-/// exactly as a spawn will once it can, but a spawn today would take the
-/// tenant's money for a workload it cannot start.
-pub const IMAGE_REGISTRY_NOT_RUNNABLE: &str =
-    "image: this provider resolves an Image Registry entry on `availability` but cannot yet \
-     run an image fetched through one; name the image with an upstream `reference` to spawn it";
-
 fn refused(message: impl Into<String>) -> ErrorResponse {
     ErrorResponse::new(ErrorCode::RefusedImage, message)
 }
@@ -106,6 +98,43 @@ pub struct ResolvedImage {
     /// The Image Registry entry the image was resolved through, when it was
     /// named by one: the source of every blob a spawn still has to fetch.
     pub entry: Option<ImageEntry>,
+}
+
+impl ResolvedImage {
+    /// The manifest's config blob.
+    pub fn config_digest(&self) -> Option<&str> {
+        manifest_config_digest(&self.manifest)
+    }
+
+    /// The manifest's layers, in order.
+    pub fn layer_digests(&self) -> Vec<&str> {
+        manifest_layer_digests(&self.manifest).collect()
+    }
+
+    /// The media type the manifest declares for itself, or the OCI one when
+    /// it declares none (an OCI manifest's `mediaType` is optional).
+    pub fn manifest_media_type(&self) -> &str {
+        self.manifest
+            .get("mediaType")
+            .and_then(Value::as_str)
+            .unwrap_or("application/vnd.oci.image.manifest.v1+json")
+    }
+
+    /// Where one of this image's blobs may be fetched from, in §8.4's
+    /// order — for the form that was resolved through an entry, the source
+    /// the entry lists. `refused_image` for a blob the image's description
+    /// does not account for, or for a form whose bytes the provider does
+    /// not fetch itself (Milestone 1's `reference`, which the backend
+    /// pulls whole).
+    pub fn sources_for(&self, digest: &str) -> Result<Vec<Candidate>, ErrorResponse> {
+        match &self.entry {
+            Some(entry) => entry_sources(entry, digest),
+            None => Err(refused(format!(
+                "no source is known for blob {} of image {}",
+                digest, self.manifest_digest
+            ))),
+        }
+    }
 }
 
 /// Which sources may serve a blob of the image being resolved, by digest.
@@ -288,17 +317,22 @@ fn manifest_config_digest(manifest: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-/// The digests a manifest's own blobs carry: its config first, then every
-/// layer in order.
-fn manifest_blob_digests(manifest: &Value) -> Vec<&str> {
-    let config = manifest_config_digest(manifest);
-    let layers = manifest
+fn manifest_layer_digests(manifest: &Value) -> impl Iterator<Item = &str> {
+    manifest
         .get("layers")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|l| l.get("digest").and_then(Value::as_str));
-    config.into_iter().chain(layers).collect()
+        .filter_map(|l| l.get("digest").and_then(Value::as_str))
+}
+
+/// The digests a manifest's own blobs carry: its config first, then every
+/// layer in order.
+fn manifest_blob_digests(manifest: &Value) -> Vec<&str> {
+    manifest_config_digest(manifest)
+        .into_iter()
+        .chain(manifest_layer_digests(manifest))
+        .collect()
 }
 
 /// Size of the manifest the provider would run: the config blob plus every

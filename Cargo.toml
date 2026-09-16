@@ -49,6 +49,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sha2 = "0.10"
 bytes = "1"
 
+# Writing the OCI image layout a Docker backend loads verified blobs from
+# (spec §8.4): one tar of `oci-layout`, `index.json` and `blobs/sha256/…`,
+# streamed straight out of the blob cache.
+tar = "0.4"
+
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
 proptest = "1"

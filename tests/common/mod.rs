@@ -3,8 +3,10 @@
 #![allow(dead_code)]
 
 pub mod harness;
+pub mod store;
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -20,6 +22,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 /// sequence rather than on the provider's internal state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendCall {
+    /// An image layout was loaded; the string is the file name it came in
+    /// as (`<manifest hex>.oci.tar`).
+    LoadImage(String),
     Create(u32),
     Start(u32),
     Stop(u32),
@@ -93,6 +98,16 @@ impl FakeBackend {
     }
 }
 
+/// The image id the fake answers for a loaded layout: what a spawn then
+/// runs, so a test can see that the workload was started by the id the
+/// load produced and by nothing else.
+pub fn loaded_image_id(layout_tar: &Path) -> String {
+    format!(
+        "loaded:{}",
+        layout_tar.file_name().unwrap().to_string_lossy()
+    )
+}
+
 #[async_trait]
 impl ComputeBackend for FakeBackend {
     async fn find_available_id(&self, range_start: u32, range_end: u32) -> Result<u32> {
@@ -103,6 +118,22 @@ impl ComputeBackend for FakeBackend {
             }
         }
         anyhow::bail!("no available id in {}..={}", range_start, range_end)
+    }
+
+    async fn load_image(&self, layout_tar: &Path) -> Result<String> {
+        anyhow::ensure!(
+            layout_tar.is_file(),
+            "no layout at {}",
+            layout_tar.display()
+        );
+        self.record(BackendCall::LoadImage(
+            layout_tar
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        ));
+        Ok(loaded_image_id(layout_tar))
     }
 
     async fn create_container(&self, config: &ContainerConfig) -> Result<String> {

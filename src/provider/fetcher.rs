@@ -20,15 +20,13 @@
 // hash, so a record from any signer is usable or discarded on its bytes
 // alone.
 //
-// What this ticket leaves for the next ones: the cache is in memory and
-// holds only what availability needs (an index, a manifest, a config — a
-// few KB each); layers, an on-disk cache that survives a restart and the
-// `no_capacity` answer for a full disk are the paid-spawn ticket's, and
-// the Relay Set lookup that supplies `Candidate::BlobRecord`s for a bare
-// digest is the one after.
+// The cache is `BlobCache`: verified bytes on disk, keyed by digest,
+// outliving every lease and every restart, so a popular layer is fetched
+// once. A blob that cannot be kept because the disk (or the configured cap)
+// is full is `no_capacity`, the spec's word for a provider that has run out
+// of room. What this leaves for the next ticket is the Relay Set lookup
+// that supplies `Candidate::BlobRecord`s for a bare digest.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -37,6 +35,7 @@ use nostr_sdk::Event;
 use sha2::{Digest, Sha256};
 use tracing::warn;
 
+use super::blob_cache::{BlobCache, CacheError};
 use super::oci::{OciClient, OciEndpoint};
 use crate::nostr::image_events::{BlobRecord, BlobRecordContent, BlobSource};
 use crate::nostr::wire::{ErrorCode, ErrorResponse};
@@ -111,14 +110,18 @@ pub struct BlobFetcher {
     /// gateway and every `toon-store` source fails — refused, not a panic,
     /// so an operator sees why in the answer.
     gateway_url_pattern: Option<String>,
-    /// Verified bytes, keyed by digest. Only bytes that hashed to their
-    /// digest are ever put here, so a cache hit skips every source and
-    /// every check.
-    cache: Mutex<HashMap<String, Bytes>>,
+    /// Verified bytes on disk, keyed by digest. Only bytes that hashed to
+    /// their digest are ever put here, so a cache hit skips every source
+    /// and every check.
+    cache: BlobCache,
 }
 
 impl BlobFetcher {
-    pub fn new(gateway_url_pattern: Option<String>, registry_url_override: Option<String>) -> Self {
+    pub fn new(
+        gateway_url_pattern: Option<String>,
+        registry_url_override: Option<String>,
+        cache: BlobCache,
+    ) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
@@ -127,29 +130,34 @@ impl BlobFetcher {
             oci: OciClient::new(http.clone(), registry_url_override),
             http,
             gateway_url_pattern,
-            cache: Mutex::new(HashMap::new()),
+            cache,
         }
     }
 
+    /// The cache every verified blob lands in — where a spawn reads them
+    /// back from to assemble an image.
+    pub fn cache(&self) -> &BlobCache {
+        &self.cache
+    }
+
     /// The verified bytes of `digest`: from the cache, or from the first
-    /// candidate whose bytes hash to it. `refused_image` when none does,
-    /// naming every source that was tried and why it failed.
+    /// candidate whose bytes hash to it, which are then cached.
+    /// `refused_image` when none does, naming every source that was tried
+    /// and why it failed; `no_capacity` when the bytes were found but the
+    /// cache has no room for them.
     pub async fn fetch(
         &self,
         digest: &str,
         candidates: &[Candidate],
     ) -> Result<Bytes, ErrorResponse> {
-        if let Some(cached) = self.cache.lock().unwrap().get(digest).cloned() {
+        if let Some(cached) = self.cache.get(digest).await {
             return Ok(cached);
         }
         let mut failures = Vec::new();
         for candidate in candidates {
             match self.fetch_from(digest, candidate).await {
                 Ok(bytes) => {
-                    self.cache
-                        .lock()
-                        .unwrap()
-                        .insert(digest.to_string(), bytes.clone());
+                    self.keep(digest, &bytes).await?;
                     return Ok(bytes);
                 }
                 Err(e) => {
@@ -175,6 +183,22 @@ impl BlobFetcher {
                 )
             },
         ))
+    }
+
+    /// Cache verified bytes. A cache that cannot take them is an answer,
+    /// not a warning: the next spawn would fetch the same blob again and
+    /// fail the same way, and a layer that is not on disk cannot be
+    /// assembled into an image — so the spawn is `no_capacity`, which is
+    /// what the spec says a full disk is.
+    async fn keep(&self, digest: &str, bytes: &[u8]) -> Result<(), ErrorResponse> {
+        match self.cache.put(digest, bytes).await {
+            Ok(()) => Ok(()),
+            Err(CacheError::NoSpace(why)) => Err(ErrorResponse::new(ErrorCode::NoCapacity, why)),
+            Err(CacheError::Io(e)) => Err(ErrorResponse::new(
+                ErrorCode::NoCapacity,
+                format!("blob {} could not be kept in the cache: {:#}", digest, e),
+            )),
+        }
     }
 
     /// Bytes from one candidate, verified against `digest` before they are
@@ -332,14 +356,19 @@ mod tests {
         assert!(verify_digest(bytes, "md5:00").is_err());
     }
 
+    fn cache() -> BlobCache {
+        BlobCache::open(tempfile::tempdir().unwrap().keep(), None).unwrap()
+    }
+
     #[test]
     fn the_gateway_pattern_is_filled_with_the_txid() {
-        let fetcher = BlobFetcher::new(Some("http://gw:3000/raw/{txid}".to_string()), None);
+        let fetcher =
+            BlobFetcher::new(Some("http://gw:3000/raw/{txid}".to_string()), None, cache());
         assert_eq!(
             fetcher.gateway_url("abc").unwrap(),
             "http://gw:3000/raw/abc"
         );
-        let none = BlobFetcher::new(None, None);
+        let none = BlobFetcher::new(None, None, cache());
         assert!(none
             .gateway_url("abc")
             .unwrap_err()

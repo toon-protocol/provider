@@ -5,17 +5,30 @@
 // code: (1) the Lease Request — signature, addressee, freshness, replay;
 // (2) the listing version — it must exist AND be the one on sale
 // (`ProviderConfig::sellable_listing`, shared with `availability`) — and
-// whether the volume and ports fit it; (3) the role; (4) the workload id; (5) the image; (6) capacity. Then the workload
-// is started. A refusal on this route is still billed (ADR 0003), so the
-// order is the whole of what a tenant can rely on: the first reason is the
-// one reported.
+// whether the volume and ports fit it; (3) the role; (4) the workload id;
+// (5) the image; (6) capacity. Then the workload is started. A refusal on
+// this route is still billed (ADR 0003), so the order is the whole of what
+// a tenant can rely on: the first reason is the one reported.
+//
+// Step 5 is the resolution `availability` also does (`image_policy::check`:
+// the entry, the index, the manifest for the listing's arch, its config).
+// For an image named through its Image Registry entry the bytes then have
+// to be FETCHED — every layer through the entry's sources, verified,
+// cached, assembled into an OCI layout and loaded into the backend — and
+// that happens after the slot is reserved and outside the lease-table lock,
+// since a layer can take minutes and nothing else should wait on it. A
+// fetch that fails releases the slot again and is answered `refused_image`
+// (no source could serve a blob) or `no_capacity` (the cache is full); no
+// container exists after either. Milestone 1's `reference` form keeps its
+// own path: the backend pulls `reference@digest` itself.
 
 use std::collections::HashMap;
 
 use tracing::{error, info, warn};
 
 use super::config::{Listing, MAX_PORTS_PER_WORKLOAD};
-use super::image_policy::{self, IMAGE_REGISTRY_NOT_RUNNABLE};
+use super::image_policy::{self, ResolvedImage};
+use super::oci_layout::write_layout_tar;
 use super::persistence::{count_live, persist_leases, LeaseRecord, LeaseState};
 use crate::compute::{container_name, ContainerConfig, PortMapping};
 use crate::nostr::image_events::SpawnImage;
@@ -85,8 +98,10 @@ pub async fn spawn(
     let ssh_port;
     let ports;
     let id;
-    // What the backend is told to run: `<reference>@<digest>`.
-    let pull;
+    // Which of the three forms §6.2 allows the `image` is, and what it
+    // resolved to.
+    let image;
+    let resolved;
     {
         let mut leases = state.leases.lock().await;
         if leases
@@ -102,29 +117,19 @@ pub async fn spawn(
         }
         // Step 5: which of the three forms §6.2 allows the `image` is — a
         // fourth shape is `invalid_request` — and then whether this
-        // provider will run it.
-        let image = SpawnImage::parse(&content.image)?;
-        // An image named through the Image Registry resolves on
-        // `availability` but is not yet something this provider can RUN:
-        // refused here, before any relay or gateway is read and before
-        // capacity is counted, so a tenant is never billed for a
-        // resolution that ends in a workload that cannot start.
-        if matches!(image, SpawnImage::Registry { .. }) {
-            return Err(ErrorResponse::new(
-                ErrorCode::RefusedImage,
-                IMAGE_REGISTRY_NOT_RUNNABLE,
-            ));
-        }
-        // Step 5 continued: the provider's own image policy — a deny list
-        // and a size cap, resolved against the upstream registry. The same
-        // check `availability` applies, so a positive `availability` answer
-        // and a paid spawn's outcome never disagree (spec §9). This holds
-        // the lease-table lock across a network fetch; deliberately so, to
-        // keep the same atomicity `workload_id_taken`/capacity/insert
-        // already relied on, at the cost of serialising spawns behind an
-        // uncached image lookup (a repeat digest is served from the
-        // fetcher's cache of verified blobs without another fetch).
-        image_policy::check(
+        // provider will run it: the provider's own image policy — a deny
+        // list and a size cap — applied to what the image resolves to
+        // (spec §8.4). The same check `availability` applies, so a
+        // positive `availability` answer and a paid spawn's outcome never
+        // disagree (spec §9). This holds the lease-table lock across the
+        // resolution's network reads; deliberately so, to keep the same
+        // atomicity `workload_id_taken`/capacity/insert already relied on,
+        // at the cost of serialising spawns behind an uncached image lookup
+        // (a repeat digest is served from the blob cache without another
+        // fetch). Only resolution happens here; the layers are fetched
+        // below, after the slot is taken and the lock released.
+        image = SpawnImage::parse(&content.image)?;
+        resolved = image_policy::check(
             &state.fetcher,
             state.directory.as_ref(),
             &state.image_policy,
@@ -132,13 +137,6 @@ pub async fn spawn(
             &image,
         )
         .await?;
-        // Every form `image_policy::check` lets through names an upstream
-        // repository to pull from, so this cannot fail; it is written as a
-        // question rather than an `expect` so a future form that reaches
-        // here refuses instead of panicking.
-        pull = image.upstream_pull().ok_or_else(|| {
-            ErrorResponse::new(ErrorCode::RefusedImage, IMAGE_REGISTRY_NOT_RUNNABLE)
-        })?;
         let running = count_live(&leases, &listing.name);
         if running >= state.config.capacity_of(&listing.name) as usize {
             return Err(ErrorResponse::new(
@@ -195,8 +193,34 @@ pub async fn spawn(
         persist_leases(&leases, &state.config.lease_state_path);
     }
 
+    // ── fetch it ────────────────────────────────────────────────────────
+    // What the backend is told to run: `<reference>@<digest>` for the form
+    // the backend pulls itself, or the id the backend gave the image this
+    // provider fetched, verified and loaded.
+    let run_image = match image.upstream_pull() {
+        Some(pull) => pull,
+        None => match materialise(state, &resolved).await {
+            Ok(image_id) => image_id,
+            Err(e) => {
+                // Nothing was started, so there is nothing to destroy: just
+                // give the slot and the id back. The refusal is still
+                // billed (ADR 0003), which is why `availability` resolves
+                // the image for free first — but a layer that fails only on
+                // the full fetch can only be found out here.
+                warn!(
+                    "image {} for workload {} could not be fetched: {}",
+                    resolved.manifest_digest, content.workload_id, e.message
+                );
+                let mut leases = state.leases.lock().await;
+                leases.remove(&id);
+                persist_leases(&leases, &state.config.lease_state_path);
+                return Err(e);
+            }
+        },
+    };
+
     // ── start it ────────────────────────────────────────────────────────
-    let config = container_config(id, &listing, &content, &pull, ssh_port, &ports);
+    let config = container_config(id, &listing, &content, &run_image, ssh_port, &ports);
     info!(
         "spawning workload {} ({} v{}) for tenant {} as {}",
         content.workload_id, listing.name, listing.version, tenant_hex, config.name
@@ -255,6 +279,61 @@ pub async fn spawn(
             ))
         }
     }
+}
+
+/// Fetch every layer of an image resolved through its Image Registry entry,
+/// assemble the verified blobs into an OCI layout and load it into the
+/// backend; answer the image id the backend runs it by (spec §8.4).
+///
+/// The manifest and the config are already in the cache — resolution put
+/// them there — so the layout is written straight out of the cache once
+/// every layer has joined them. A layer no source can serve is
+/// `refused_image`; one the cache has no room for is `no_capacity`. The
+/// layout tar lives in the cache's scratch directory only for the length of
+/// the load.
+async fn materialise(state: &AppState, image: &ResolvedImage) -> Result<String, ErrorResponse> {
+    for layer in image.layer_digests() {
+        state
+            .fetcher
+            .fetch(layer, &image.sources_for(layer)?)
+            .await?;
+    }
+
+    let cache = state.fetcher.cache().clone();
+    let layout = cache.scratch_dir().join(format!(
+        "{}.oci.tar",
+        image
+            .manifest_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&image.manifest_digest)
+    ));
+    let written = {
+        let cache = cache.clone();
+        let image = image.clone();
+        let layout = layout.clone();
+        tokio::task::spawn_blocking(move || write_layout_tar(&cache, &image, &layout))
+            .await
+            .map_err(|e| anyhow::anyhow!("writing the image layout panicked: {}", e))
+            .and_then(|r| r)
+    };
+    let loaded = match written {
+        Ok(()) => state.backend.load_image(&layout).await,
+        Err(e) => Err(e),
+    };
+    let _ = tokio::fs::remove_file(&layout).await;
+    loaded.map_err(|e| {
+        // The blobs are all verified and on disk; what failed is the
+        // provider's own disk or daemon, which is the provider being out of
+        // room to run this — `no_capacity`, so the tenant tries elsewhere
+        // rather than concluding the image is bad.
+        ErrorResponse::new(
+            ErrorCode::NoCapacity,
+            format!(
+                "image {} could not be loaded into the backend: {:#}",
+                image.manifest_digest, e
+            ),
+        )
+    })
 }
 
 /// The lowest workload id in range that neither the backend nor a LIVE lease

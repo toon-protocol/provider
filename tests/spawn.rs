@@ -291,19 +291,20 @@ const ENTRY_ADDRESS: &str =
     "30434:4444444444444444444444444444444444444444444444444444444444444444:web:1.0";
 
 #[tokio::test]
-async fn an_image_registry_form_is_refused_image_until_the_provider_can_run_it() {
+async fn an_image_registry_form_this_provider_cannot_serve_is_refused_image() {
     // Not `invalid_request`: both forms are exactly what §6.2 allows, and a
     // tenant that gets `invalid_request` would go and fix a request that is
-    // already correct. A registry entry resolves on `availability` but this
-    // provider cannot yet RUN what it resolves, and a bare digest is not
-    // resolved at all yet — either way the spawn is refused before any
-    // relay or gateway is read, so the tenant is not billed for a fetch.
+    // already correct. A registry entry is resolved through the relay it
+    // hints at (`tests/registry_spawn.rs` is where that succeeds); here the
+    // relay holds no such entry. A bare digest is not resolved at all yet.
+    // Either way the spawn is refused before capacity is counted and before
+    // any container is created.
     let h = harness().await;
     for (label, image, expected) in [
         (
             "digest with a registry entry",
             ImageRef::from_registry(digest(), ENTRY_ADDRESS, "wss://relay.example"),
-            "cannot yet run an image fetched through one",
+            "no Image Registry entry",
         ),
         (
             "digest alone",
@@ -330,15 +331,12 @@ async fn an_image_registry_form_is_refused_image_until_the_provider_can_run_it()
             label,
             body
         );
+        assert!(
+            h.backend.calls().is_empty(),
+            "{}: nothing was started",
+            label
+        );
     }
-    assert!(
-        h.backend.calls().is_empty(),
-        "nothing was created for an image this provider cannot run"
-    );
-    assert!(
-        h.directory.entry_lookups().is_empty(),
-        "no relay was read for a spawn that was going to be refused anyway"
-    );
 }
 
 #[tokio::test]

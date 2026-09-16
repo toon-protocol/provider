@@ -246,9 +246,37 @@ pub struct ProviderConfig {
     /// bytes are upstream.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_url_pattern: Option<String>,
+
+    /// Where verified image blobs are kept, by digest, across leases and
+    /// restarts (spec §8.4). Unset, it is `blobs/` beside
+    /// `lease_state_path`, so the one directory an operator already keeps
+    /// holds both. Only bytes that hashed to their digest are written here,
+    /// and every read is verified again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_cache_dir: Option<String>,
+
+    /// The most the blob cache may hold, in bytes. A blob that would take
+    /// it past this is not kept and the spawn is `no_capacity` — the same
+    /// answer a full disk gives. Unset, the disk is the only bound; there
+    /// is no eviction yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob_cache_max_bytes: Option<u64>,
 }
 
 impl ProviderConfig {
+    /// The blob cache directory: `blob_cache_dir`, or `blobs/` beside the
+    /// lease table.
+    pub fn blob_cache_dir(&self) -> std::path::PathBuf {
+        match &self.blob_cache_dir {
+            Some(dir) => std::path::PathBuf::from(dir),
+            None => std::path::Path::new(&self.lease_state_path)
+                .parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default()
+                .join("blobs"),
+        }
+    }
+
     /// Host port forwarded to a workload's SSH. Derived rather than stored, so
     /// every answer that names a port for a given id names the same one.
     ///
@@ -664,6 +692,8 @@ impl Default for ProviderConfig {
             lease_state_path: default_lease_state_path(),
             image_policy: ImagePolicyConfig::default(),
             gateway_url_pattern: None,
+            blob_cache_dir: None,
+            blob_cache_max_bytes: None,
         }
     }
 }

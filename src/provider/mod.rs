@@ -16,12 +16,14 @@
 // is how every image byte they read arrives, verified.
 
 mod availability;
+pub mod blob_cache;
 mod cleanup;
 mod config;
 pub mod fetcher;
 pub mod image_policy;
 mod lifecycle;
 pub mod oci;
+pub mod oci_layout;
 mod persistence;
 mod publish;
 pub mod routes;
@@ -29,6 +31,7 @@ mod spawn;
 mod standby;
 
 pub use availability::availability;
+pub use blob_cache::BlobCache;
 pub use cleanup::SWEEP_INTERVAL_SECS;
 pub use config::{
     load_config, BackendKind, ImagePolicyConfig, Listing, ProviderConfig, MAX_PORTS_PER_WORKLOAD,
