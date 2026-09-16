@@ -213,15 +213,6 @@ impl BlobSources {
         }
     }
 
-    /// The Image Registry entry the image was named through, when it was
-    /// named through one.
-    pub fn image_entry(&self) -> Option<&ImageEntry> {
-        match &self.named {
-            Named::Entry(entry) => Some(entry),
-            _ => None,
-        }
-    }
-
     /// §8.4 step 2: what the image's own description names for `digest`.
     /// Empty when it names nothing for it — a bare digest, or an entry that
     /// does not list the blob.
