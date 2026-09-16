@@ -404,7 +404,7 @@ async fn an_image_that_is_neither_of_the_three_forms_is_invalid_request() {
 }
 
 #[tokio::test]
-async fn a_template_is_accepted_and_ignored_but_a_capability_beside_it_is_not() {
+async fn a_template_grants_nothing_and_a_capability_beside_it_is_still_refused() {
     // ADR 0004: a Template grants nothing, and the provider never reads one.
     // `template` rides along informationally; anything that looks like a
     // privilege beside it is still refused.
@@ -429,6 +429,10 @@ async fn a_template_is_accepted_and_ignored_but_a_capability_beside_it_is_not() 
     // asked for is the one a spawn WITHOUT the Template produces, field for
     // field. A `ContainerConfig` has no privilege, device, mount or
     // capability field at all, so there is nothing for a Template to reach.
+    // `capabilities::grant_refusal` refuses every capability this build could
+    // publish, so a listing that grants none is the only listing there is —
+    // and the strongest statement of "exactly its listing's capabilities"
+    // available until the backend supplies one.
     assert!(
         listing("basic", 1, 2).capabilities.is_empty(),
         "the listing these leases are bought on grants nothing"

@@ -229,9 +229,9 @@ and picks the manifest for its own architecture. `template` — the
 with the lease and reported by `status`, and never read: the provider makes no
 relay lookup for it, and a spawn that names one gets exactly the capabilities
 of the listing it was bought on and no more. A Template grants nothing, and
-only the listing decides what privileges a workload gets (ADR 0004). The
-expansion happens tenant-side, in the sandbox harness
-(`sandbox/scripts/lib/template.mjs` in the infra repo). Anything else in the
+only the listing decides what privileges a workload gets (ADR 0004).
+Expanding a Template into a spawn is the TENANT's job and happens in the
+sandbox harness, never here. Anything else in the
 content — a runtime flag, a host mount, a device, a capability — is refused as
 `invalid_request`. That includes every way of asking for a Docker daemon
 inside the workload: see [Capabilities](#capabilities).

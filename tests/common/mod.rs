@@ -269,6 +269,11 @@ pub struct FakeDirectory {
     /// test that asserts the provider looked nothing up (a spawn's
     /// `template`, which it never resolves) needs the fake to record the
     /// question, not just the answer.
+    ///
+    /// Prose rather than a `BackendCall`-style enum on purpose: the tests
+    /// that read it ask whether the journal is EMPTY, and the string is what
+    /// the failure prints. A new read on the port needs one `push` here and
+    /// no new variant anywhere.
     reads: Mutex<Vec<String>>,
 }
 
