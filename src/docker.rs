@@ -130,6 +130,14 @@ const HELPER_CGROUP_MOUNT: &str = "/host-cgroup";
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(90);
 const DAEMON_READY_POLL: Duration = Duration::from_millis(500);
 
+/// How long `docker stop` gives the sidecar's daemon before killing it. Short
+/// on purpose: a lease ends synchronously inside a terminate request that a
+/// connector waits at most 30 s for, and the workload's own stop already
+/// takes up to Docker's default 10 s. The daemon's state is either
+/// disposable (the lease is ending) or recovered by the next start (dind
+/// clears its stale pid file), so a killed daemon costs nothing lasting.
+const SIDECAR_STOP_GRACE_S: &str = "5";
+
 /// The CPU period Docker's `--cpus` uses, so the parent's `cpu.max` reads in
 /// the same units as its children's.
 const CPU_PERIOD_US: u64 = 100_000;
@@ -508,8 +516,14 @@ impl DockerBackend {
     /// build, and before a re-spawn at an id whose last lease may have left
     /// pieces behind. The data volume is not touched here.
     async fn remove_lease_extras(&self, id: u32) {
+        let had_sidecar = self.running(&sidecar_name(id)).await.is_some();
+        self.remove_lease_extras_after(id, had_sidecar).await;
+    }
+
+    /// `remove_lease_extras` for a caller that already knows whether the
+    /// sidecar existed (it may have removed it itself).
+    async fn remove_lease_extras_after(&self, id: u32, had_sidecar: bool) {
         let sidecar = sidecar_name(id);
-        let had_sidecar = self.running(&sidecar).await.is_some();
         let _ = self.docker(&["rm", "-f", "-v", &sidecar]).await;
         let _ = self.docker(&["rm", "-f", &seed_name(id)]).await;
         let _ = self
@@ -655,6 +669,7 @@ impl DockerBackend {
 
     async fn build_docker_lease(&self, config: &ContainerConfig) -> Result<String> {
         let id = config.id;
+        let started = Instant::now();
         let layout = self.cgroup_layout().await;
         self.docker_ok(
             &["network".into(), "create".into(), network_name(id)],
@@ -667,13 +682,24 @@ impl DockerBackend {
         self.docker_ok(&["start".into(), sidecar_name(id)], "starting the sidecar")
             .await?;
         let version = self.wait_for_daemon(id).await?;
-        self.apply_unit_limits(layout, config).await?;
         info!(
-            "lease {} has its own daemon ({}) at {}/{}",
-            id, version, WORKLOAD_SOCKET_DIR, SOCKET_FILE
+            "lease {} has its own daemon ({}) at {}/{} after {:.1?}",
+            id,
+            version,
+            WORKLOAD_SOCKET_DIR,
+            SOCKET_FILE,
+            started.elapsed()
         );
-        self.docker_ok(&self.run_args(config, layout), "docker run")
-            .await
+        self.apply_unit_limits(layout, config).await?;
+        let created = self
+            .docker_ok(&self.run_args(config, layout), "docker run")
+            .await?;
+        info!(
+            "lease {} workload started beside its daemon after {:.1?}",
+            id,
+            started.elapsed()
+        );
+        Ok(created)
     }
 
     /// A `docker` lease: its network, sidecar, seeded socket volume, unit
@@ -799,21 +825,29 @@ impl ComputeBackend for DockerBackend {
     }
 
     async fn stop_container(&self, id: u32) -> Result<()> {
-        // Best-effort: an already-gone container must not fail the cleanup loop.
-        let _ = self.docker(&["stop", &container_name(id)]).await;
-        let _ = self.docker(&["stop", &sidecar_name(id)]).await;
+        // Best-effort: an already-gone container must not fail the cleanup
+        // loop. Both at once, so a `docker` lease stops in the workload's
+        // grace period rather than the sum of two.
+        let (name, sidecar) = (container_name(id), sidecar_name(id));
+        let stop_workload = ["stop", &name];
+        let stop_sidecar = ["stop", "-t", SIDECAR_STOP_GRACE_S, &sidecar];
+        let _ = tokio::join!(self.docker(&stop_workload), self.docker(&stop_sidecar));
         Ok(())
     }
 
     async fn delete_container(&self, id: u32) -> Result<()> {
         let name = container_name(id);
+        let sidecar = sidecar_name(id);
+        let had_sidecar = self.running(&sidecar).await.is_some();
         // `-v` takes the image's anonymous volumes with it; the named ones
-        // are removed by name below.
-        let _ = self.docker(&["rm", "-f", "-v", &name]).await;
+        // are removed by name below. The pair goes at once.
+        let rm_workload = ["rm", "-f", "-v", &name];
+        let rm_sidecar = ["rm", "-f", "-v", &sidecar];
+        let _ = tokio::join!(self.docker(&rm_workload), self.docker(&rm_sidecar));
         // Remove the volume too, so a re-spawn at the same id cannot inherit
         // the last tenant's state.
         let _ = self.docker(&["volume", "rm", "-f", &data_volume(id)]).await;
-        self.remove_lease_extras(id).await;
+        self.remove_lease_extras_after(id, had_sidecar).await;
         Ok(())
     }
 
