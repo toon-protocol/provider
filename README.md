@@ -205,12 +205,32 @@ whose content is
   "entrypoint": ["/bin/sh"], "args": ["-c", "…"] }
 ```
 
+`image` may take any of the three forms spec §6.2 allows, and exactly one of
+them runs today:
+
+| Form | Meaning | Today |
+|---|---|---|
+| `{ "reference", "digest" }` | Pull `reference@digest` from an upstream OCI registry | Runs |
+| `{ "digest", "registry_entry": { "address", "relay" } }` | The Image Registry entry at `address` lists every blob and where its bytes are (spec §8.1) | `refused_image` |
+| `{ "digest" }` | The blobs are found by Blob Record lookup on the Relay Set (spec §8.4) | `refused_image` |
+
+Anything else — a `reference` and a `registry_entry` together, a `digest`
+that is not `sha256:` plus 64 lowercase hex, a `registry_entry` whose
+`address` is not `30434:<pubkey>:<name>:<tag>` — is a fourth shape and
+`invalid_request`. The two Image Registry forms are `refused_image` rather
+than `invalid_request` because the request is exactly what the spec allows:
+this provider simply does not resolve §8.4 yet, and the refusal comes before
+capacity is counted and before any container is created, so `availability`
+reports it for free before a tenant pays for the same answer.
+
 The image is pulled as `reference@digest`, so the daemon verifies the bytes
-and picks the manifest for its own architecture. Anything else in the
-content — a runtime flag, a host mount, a device, a capability — is refused
-as `invalid_request`; privileges come only from the listing (ADR 0004). That
-includes every way of asking for a Docker daemon inside the workload: see
-[Capabilities](#capabilities).
+and picks the manifest for its own architecture. `template` — the
+`30436:<pubkey>:<name>` a tenant expanded its values from — is parsed and
+never read: a Template grants nothing, and only the listing decides what
+privileges a workload gets (ADR 0004). Anything else in the content — a
+runtime flag, a host mount, a device, a capability — is refused as
+`invalid_request`. That includes every way of asking for a Docker daemon
+inside the workload: see [Capabilities](#capabilities).
 
 **SSH.** The tenant's key is handed to the workload as the environment
 variable `SSH_PUBLIC_KEY`, and `access.ssh_port` forwards to the workload's
@@ -393,8 +413,8 @@ always answers HTTP 200 — the answer *is* the payload:
 ```
 
 It applies, in order: the listing version exists (`wrong_listing_version`),
-the image policy below (`refused_image` / `no_matching_arch`), and capacity
-(`no_capacity`). A paid spawn applies the identical image-policy check at the
+the image — its form first, then the image policy below (`invalid_request` /
+`refused_image` / `no_matching_arch`) — and capacity (`no_capacity`). A paid spawn applies the identical image-policy check at the
 same point in its own validation order (§6.2 step 5, between
 `workload_id_taken` and `no_capacity`), so a positive `availability` answer
 and a spawn's outcome never disagree, and `availability` never calls the
