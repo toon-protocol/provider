@@ -323,7 +323,16 @@ pub async fn evict(
     // `ErrorResponse` that would tell the caller the eviction was refused
     // when it already happened.
     let notice_published = match eviction_event(workload_id, reason, message, &state.keys, now) {
-        Ok(event) => state.publish_one("Eviction Notice", event).await,
+        Ok(event) => match state.publish_one("Eviction Notice", event).await {
+            Ok(report) => report.reached_every_relay(),
+            Err(e) => {
+                error!(
+                    "lease {} was evicted, but its Eviction Notice was not published: {:#}",
+                    id, e
+                );
+                false
+            }
+        },
         Err(e) => {
             error!(
                 "lease {} was evicted, but its Eviction Notice could not be built: {:#}",

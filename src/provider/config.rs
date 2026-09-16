@@ -766,6 +766,7 @@ mod tests {
             state,
             standby_set: None,
             reserved_spawn: None,
+            takeover: None,
             created_at: 0,
             expires_at: 3600,
             ended_at: None,

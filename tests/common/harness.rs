@@ -121,21 +121,55 @@ pub async fn restart(
     registry: MockServer,
     image_policy: ImagePolicyConfig,
 ) -> Harness {
-    let config = ProviderConfig {
+    let config = config_for(
+        listings,
+        &provider_key,
+        &state_path,
+        &registry,
+        image_policy,
+    );
+    harness_from(config, backend, clock, directory, registry)
+}
+
+/// The config every harness runs on: `listings` over a fake-sized id range,
+/// images resolved against `registry`. A test that needs more of the config
+/// — a Relay Set of its own, say — takes this and changes it before
+/// `harness_from`.
+pub fn config_for(
+    listings: Vec<Listing>,
+    provider_key: &str,
+    state_path: &str,
+    registry: &MockServer,
+    image_policy: ImagePolicyConfig,
+) -> ProviderConfig {
+    ProviderConfig {
         public_ip: PUBLIC_IP.to_string(),
-        nostr_private_key: provider_key.clone(),
+        nostr_private_key: provider_key.to_string(),
         listings,
         workload_id_range_start: 1000,
         workload_id_range_end: 1003,
         ssh_port_start: Some(40000),
         workload_port_start: 41000,
-        lease_state_path: state_path.clone(),
+        lease_state_path: state_path.to_string(),
         image_policy: ImagePolicyConfig {
             registry_url_override: Some(registry.uri()),
             ..image_policy
         },
         ..ProviderConfig::default()
-    };
+    }
+}
+
+/// The provider process over exactly `config`, with the fakes a test reads
+/// back from.
+pub fn harness_from(
+    config: ProviderConfig,
+    backend: Arc<FakeBackend>,
+    clock: Arc<FakeClock>,
+    directory: Arc<FakeDirectory>,
+    registry: MockServer,
+) -> Harness {
+    let provider_key = config.nostr_private_key.clone();
+    let state_path = config.lease_state_path.clone();
     let service = ProviderService::with_backend_clock_and_directory(
         config,
         backend.clone(),

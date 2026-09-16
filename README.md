@@ -53,9 +53,13 @@ This is a hard fork of [Paygress](https://github.com/DhananjayPurohit/Paygress)
 
 **Kept:** the `ComputeBackend` trait and the Docker backend, lease accounting
 and the expiry sweep, workload persistence across restarts, and the axum HTTP
-app. Warm Standby is wired as far as roles and reservations (Milestone 3);
-the takeover state machine (`durable_workload`) and the reputation math stay
-in the tree, compiling, with nothing calling either.
+app. Warm Standby is wired as far as roles, reservations and the watch that
+announces a Takeover (Milestone 3). Paygress's takeover state machine
+(`durable_workload`) is gone: its lease-revocation event — published by a
+primary on its own eviction — and the respawn path it drove are replaced by
+ADR 0010's Takeover on Liveness expiry, which a crashed primary need not
+announce. The reputation math stays in the tree, compiling, with nothing
+calling it.
 
 **Removed**, because TOON replaces each of them:
 
@@ -64,7 +68,7 @@ in the tree, compiling, with nothing calling either.
 | Cashu (`cdk`, `cdk-sqlite`, `bip39`), the mint whitelist, the wallet CLI and the Lightning sweep | A TOON payment channel, terminated by the provider's connector |
 | `ngx_l402` and its nginx config | The TOON connector |
 | The NIP-04/NIP-17 direct-message transport | Sealed HTTP through the connector |
-| The offer (`38383`), heartbeat (`38384`, `20384`), lease revocation (`38385`) and standby promotion (`38386`) event kinds | Provider Profile, Listing, Liveness and Eviction Notice events. None of the Paygress kind numbers is reused — `38383` collides with NIP-69 |
+| The offer (`38383`), heartbeat (`38384`, `20384`), lease revocation (`38385`) and standby promotion (`38386`) event kinds | Provider Profile, Listing, Liveness, Eviction Notice and Takeover events. None of the Paygress kind numbers is reused — `38383` collides with NIP-69 |
 | The Blossom client and its content-addressed encryption | The TOON store, with image bytes verified by digest |
 | The vetted template registry | Any image runs; a listing grants capabilities |
 | The consumer CLI, the MCP server, offer discovery and the observatory | Tenant tooling, elsewhere |
@@ -357,10 +361,46 @@ the backend is which workload id is free, the same question every spawn asks
 (`find_available_id`), because the id, the SSH forward and the host ports are
 held from the moment the capacity is.
 
+### Watching the primary
+
+A reservation is not idle. Every `WATCHDOG_INTERVAL_SECS` (10 s) the
+provider steps a watchdog over every reserved lease it holds, beside the
+expiry sweep (spec §7.1 steps 1–2):
+
+1. It reads the **primary's Provider Profile** — the pubkey at index 0 of the
+   lease's `standby_set` — through the Directory, on this provider's own
+   Relay Set, to learn the primary's `relays` and `liveness_cadence_s`.
+2. It asks each of **the primary's relays**, one by one, whether it holds an
+   unexpired Liveness from the primary: live, expired or absent. This
+   provider's own Relay Set is never consulted for that — the primary
+   publishes to the relays *its* Profile lists, and nothing was ever sent to
+   this provider's.
+3. The primary is **silent** when its Liveness is expired or absent on a
+   strict majority of its Relay Set — one of one, two of three — and has
+   been so **continuously for one cadence**. One flaky relay never triggers
+   anything; a majority that comes back inside the cadence, even once,
+   restarts the count. A relay this provider cannot reach holds no Liveness
+   it can see, and counts as absent. The count lives in memory: a restart
+   starts it again, because a provider that was down cannot vouch for the
+   gap.
+4. When the trigger holds it publishes **one Takeover** (kind `30433`,
+   `d` = the workload id, content `{ workload_id, primary }`, signed by this
+   provider) to the **primary's** Relay Set through the same directory
+   publisher everything else goes through, and records on the lease — and
+   on disk — that it announced, when, in what cadence, and to which relays.
+   An announced reservation is not watched further, and never announces
+   twice. A publisher that could not be reached is not an announcement: the
+   count stands and the next step tries again.
+
+A provider with no `publish_url` watches and decides like any other, and
+announces nothing, exactly as it publishes nothing. A step for a provider
+holding no reservation reads nothing at all.
+
 **Still to come in Milestone 3:** paying a reservation (`.standby.extend`, and
-the `not_standby` refusals that go with it), and the Takeover itself — a
-standby watching its primary's Liveness, announcing, settling the race and
-starting the workload from the image.
+the `not_standby` refusals that go with it); settling the race after two
+cadences and starting the workload from the image if this provider won, or
+watching the winner if it lost; and a primary stopping its own workload
+after five cadences without a relay majority.
 
 ## Capabilities
 
@@ -632,14 +672,25 @@ The provider publishes these events to every relay in its Relay Set (spec
 | **Listing**, one per tier | addressable, `d` = listing name | content `{version, resources, arch, lease_interval_s, price, capabilities}`; tags `a` (the Profile), `L`, `l isolation:…`, `l arch:…`, `l gpu:…`, one `t` per capability, optional `g` |
 | **Liveness** | replaceable | `{ "available": { "<listing>": n } }` with `n` = capacity − live leases, and `["expiration", now + 5 × cadence]` (ADR 0007) |
 | **Eviction Notice**, one per eviction | regular | `{ "workload_id", "reason", "message" }`; tag `x` = the workload id. See [Eviction](#eviction). |
+| **Takeover**, one per workload this provider claims | addressable, `d` = workload id | `{ "workload_id", "primary" }`, signed by this provider as a Warm Standby — and published to the **primary's** Relay Set, not this provider's. See [Watching the primary](#watching-the-primary). |
 
 Everything a relay should filter on is a single-letter tag; numbers stay in
 content, because NIP-01 filters never match inside content (ADR 0002).
 
+The provider also **reads** the directory, and reads are free (a NIP-01
+`REQ`, no payment): another provider's Profile and Liveness, relay by relay,
+and the Takeovers claimed on a workload by the members of a Standby Set —
+everything a Warm Standby needs — plus Image Registry entries and Blob
+Records for [spawning](#spawning). A provider with no `publish_url` still
+reads.
+
 The Profile and the Listings go out at startup and change only when the config
-does — which is a restart. Liveness goes out every `liveness_cadence_s`. An
+does — which is a restart. Liveness goes out every `liveness_cadence_s`, and
+each publication reports which relays of the Relay Set took it, relay by
+relay — the count a primary keeps against its own majority (spec §7.1). An
 Eviction Notice goes out once, immediately, whenever `toon-provider evict`
-succeeds.
+succeeds. A Takeover goes out once, when a watched primary has been silent
+for a cadence.
 
 Exactly one Listing is published per listing *name*: the newest `version` in
 the config. A retired version is served but never advertised — two events

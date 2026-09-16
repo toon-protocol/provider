@@ -23,32 +23,33 @@ use tracing::{error, info, warn};
 
 use super::persistence::count_live;
 use super::ProviderService;
+use crate::directory::PublishReport;
 use crate::nostr::directory_events::{listing_event, liveness_event, profile_event};
 use crate::provider_http::AppState;
 
 impl AppState {
-    /// Publish one event, and say whether any relay of the Relay Set took it.
+    /// Publish one event, and say which relays of the Relay Set took it.
     ///
     /// `what` names the event in the log, because the caller is a loop and
-    /// "published" on its own says nothing. A failure is reported, never
-    /// raised: a provider whose Profile did not land is not purchasable — a
-    /// Listing without its Profile is refused by tenants (ADR 0002) — but its
-    /// running leases still are.
+    /// "published" on its own says nothing. A relay that refused is in the
+    /// report, never an error; `Err` is a publication that could not be
+    /// ATTEMPTED — a publisher that is down — which no relay refused and
+    /// none accepted, and which the caller says in its own words. Neither
+    /// is raised past the caller: a provider whose Profile did not land is
+    /// not purchasable — a Listing without its Profile is refused by tenants
+    /// (ADR 0002) — but its running leases still are.
     ///
     /// `pub(crate)` rather than private: `evict` (`lifecycle.rs`) publishes an
     /// Eviction Notice with the same discipline — log the outcome, never fail
     /// the caller over a relay that refused.
-    pub(crate) async fn publish_one(&self, what: &str, event: nostr_sdk::Event) -> bool {
-        match self.directory.publish(event).await {
-            Ok(report) => {
-                info!("{what} published: {}", report.summary());
-                report.reached_every_relay()
-            }
-            Err(e) => {
-                warn!("{what} was not published: {e:#}");
-                false
-            }
-        }
+    pub(crate) async fn publish_one(
+        &self,
+        what: &str,
+        event: nostr_sdk::Event,
+    ) -> Result<PublishReport> {
+        let report = self.directory.publish(event).await?;
+        info!("{what} published: {}", report.summary());
+        Ok(report)
     }
 
     /// How many leases of each listing could start right now: the tier's
@@ -90,12 +91,21 @@ impl ProviderService {
         let state = &self.state;
         let now = state.clock.now();
 
-        let mut landed = state
-            .publish_one(
-                "Provider Profile",
-                profile_event(&state.config, &state.keys, now)?,
-            )
-            .await;
+        // Every relay took it, or it is tried again next cadence; a
+        // publisher that could not be reached is the same `false`.
+        let landed_on_every_relay = |what: &str, published: Result<PublishReport>| match published {
+            Ok(report) => report.reached_every_relay(),
+            Err(e) => {
+                warn!("{what} was not published: {e:#}");
+                false
+            }
+        };
+
+        let profile = profile_event(&state.config, &state.keys, now)?;
+        let mut landed = landed_on_every_relay(
+            "Provider Profile",
+            state.publish_one("Provider Profile", profile).await,
+        );
 
         // Exactly one Listing per NAME, the version on sale. The event is
         // addressable on `d = <listing name>` (spec §4.2), so a new version
@@ -105,15 +115,23 @@ impl ProviderService {
         for listing in state.config.listings_on_sale() {
             let what = format!("Listing {} v{}", listing.name, listing.version);
             let event = listing_event(listing, &state.config, &state.keys, now)?;
-            landed &= state.publish_one(&what, event).await;
+            landed &= landed_on_every_relay(&what, state.publish_one(&what, event).await);
         }
 
         Ok(landed)
     }
 
-    /// Publish one Liveness event for the instant `now`. Public so a test can
-    /// drive a cadence on a chosen instant rather than waiting one out.
-    pub async fn publish_liveness(&self, now: u64) -> Result<()> {
+    /// Publish one Liveness event for the instant `now`, and say which
+    /// relays of the Relay Set took it. Public so a test can drive a cadence
+    /// on a chosen instant rather than waiting one out.
+    ///
+    /// The report is the answer, not a side effect in the log: a primary
+    /// that cannot reach a strict majority of its own Relay Set for five
+    /// cadences must stop its workload (spec §7.1), and this is where it
+    /// counts. `Err` when no relay could even be asked — the event could not
+    /// be built, or the publisher could not be reached — which for that
+    /// count is a cadence on which no relay took it.
+    pub async fn publish_liveness(&self, now: u64) -> Result<PublishReport> {
         let state = &self.state;
         let event = liveness_event(
             state.available().await,
@@ -121,8 +139,7 @@ impl ProviderService {
             &state.keys,
             now,
         )?;
-        state.publish_one("Liveness", event).await;
-        Ok(())
+        state.publish_one("Liveness", event).await
     }
 
     /// Keep this provider in the directory, forever: the Profile and the
@@ -157,7 +174,7 @@ impl ProviderService {
                 }
             }
             if let Err(e) = self.publish_liveness(self.state.clock.now()).await {
-                error!("Liveness could not be built: {e:#}");
+                error!("Liveness was not published: {e:#}");
             }
         }
     }

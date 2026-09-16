@@ -1,11 +1,12 @@
 // The provider service: it holds the lease table, restores it after a restart,
-// serves the HTTP app its TOON connector forwards to, and sweeps expired
-// leases.
+// serves the HTTP app its TOON connector forwards to, sweeps expired leases,
+// and watches the primary of every reservation it holds.
 //
 // Paygress ran five loops here — offer publication, heartbeat, a Nostr DM
-// request listener, a standby watchdog and the expiry sweep. Three are left:
-// the sweep in `cleanup`, the directory publication in `publish`, and the HTTP
-// app in `provider_http`.
+// request listener, a standby watchdog and the expiry sweep. Four are left:
+// the sweep in `cleanup`, the directory publication in `publish`, the
+// watchdog in `watchdog` — rewritten for Liveness on the primary's Relay Set
+// and ADR 0010's Takeover — and the HTTP app in `provider_http`.
 //
 // The routes themselves are one module each: `spawn` starts a lease — or, on
 // `.standby`, reserves capacity for one without starting it — `lifecycle`
@@ -34,6 +35,7 @@ mod publish;
 pub mod routes;
 mod spawn;
 mod standby;
+mod watchdog;
 
 pub use availability::availability;
 pub use blob_cache::BlobCache;
@@ -49,6 +51,7 @@ pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
 pub use spawn::{spawn, standby_spawn, VOLUME_MOUNT_PATH};
 pub use standby::StandbySet;
+pub use watchdog::{silent_on_a_majority, TakeoverAnnouncement, WATCHDOG_INTERVAL_SECS};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -66,6 +69,17 @@ use persistence::{load_leases, persist_leases};
 
 pub struct ProviderService {
     state: AppState,
+    /// The watchdog's count of silence: lease id -> the first instant its
+    /// primary was read silent on a majority of its Relay Set, for the
+    /// reservations whose primary is silent right now (`watchdog`).
+    ///
+    /// In memory ON PURPOSE, unlike the announcement it leads to. The trigger
+    /// is silence CONTINUOUSLY for a cadence (spec §7.1 step 1), and a
+    /// provider that was down cannot vouch for what happened while it was:
+    /// a count carried across a restart would take over on the strength of
+    /// one old reading and one new one, with anything in between unseen.
+    /// A restart starts the count again, which costs at most one cadence.
+    silence: tokio::sync::Mutex<HashMap<u32, u64>>,
 }
 
 impl ProviderService {
@@ -90,6 +104,7 @@ impl ProviderService {
     ) -> Result<Self> {
         Ok(Self {
             state: AppState::new(config, backend, clock)?,
+            silence: Default::default(),
         })
     }
 
@@ -103,6 +118,7 @@ impl ProviderService {
     ) -> Result<Self> {
         Ok(Self {
             state: AppState::new(config, backend, clock)?.with_directory(directory),
+            silence: Default::default(),
         })
     }
 
@@ -209,6 +225,12 @@ impl ProviderService {
             }
             result = self.expiry_sweep_loop() => {
                 tracing::error!("expiry sweep exited: {:?}", result);
+                result
+            }
+            // Beside the sweep, in the same shape: a reservation that nobody
+            // watches for is capacity held for nothing (spec §7.1).
+            result = self.watchdog_loop() => {
+                tracing::error!("standby watchdog exited: {:?}", result);
                 result
             }
             // After the restore above, so the first Liveness counts the
