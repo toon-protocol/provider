@@ -1,0 +1,67 @@
+{
+  "fixture": {
+    "case": "listing",
+    "description": "The connector routes this provider's Profile and Listings generate: one paid `.spawn` and `.extend` per listing version, then the three free provider-wide routes. `prefix` is what a tenant pays; `handler_url` is the provider's own HTTP path behind its connector and never leaves the operator's config.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "routes"
+  },
+  "ilp_address": "g.fixture",
+  "listings": [
+    {
+      "lease_interval_s": 3600,
+      "name": "basic",
+      "price": 1000,
+      "version": 1
+    },
+    {
+      "lease_interval_s": 3600,
+      "name": "gpu",
+      "price": 1000,
+      "version": 1
+    }
+  ],
+  "patterns": {
+    "availability": "<ilp_address>.availability",
+    "extend": "<ilp_address>.<listing d tag>.v<content.version>.extend",
+    "spawn": "<ilp_address>.<listing d tag>.v<content.version>.spawn",
+    "status": "<ilp_address>.status",
+    "terminate": "<ilp_address>.terminate"
+  },
+  "routes": [
+    {
+      "handler_url": "http://127.0.0.1:8080/listings/basic/v1/spawn",
+      "prefix": "g.fixture.basic.v1.spawn",
+      "price": 1000
+    },
+    {
+      "handler_url": "http://127.0.0.1:8080/listings/basic/v1/extend",
+      "prefix": "g.fixture.basic.v1.extend",
+      "price": 1000
+    },
+    {
+      "handler_url": "http://127.0.0.1:8080/listings/gpu/v1/spawn",
+      "prefix": "g.fixture.gpu.v1.spawn",
+      "price": 1000
+    },
+    {
+      "handler_url": "http://127.0.0.1:8080/listings/gpu/v1/extend",
+      "prefix": "g.fixture.gpu.v1.extend",
+      "price": 1000
+    },
+    {
+      "handler_url": "http://127.0.0.1:8080/availability",
+      "prefix": "g.fixture.availability",
+      "price": 0
+    },
+    {
+      "handler_url": "http://127.0.0.1:8080/status",
+      "prefix": "g.fixture.status",
+      "price": 0
+    },
+    {
+      "handler_url": "http://127.0.0.1:8080/terminate",
+      "prefix": "g.fixture.terminate",
+      "price": 0
+    }
+  ]
+}

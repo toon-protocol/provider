@@ -1,0 +1,43 @@
+{
+  "fixture": {
+    "case": "ended",
+    "description": "Status of the same lease after termination: `state` is the tagged `{ \"ended\": <how> }` and `access` is absent because the workload is gone.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "status"
+  },
+  "http_path": "/status",
+  "request_body": {
+    "request": {
+      "content": "{\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "created_at": 1700000000,
+      "id": "be4d3d57900ed35e350d1fdadf65f723e35c7142504bdfeb572dca1e6b0e845c",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "0672d46639adbae081f75b73d6d69e6a769abd56e9dbd340cf9eb05ed8fc2e4a09637397ef6807c4f029aebdb8afe0edaab56bcea58dc2279b48779c74142f2d",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "status"
+        ],
+        [
+          "expiration",
+          "1700000090"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "expires_at": 1700007200,
+    "role": "standalone",
+    "state": {
+      "ended": "termination"
+    },
+    "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "response_status": 200,
+  "route": "g.fixture.status"
+}

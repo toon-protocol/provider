@@ -1,0 +1,24 @@
+{
+  "fixture": {
+    "case": "refused",
+    "description": "Availability for a listing version this provider does not sell: still HTTP 200, with `would_run: false` and the same error code and message a paid spawn on that route would have bought.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "availability"
+  },
+  "http_path": "/availability",
+  "request_body": {
+    "image": {
+      "digest": "sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd",
+      "reference": "docker.io/library/alpine"
+    },
+    "listing": "basic",
+    "version": 2
+  },
+  "response_body": {
+    "error": "wrong_listing_version",
+    "message": "this provider sells no basic v2; it sells v1",
+    "would_run": false
+  },
+  "response_status": 200,
+  "route": "g.fixture.availability"
+}
