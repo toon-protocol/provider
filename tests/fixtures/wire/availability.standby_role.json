@@ -1,0 +1,23 @@
+{
+  "fixture": {
+    "case": "standby_role",
+    "description": "Availability with §6.4's optional `role`, asked about the one tier that sells Warm Standbys. `role` takes `primary` or `standby` and nothing else — `standalone` is a lease role, not a question, since every spawn with no Standby Set is standalone already — and an unknown value is `invalid_request` like any other shape. Omitting `role` asks the ordinary question, as every other availability fixture here does.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "availability"
+  },
+  "http_path": "/availability",
+  "request_body": {
+    "image": {
+      "digest": "sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd",
+      "reference": "docker.io/library/alpine"
+    },
+    "listing": "warm",
+    "role": "standby",
+    "version": 1
+  },
+  "response_body": {
+    "would_run": true
+  },
+  "response_status": 200,
+  "route": "g.fixture.availability"
+}

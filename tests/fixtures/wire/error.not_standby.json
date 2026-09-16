@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "not_standby",
-    "description": "The `not_standby` refusal as this provider renders it. No Milestone 1 route can produce it: it belongs to `.standby.extend` (spec §6.3), which arrives with Warm Standby in Milestone 3. Shape and status only.",
+    "description": "The `not_standby` refusal as this provider renders it. No route can produce it yet: it belongs to `.standby.extend` (spec §6.3), which answers a reservation once the rest of Milestone 3 has reserved and paid one. Shape and status only.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "error"
   },

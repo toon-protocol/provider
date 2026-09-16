@@ -1,0 +1,18 @@
+{
+  "fixture": {
+    "case": "reserved",
+    "description": "Status of a Warm Standby before Takeover (spec §6.5, §6.7): `state` is the one word `reserved`, `role` is `standby`, and there is NO `access` — the capacity is held and paid for, and nothing is running to reach. A reservation counts against the listing's capacity exactly as a running lease does. No route produces one until the rest of Milestone 3 spawns a Standby Set; shape only.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "status"
+  },
+  "http_path": null,
+  "request_body": null,
+  "response_body": {
+    "expires_at": 1700003600,
+    "role": "standby",
+    "state": "reserved",
+    "workload_id": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+  },
+  "response_status": 200,
+  "route": null
+}
