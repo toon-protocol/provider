@@ -27,6 +27,11 @@ resources can be changed without repricing the leases already running (see
 acceptance test is `make smoke-m1` in the sandbox — see
 [Milestone 1 acceptance test](#milestone-1-acceptance-test).
 
+Milestone 2 is in progress: an image named by its **Image Registry entry**
+is resolved and fetched through the TOON store and upstream registries,
+verified blob by blob, cached across leases, and run — see
+[Spawning](#spawning). An image named by digest alone is not resolved yet.
+
 ## Spec, decisions and vocabulary
 
 They live in the [`TOON_Network`](https://github.com/toon-protocol/TOON_Network)
@@ -94,6 +99,12 @@ parts:
   `http://envoy:3000/raw/{txid}`. Unset, an image whose bytes are in the
   TOON store is `refused_image`. See
   [Availability and image policy](#availability-and-image-policy).
+- `blob_cache_dir`: where verified image blobs are kept, by digest, across
+  leases and restarts. Default: `blobs/` beside `lease_state_path`. Give it
+  room for every image this provider will run; there is no eviction yet.
+  `blob_cache_max_bytes` caps it — a blob that would cross the cap is not
+  kept and the spawn is `no_capacity`, the same answer a full disk gives.
+  See [Spawning](#spawning).
 - `relay_set`, `connector_url`, `connector_seal_key`, `[[settlement]]`,
   `isolation`, `liveness_cadence_s`, `geohash`, `publish_url`: the Provider
   Directory — see [The Provider Directory](#the-provider-directory).
@@ -211,32 +222,50 @@ whose content is
   "entrypoint": ["/bin/sh"], "args": ["-c", "…"] }
 ```
 
-`image` may take any of the three forms spec §6.2 allows, and exactly one of
-them runs today:
+`image` may take any of the three forms spec §6.2 allows, and two of them
+run today:
 
 | Form | Meaning | Today |
 |---|---|---|
-| `{ "reference", "digest" }` | Pull `reference@digest` from an upstream OCI registry | Runs |
-| `{ "digest", "registry_entry": { "address", "relay" } }` | The Image Registry entry at `address` lists every blob and where its bytes are (spec §8.1) | Resolved on `availability`; `refused_image` on a spawn |
+| `{ "reference", "digest" }` | Pull `reference@digest` from an upstream OCI registry | Runs: the daemon pulls it |
+| `{ "digest", "registry_entry": { "address", "relay" } }` | The Image Registry entry at `address` lists every blob and where its bytes are (spec §8.1) | Runs: this provider fetches it |
 | `{ "digest" }` | The blobs are found by Blob Record lookup on the Relay Set (spec §8.4) | `refused_image` |
 
 Anything else — a `reference` and a `registry_entry` together, a `digest`
 that is not `sha256:` plus 64 lowercase hex, a `registry_entry` whose
 `address` is not `30434:<pubkey>:<name>:<tag>` — is a fourth shape and
-`invalid_request`. The two Image Registry forms are `refused_image` rather
-than `invalid_request` because the request is exactly what the spec allows.
-An image named through its entry is resolved the way §8.4 says — the entry
-is read from the relay hinted at, and the index, the manifest for the
-listing's `arch` and its config are fetched and verified through the
-entry's sources (see [Availability and image policy](#availability-and-image-policy))
-— but this provider cannot yet *run* what it resolved, so a spawn in that
-form is refused before any relay or gateway is read, before capacity is
-counted and before any container is created; a bare digest is not resolved
-at all yet. Either way `availability` reports the refusal for free before a
-tenant pays for the same answer.
+`invalid_request`. A bare digest is `refused_image` rather than
+`invalid_request` because the request is exactly what the spec allows; this
+provider simply does not resolve it yet, and `availability` reports that
+for free before a tenant pays for the same answer.
 
-The image is pulled as `reference@digest`, so the daemon verifies the bytes
-and picks the manifest for its own architecture. `template` — the
+**Through the Image Registry.** An image named by its entry is resolved the
+way §8.4 says — the entry is read from the relay hinted at, and the index,
+the manifest for the listing's `arch` and its config are fetched and
+verified through the entry's sources (see
+[Availability and image policy](#availability-and-image-policy)); that
+much `availability` does too. A paid spawn then, once the slot is reserved,
+fetches every layer the same way — a `toon-store` source as its Blob
+Record and parts from `gateway_url_pattern`, an `oci` source by digest from
+the registry the entry names — checks each part against its recorded
+sha256 and size and each blob against its digest, and keeps every verified
+blob in the [blob cache](#configuration) (`blob_cache_dir`). The blobs are
+then assembled into an OCI image layout, loaded into the backend (`docker
+load`), and the workload is started by the image id the load produced:
+never by a tag, and never from bytes this provider did not check. A layer
+shared with an image spawned before is served from the cache without a
+fetch, and the cache survives a restart. A layer no source can serve is
+`refused_image`; a cache the disk or `blob_cache_max_bytes` has no room in
+is `no_capacity`; either way the slot is released and no container exists
+afterwards. The refusal is still billed (ADR 0003) — a layer that fails
+only on the full fetch can only be found out on the paid route — which is
+why `availability` resolves the manifest and config first. The Docker
+backend needs a daemon whose `docker load` reads an OCI image layout (any
+current Docker; verified on 29 with the containerd image store).
+
+**Through an upstream reference**, the image is pulled by the daemon as
+`reference@digest`, so the daemon verifies the bytes and picks the manifest
+for its own architecture. `template` — the
 `30436:<pubkey>:<name>` a tenant expanded its values from — is parsed and
 never read: a Template grants nothing, and only the listing decides what
 privileges a workload gets (ADR 0004). Anything else in the content — a
@@ -460,8 +489,10 @@ anything is read out of it; bytes that do not match are discarded. A
 mismatch, or a gateway or registry that cannot be reached at all, is
 `refused_image` — there is no distinct "registry down" code, since a
 tenant's availability check or spawn has no use for anything but a refusal
-right now. Verified blobs are cached in memory, keyed by digest, for the
-life of the process, so a repeated check reads nothing from the network.
+right now. Verified blobs are kept on disk in the blob cache
+(`blob_cache_dir`), keyed by digest and checked again on every read, across
+leases and restarts, so a repeated check — or a spawn of an image already
+fetched — reads nothing from the network.
 
 **Image policy** (`[image_policy]` in the config) is a deny list of exact
 digests — the digest a request names, or the concrete per-arch manifest an
@@ -602,7 +633,7 @@ the same commit that changes the wire.
 ```sh
 cargo build
 cargo test                 # no Docker daemon needed
-cargo test -- --ignored    # the Docker backend against a real daemon
+cargo test -- --ignored    # the Docker backend, and a registry-entry spawn, against a real daemon
 cargo clippy --all-targets
 cargo run -- --config provider.toml
 ```

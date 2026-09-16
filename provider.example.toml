@@ -109,6 +109,16 @@ lease_state_path = "/var/lib/toon-provider/leases.json"
 # whose bytes are upstream.
 # gateway_url_pattern = "https://arweave.net/raw/{txid}"
 
+# Where verified image blobs are kept, by digest, across leases and restarts
+# (spec §8.4), so a popular layer is fetched once. Only bytes that hashed to
+# their digest are written here, and every read checks them again. Default:
+# `blobs/` beside lease_state_path. There is no eviction yet: give it room
+# for every image this provider will run, or cap it — a blob that would
+# cross blob_cache_max_bytes is not kept and the spawn is `no_capacity`,
+# the same answer a full disk gives.
+# blob_cache_dir = "/var/lib/toon-provider/blobs"
+# blob_cache_max_bytes = 53687091200
+
 # What this provider's connector settles in, published in the Profile so a
 # tenant knows what it can pay with. `token` is a mint (Solana) or a contract
 # address (EVM); v1 prices everything in USDC at 6 decimals.
