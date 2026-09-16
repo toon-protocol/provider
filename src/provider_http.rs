@@ -247,7 +247,9 @@ async fn extend_route(
 /// `POST /listings/:listing/:version/standby`, the path the connector
 /// forwards `<addr>.<listing>.v<n>.standby` to. Registered for every
 /// listing, priced only for the ones that sell standbys
-/// (`routes::route_table`), and refusing until the rest of Milestone 3 lands.
+/// (`routes::route_table`): a spawn that lands here reserves capacity for
+/// the Standby Set member it names at an index other than 0, and one paid
+/// on a listing that prices no standby is refused `wrong_listing_version`.
 async fn standby_route(
     State(state): State<AppState>,
     Path((listing, version)): Path<(String, String)>,

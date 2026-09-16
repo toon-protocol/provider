@@ -13,12 +13,18 @@ use tracing::{error, warn};
 // so their JSON is a wire shape, and this table is the same JSON on disk.
 pub use crate::nostr::wire::{LeaseEnd, LeaseState};
 
-use crate::nostr::wire::{Access, PortAccess, Role};
+use super::standby::StandbySet;
+use crate::nostr::wire::{Access, PortAccess, Role, SpawnContent};
 
-/// How many live (`Provisioning` or `Running`) leases of `listing` are on
-/// the table right now. Shared by `availability`'s capacity check and
-/// spawn's, so a change to what counts as "live" cannot desync the two
-/// (they must agree: spec §9, "availability... applies the same policy").
+/// How many live (`Provisioning`, `Reserved` or `Running`) leases of
+/// `listing` are on the table right now. Shared by `availability`'s capacity
+/// check, spawn's and the Liveness `available` count, so a change to what
+/// counts as "live" cannot desync them (they must agree: spec §9,
+/// "availability... applies the same policy").
+///
+/// A RESERVATION counts: a Warm Standby holds its slot with nothing running,
+/// and the whole of what its tenant bought is that nobody else is sold it
+/// (spec §6.7).
 pub fn count_live(leases: &HashMap<u32, LeaseRecord>, listing: &str) -> usize {
     leases
         .values()
@@ -53,6 +59,28 @@ pub struct LeaseRecord {
 
     pub role: Role,
     pub state: LeaseState,
+
+    /// The Standby Set this lease was spawned into, and this provider's
+    /// position in it (spec §7). Absent for a standalone lease, which is
+    /// every lease that named no `standby_set`.
+    ///
+    /// Persisted with the rest: a Warm Standby that restarts must still know
+    /// whose Liveness to watch — `set.primary()` — and among whom a Takeover
+    /// is settled, and neither is derivable from anything else the record
+    /// holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standby_set: Option<StandbySet>,
+
+    /// The spawn a Takeover would start, kept only while the lease is a
+    /// RESERVATION (spec §7.1 step 4).
+    ///
+    /// A reservation is capacity held for a workload that does not exist
+    /// yet, so the spawn that described it is the only thing that says what
+    /// to start if the primary goes silent; a lease whose workload is
+    /// already running needs nothing of the sort. It is on disk and never on
+    /// the wire: `status` answers the lease, not the request that made it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_spawn: Option<SpawnContent>,
 
     pub created_at: u64,
 
@@ -183,6 +211,8 @@ mod tests {
             listing_version: 1,
             role: Role::Standalone,
             state: LeaseState::Running,
+            standby_set: None,
+            reserved_spawn: None,
             created_at: 1000,
             expires_at,
             ended_at: None,
@@ -220,6 +250,65 @@ mod tests {
         assert_eq!(loaded[&2001].expires_at, 1234567999);
         assert_eq!(loaded[&2000].state, LeaseState::Running);
 
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_reservation_keeps_the_set_it_watches_across_a_restart() {
+        // What a Warm Standby cannot re-derive after a restart: whose
+        // Liveness it watches, and which position it holds.
+        let p = temp_path("reservation");
+        let mut reserved = lease(2000, 9999);
+        reserved.role = Role::Standby;
+        reserved.state = LeaseState::Reserved;
+        reserved.standby_set = Some(StandbySet {
+            members: vec!["aa".repeat(32), "bb".repeat(32)],
+            index: 1,
+        });
+        persist_leases(&HashMap::from([(2000, reserved.clone())]), &p);
+
+        let loaded = load_leases(&p);
+        assert_eq!(loaded[&2000], reserved);
+        let set = loaded[&2000].standby_set.as_ref().unwrap();
+        assert_eq!(set.primary(), Some("aa".repeat(32).as_str()));
+        assert!(!set.is_primary());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_table_written_before_standby_sets_still_loads() {
+        // The two Warm Standby fields arrived after the first leases were
+        // written. A provider restarting over a table from before them must
+        // not lose every lease in it: one unreadable record empties the
+        // WHOLE table (`load_leases`), which would strand every paid
+        // workload on the host.
+        let p = temp_path("pre-standby");
+        std::fs::write(
+            &p,
+            serde_json::json!({ "2000": {
+                "id": 2000,
+                "workload_id": "aa".repeat(32),
+                "tenant": "ee6afe4b4a6e4fe49d6c35359d1161a6fd26fbe5d6eefcbab1c9c147731bf08a",
+                "listing": "basic",
+                "listing_version": 1,
+                "role": "standalone",
+                "state": "running",
+                "created_at": 1000,
+                "expires_at": 4600,
+                "destroyed": false,
+                "ssh_port": 40000,
+                "ports": [],
+            }})
+            .to_string(),
+        )
+        .unwrap();
+
+        let loaded = load_leases(&p);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[&2000].expires_at, 4600);
+        assert_eq!(loaded[&2000].role, Role::Standalone);
+        assert_eq!(loaded[&2000].standby_set, None);
+        assert_eq!(loaded[&2000].reserved_spawn, None);
         let _ = std::fs::remove_file(&p);
     }
 

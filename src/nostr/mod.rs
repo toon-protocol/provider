@@ -7,10 +7,7 @@
 // the TOON Network spec are named in `kinds` and built in `directory_events`.
 
 pub mod directory_events;
-mod identity;
 pub mod image_events;
 pub mod kinds;
 pub mod lease_request;
 pub mod wire;
-
-pub use identity::*;

@@ -37,6 +37,16 @@ fn unknown_workload() -> ErrorResponse {
     )
 }
 
+/// What both extension routes answer for a RESERVATION until the ticket that
+/// pays one lands: reservations exist now and hold capacity, but neither
+/// route may buy one an interval yet, so nobody is charged for time a
+/// reservation would not get. Shared by `extend` (a reserved lease) and
+/// `standby_extend` (any lease at all) so a tenant reads one sentence
+/// wherever it meets the gap.
+pub(super) const STANDBY_PAYMENT_LANDS_LATER: &str =
+    "paying a Warm Standby lands later in Milestone 3; this provider cannot extend a \
+     reservation yet, and a reservation is not extended on .extend";
+
 /// The backend id of the lease a tenant's `workload_id` names: the live one
 /// if there is one, otherwise the most recently ended record still retained.
 ///
@@ -103,6 +113,19 @@ pub async fn extend(
             ),
         ));
     }
+    // A reservation is not extended here: it is paid at the listing's
+    // standby price on `.standby.extend`, and a lease is always billed at
+    // the price for what it is doing (spec §6.3). Which of §6.3's codes says
+    // so is the next ticket of this milestone; until then this is the same
+    // interim refusal `standby_extend` gives, so nothing buys a running
+    // lease's interval for a lease that runs nothing. AFTER the version
+    // check, because both extension routes want the lease's own listing
+    // version whatever its role is (spec §6.3), and a lease paid on the
+    // wrong route AND the wrong version should hear about the version it can
+    // fix rather than about a role rule that may move.
+    if lease.state == LeaseState::Reserved {
+        return Err(invalid(STANDBY_PAYMENT_LANDS_LATER));
+    }
     // The lease's own version, which is the route's: the interval a payment
     // buys is the one the lease was sold under.
     let interval = state
@@ -132,18 +155,18 @@ pub async fn extend(
 /// Serve one extension of a reservation on
 /// `<addr>.<listing>.v<version>.standby.extend`.
 ///
-/// Refused outright for now, like `spawn::standby_spawn`: adding an interval
-/// to a reservation — and refusing `.extend` and `.standby.extend` for the
-/// wrong role with `not_standby` (spec §6.3) — needs reservations to exist,
-/// which is a later ticket of this milestone. The route is registered so a
-/// paid packet meets a refusal rather than a hole.
+/// Refused outright for now: adding an interval to a reservation — and
+/// refusing `.extend` and `.standby.extend` for the wrong role, with
+/// `not_standby` where spec §6.3 says so — is the next ticket of this
+/// milestone. The route is registered so a paid packet meets a refusal
+/// rather than a hole.
 pub async fn standby_extend(
     _state: &AppState,
     _listing_name: &str,
     _version: u32,
     _body: &[u8],
 ) -> Result<ExtendResponse, ErrorResponse> {
-    Err(invalid(super::spawn::STANDBY_SETS_LAND_LATER))
+    Err(invalid(STANDBY_PAYMENT_LANDS_LATER))
 }
 
 /// Serve one status on the free `<addr>.status`.
@@ -165,17 +188,12 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
         // started one yet, and spec §6.2 is explicit that `access` is absent
         // for a standby until Takeover — naming a host and port that reach
         // nothing would be a lie either way.
-        access: has_access(lease.state).then(|| lease.access(&state.config.public_ip)),
+        access: lease
+            .state
+            .has_workload()
+            .then(|| lease.access(&state.config.public_ip)),
         template: lease.template.clone(),
     })
-}
-
-/// Whether a lease in this state has a workload a tenant can reach.
-fn has_access(state: LeaseState) -> bool {
-    match state {
-        LeaseState::Provisioning | LeaseState::Running => true,
-        LeaseState::Reserved | LeaseState::Ended(_) => false,
-    }
 }
 
 /// Serve one termination on the free `<addr>.terminate`: the workload is

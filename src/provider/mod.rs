@@ -7,13 +7,15 @@
 // the sweep in `cleanup`, the directory publication in `publish`, and the HTTP
 // app in `provider_http`.
 //
-// The routes themselves are one module each: `spawn` starts a lease,
-// `lifecycle` extends, reports and ends one, `availability` answers whether a
-// spawn would run without starting anything, and `cleanup` is where every
-// ending — Expiry or Termination — actually destroys the workload. The two
-// Warm Standby routes live beside the routes they will become: `.standby` in
-// `spawn`, `.standby.extend` in `lifecycle`, both refusing until the rest of
-// Milestone 3 lands.
+// The routes themselves are one module each: `spawn` starts a lease — or, on
+// `.standby`, reserves capacity for one without starting it — `lifecycle`
+// extends, reports and ends one, `availability` answers whether a spawn would
+// run without starting anything, and `cleanup` is where every ending — Expiry
+// or Termination — releases the slot and, when there is a workload, destroys
+// it. `standby` is the rule the two spawn routes share: which role a
+// `standby_set` and a route give this provider, and what the lease then
+// remembers of the set. `.standby.extend` still refuses in `lifecycle` until
+// the ticket that pays a reservation lands.
 // `image_policy` is the rule both `spawn` and `availability` apply, so the
 // two can never disagree; `fetcher` (over `oci` and the TOON store gateway)
 // is how every image byte they read arrives, verified.
@@ -46,7 +48,7 @@ pub use persistence::persisted_leases;
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
 pub use spawn::{spawn, standby_spawn, VOLUME_MOUNT_PATH};
-pub use standby::StandbySlot;
+pub use standby::StandbySet;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -129,7 +131,12 @@ impl ProviderService {
             // its retention runs out (`cleanup`), and asking the backend
             // about a container that was deleted on purpose would drop the
             // very thing `status` still has to report.
-            if !lease.state.is_live() {
+            // A reservation is the same case for the opposite reason: a Warm
+            // Standby holds capacity with NOTHING RUNNING (spec §6.7), so
+            // the backend has never heard of it and would report it absent —
+            // dropping every reservation the tenant is paying for. It must
+            // survive a restart exactly as a running lease does.
+            if !lease.state.is_live() || !lease.state.has_workload() {
                 restored.insert(id, lease);
                 continue;
             }

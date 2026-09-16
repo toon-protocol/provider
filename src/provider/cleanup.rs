@@ -5,11 +5,17 @@
 // further Lease Interval, and an unpaid workload must not keep running
 // (ADR 0003). A Termination ends a lease the same way, just sooner.
 //
+// A RESERVATION ends by the same paths and destroys nothing: a Warm Standby
+// holds capacity with no workload on it (spec §6.7), so ending one releases
+// the slot and asks the compute backend for nothing at all. Everything below
+// turns on `LeaseState::has_workload`, never on the role.
+//
 // An ended lease is NOT forgotten straight away: its record stays in the
 // table for `ended_retention_s` so `status` can tell its tenant HOW it ended
 // rather than that its id is unknown. It stops counting against capacity and
 // stops holding its workload id the moment it ends, though — retention is
-// bookkeeping, never a reservation.
+// bookkeeping, and never a hold on capacity the way a Warm Standby's
+// Reservation is.
 
 use anyhow::Result;
 use tracing::{error, info, warn};
@@ -48,9 +54,22 @@ impl ProviderService {
 
             for lease in leases.values_mut() {
                 if lease.state.is_live() && lease.expires_at <= now {
-                    info!("lease {} expired; destroying its workload", lease.id);
+                    let has_workload = lease.state.has_workload();
+                    if has_workload {
+                        info!("lease {} expired; destroying its workload", lease.id);
+                    } else {
+                        // A reservation that nobody paid another interval
+                        // for: the capacity is released and the backend is
+                        // never asked anything, because nothing was ever
+                        // started here (spec §6.7, §7).
+                        info!("reservation {} expired; releasing its capacity", lease.id);
+                    }
                     lease.state = LeaseState::Ended(LeaseEnd::Expiry);
                     lease.ended_at = Some(now);
+                    // Nothing to destroy is destroyed already: this keeps
+                    // the lease out of the pass below and out of every later
+                    // sweep's retry.
+                    lease.destroyed = !has_workload;
                 }
             }
 
@@ -93,7 +112,7 @@ impl ProviderService {
 /// tolerate being asked to stop and delete a workload twice; the second pass
 /// finds it absent and records it destroyed.
 pub(crate) async fn end_lease(state: &AppState, id: u32, end: LeaseEnd, now: u64) -> bool {
-    {
+    let has_workload = {
         let mut leases = state.leases.lock().await;
         let Some(lease) = leases.get_mut(&id) else {
             return false;
@@ -101,13 +120,24 @@ pub(crate) async fn end_lease(state: &AppState, id: u32, end: LeaseEnd, now: u64
         if !lease.state.is_live() {
             return false;
         }
-        info!("lease {} ended by {:?}; destroying its workload", id, end);
+        let has_workload = lease.state.has_workload();
+        if has_workload {
+            info!("lease {} ended by {:?}; destroying its workload", id, end);
+        } else {
+            info!("reservation {} ended by {:?}; releasing it", id, end);
+        }
         lease.state = LeaseState::Ended(end);
         lease.ended_at = Some(now);
-        lease.destroyed = false;
+        lease.destroyed = !has_workload;
         persist_leases(&leases, &state.config.lease_state_path);
+        has_workload
+    };
+    // A reservation runs nothing, so ending one asks the backend for
+    // nothing: the capacity it held is released by the record's own ending
+    // (spec §6.6, §6.7).
+    if has_workload {
+        destroy_workload(state, id).await;
     }
-    destroy_workload(state, id).await;
     true
 }
 

@@ -42,13 +42,23 @@ impl Op {
     }
 }
 
-/// What survives validation: who signed, until when it is good, and the
-/// content to parse per op.
+/// What survives validation: who signed, who it is addressed to, until when
+/// it is good, and the content to parse per op.
 #[derive(Debug, Clone)]
 pub struct ValidLeaseRequest {
     pub id: EventId,
     /// The tenant: the event's signer.
     pub tenant: PublicKey,
+    /// Every provider the request names in a `p` tag, in the order it names
+    /// them. This provider is one of them, and for every op but `spawn` it
+    /// is the only one — `validate` refuses otherwise.
+    ///
+    /// A spawn may name more: ONE signed spawn forms a whole Standby Set and
+    /// is sent to every member (§6.1, §7), so the route it lands on, not the
+    /// addressee, is what tells a member its role. That they are exactly the
+    /// members is `provider::standby::membership`'s to say, since only the
+    /// spawn's content knows the set.
+    pub addressees: Vec<PublicKey>,
     pub expiration: u64,
     pub content: String,
 }
@@ -106,19 +116,33 @@ pub fn validate(
             ),
         ));
     }
-    // Every `p` tag, not the first: a request naming two providers is
-    // addressed to someone else as much as to us.
-    let mut addressees = event.tags.public_keys().peekable();
-    if addressees.peek().is_none() {
+    // Every `p` tag, not the first. Only a SPAWN may name more than one
+    // provider, and only because one signed spawn forms a whole Standby Set
+    // and is sent to every member (§7); a status or a termination is about
+    // one lease on one provider, so a second `p` tag there means the request
+    // is addressed to someone else as much as to us. That a spawn's
+    // addressees are exactly its `standby_set` needs the content, so it is
+    // §6.2 step 3's (`provider::standby::membership`).
+    let addressees: Vec<PublicKey> = event.tags.public_keys().copied().collect();
+    if addressees.is_empty() {
         return Err(ErrorResponse::new(
             ErrorCode::InvalidRequest,
             "the Lease Request names no provider (`p` tag)",
         ));
     }
-    if addressees.any(|p| p != provider) {
+    if !addressees.contains(provider) {
         return Err(ErrorResponse::new(
             ErrorCode::InvalidRequest,
             "the Lease Request is addressed to another provider",
+        ));
+    }
+    if op != Op::Spawn && addressees.len() > 1 {
+        return Err(ErrorResponse::new(
+            ErrorCode::InvalidRequest,
+            format!(
+                "a {} names one provider; this one is addressed to more than this provider",
+                op.as_str()
+            ),
         ));
     }
     let found_op = event
@@ -175,6 +199,7 @@ pub fn validate(
     Ok(ValidLeaseRequest {
         id: event.id,
         tenant: event.pubkey,
+        addressees,
         expiration,
         content: event.content.clone(),
     })

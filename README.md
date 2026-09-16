@@ -53,8 +53,9 @@ This is a hard fork of [Paygress](https://github.com/DhananjayPurohit/Paygress)
 
 **Kept:** the `ComputeBackend` trait and the Docker backend, lease accounting
 and the expiry sweep, workload persistence across restarts, and the axum HTTP
-app. Warm standby and the reputation math stay in the tree, compiling, but
-nothing calls them — they are Milestone 3 work.
+app. Warm Standby is wired as far as roles and reservations (Milestone 3);
+the takeover state machine (`durable_workload`) and the reputation math stay
+in the tree, compiling, with nothing calling either.
 
 **Removed**, because TOON replaces each of them:
 
@@ -133,11 +134,12 @@ one HTTP path here:
 The two standby rows are printed **only for a listing that sets
 `standby_price`** (spec §7): a listing that prices no Warm Standby gets
 neither, so a connector never terminates a route this provider did not price,
-and an unset price is never read as free. Until the rest of Milestone 3
-reserves and pays a standby, both routes — and any spawn carrying a
-`standby_set` — are answered `invalid_request` with a message saying Standby
-Sets land later in Milestone 3, so nobody pays for a role this provider
-cannot yet hold.
+and an unset price is never read as free. A `.standby` spawn paid on a listing
+that prices none is refused `wrong_listing_version` — that route is not on
+sale there. `.standby.extend` still refuses every request with
+`invalid_request`: paying a reservation lands later in Milestone 3, and until
+it does `.extend` refuses a reserved lease the same way rather than selling it
+a running lease's interval at the running price.
 
 `toon-provider routes --config provider.toml` prints these as connector
 `[[routes]]` rows, ready to paste into the connector's config. It prints two
@@ -225,8 +227,9 @@ compose restart provider-connector relay-connector` and a rebuild of the
 
 The spawn body is `{ "request": <Lease Request> }`: a Nostr event of kind
 `K_LEASE_REQUEST` signed by the tenant, with tags `p` (this provider's
-pubkey), `op` = `spawn` and `expiration` (at most 300 s after `created_at`),
-whose content is
+pubkey — one per member for a [Standby Set](#standby-sets), which is the only
+request that may name more than this provider), `op` = `spawn` and
+`expiration` (at most 300 s after `created_at`), whose content is
 
 ```json
 { "workload_id": "<32 random bytes, hex>",
@@ -312,6 +315,53 @@ image can bridge it with the spawn's own `entrypoint` and `args` (e.g.
 `linuxserver/openssh-server`). No password is ever issued. A volume, when
 asked for, is mounted at `/data`.
 
+## Standby Sets
+
+A tenant that wants a workload to survive its provider buys a **Standby Set**:
+one primary that runs it, and one or more **Warm Standbys** that hold capacity
+to take it over (spec §7). The tenant signs **one** spawn, whose content
+carries the members' pubkeys primary-first under one `workload_id` —
+
+```json
+{ "workload_id": "…", "image": { … }, "ssh_public_key": "…",
+  "standby_set": ["<primary pubkey>", "<standby pubkey>", "…"] }
+```
+
+— gives it one `p` tag per member, and posts the same bytes to each. Nothing
+in the request singles out a member: a provider's role is its **position** in
+the set together with the **route** the packet was paid on.
+
+| Position | Route | What this provider does | Answer |
+|---|---|---|---|
+| index 0 | `<addr>.<listing>.v<n>.spawn`, at `price` | Runs the workload, exactly as a standalone spawn does | `role: "primary"`, with `access` |
+| any other index | `<addr>.<listing>.v<n>.standby`, at `standby_price` | Reserves capacity and sets `expires_at`. Starts **nothing** | `role: "standby"`, **no** `access` |
+
+Every other combination is `invalid_request` and does nothing — no
+`standby_set` on `.standby`, a set that does not name this provider, a `p` tag
+naming a provider outside the set, a member listed twice, index 0 on
+`.standby`, another index on `.spawn` — and a `.standby` spawn on a listing
+that prices no standby is `wrong_listing_version`. None of them touches the
+compute backend. Membership never changes: a different set is a new spawn
+under a new workload id.
+
+**A reservation is a lease.** It counts against the listing's capacity exactly
+as a running lease does, so Liveness `available` and `availability` both
+subtract it and nobody else is sold the slot; it is persisted, so it survives
+this provider's restarts — the backend has never heard of it, so nothing asks
+the backend whether it still exists; the expiry sweep ends it with `expiry`
+when nothing pays it; and its tenant's `terminate` releases it. `status`
+answers `role: "standby"`, `state: "reserved"` and no `access` throughout.
+Nothing is ever loaded, created, started or destroyed for it — that is what
+"nothing runs until a Takeover" means. The one thing a reservation does ask
+the backend is which workload id is free, the same question every spawn asks
+(`find_available_id`), because the id, the SSH forward and the host ports are
+held from the moment the capacity is.
+
+**Still to come in Milestone 3:** paying a reservation (`.standby.extend`, and
+the `not_standby` refusals that go with it), and the Takeover itself — a
+standby watching its primary's Liveness, announcing, settling the race and
+starting the workload from the image.
+
 ## Capabilities
 
 A capability is a privilege beyond an ordinary workload that a **listing**
@@ -382,8 +432,8 @@ Status answers:
 `state` is the §6.7 lease state: `"provisioning"`, `"reserved"`, `"running"`,
 or `{ "ended": "expiry" | "termination" | "eviction" }`. `"reserved"` is a
 Warm Standby before Takeover — capacity held and paid for, with nothing
-running and so no `access`; no route writes one until the rest of Milestone 3
-spawns a Standby Set. It is the lease record
+running and so no `access` (see [Standby Sets](#standby-sets)). It is the
+lease record
 as it stands, so between an expiry and the sweep that reaps it a lease still
 reads `"running"` with an `expires_at` in the past — extend and terminate
 refuse it as `expired` all the same. `access` is absent once
@@ -491,10 +541,12 @@ unknown field (including `image_digest`) is `invalid_request`. `role`
 (spec §6.4) is optional and takes `"primary"` or `"standby"` — never
 `"standalone"`, which is a lease role rather than a question, since a spawn
 with no Standby Set is standalone already; any other value is
-`invalid_request`. Omitting it asks the ordinary question. The answer does
-not yet depend on it: what a standby's answer must take into account — the
-listing's `standby_price`, and the capacity reservations hold — arrives with
-the reservations themselves, later in Milestone 3. The route
+`invalid_request`. Omitting it asks the ordinary question. With
+`"standby"` the answer is whether a Warm Standby **would be reserved** here,
+and nothing is reserved by asking: a listing that prices no standby is
+refused `wrong_listing_version`, exactly as its `.standby` route would have
+been, and capacity is counted with the reservations this provider already
+holds subtracted. The route
 always answers HTTP 200 — the answer *is* the payload:
 
 ```json
@@ -677,10 +729,11 @@ from the real HTTP surface and the real event builders: a signed Lease
 Request per `op` with its packet body, request and response bodies for
 spawn, extend, availability, status and terminate, one refusal per spec §5
 error code in validation order, one Profile, Listing, Liveness, Eviction
-Notice and Takeover each, and the route table a Listing generates. A handful
-of shapes no route can produce yet — `not_standby`, and a `status` answer in
-the `reserved` state — are rendered through the same serialiser with their
-`route`, `http_path` and `request_body` null. Everything is produced
+Notice and Takeover each, the two roles a Standby Set gives (`spawn.primary`,
+`spawn.standby` and a `status` for each), and the route table a Listing
+generates. One shape no route can produce yet — `not_standby` — is rendered
+through the same serialiser with its `route`, `http_path` and `request_body`
+null. Everything is produced
 over fixed test-only keys, a fixed clock and BIP-340 signatures with all-zero
 auxiliary randomness, so the bytes are reproducible and a tenant can re-derive
 every id and signature (TOON_Network #16).

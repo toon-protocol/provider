@@ -1,14 +1,25 @@
 // Spawn: the paid request that starts a lease and buys its first Lease
 // Interval (spec §6.2).
 //
+// ONE function serves both paid spawn routes, because they are one request:
+// a tenant forming a Standby Set signs a single spawn and posts it to every
+// member, and only the route it arrives on says whether this provider was
+// meant to run the workload (`.spawn`) or to hold capacity for it
+// (`.standby`). Splitting them would be two copies of the same six
+// validation steps that could drift apart on the one thing they must agree
+// about — what the set means.
+//
 // Validation runs in the spec's order and refuses with the FIRST failing
 // code: (1) the Lease Request — signature, addressee, freshness, replay;
 // (2) the listing version — it must exist AND be the one on sale
-// (`ProviderConfig::sellable_listing`, shared with `availability`) — and
-// whether the volume and ports fit it; (3) the role; (4) the workload id;
-// (5) the image; (6) capacity. Then the workload is started. A refusal on
-// this route is still billed (ADR 0003), so the order is the whole of what
-// a tenant can rely on: the first reason is the one reported.
+// (`ProviderConfig::sellable_listing`, shared with `availability`), it must
+// price standbys when the route is `.standby`, and the volume and ports must
+// fit it; (3) the role (`standby::membership`); (4) the workload id;
+// (5) the image; (6) capacity. Then the workload is started — or, for a Warm
+// Standby, deliberately not: the lease is Reserved, the capacity is held, and
+// nothing runs until a Takeover (spec §6.7, §7.1). A refusal on either route
+// is still billed (ADR 0003), so the order is the whole of what a tenant can
+// rely on: the first reason is the one reported.
 //
 // Step 5 is the resolution `availability` also does (`image_policy::check`:
 // the entry if there is one, the index, the manifest for the listing's
@@ -31,6 +42,7 @@ use super::config::{Listing, MAX_PORTS_PER_WORKLOAD};
 use super::image_policy::{self, ResolvedImage};
 use super::oci_layout::write_layout_tar;
 use super::persistence::{count_live, persist_leases, LeaseRecord, LeaseState};
+use super::standby::{self, SpawnRoute};
 use crate::compute::{container_name, ContainerConfig, PortMapping};
 use crate::nostr::image_events::SpawnImage;
 use crate::nostr::lease_request::{self, Op};
@@ -49,38 +61,35 @@ fn invalid(message: impl Into<String>) -> ErrorResponse {
     ErrorResponse::new(ErrorCode::InvalidRequest, message)
 }
 
-/// What every Warm Standby surface answers until the tickets that reserve
-/// and pay a standby land: the routes exist and the shapes parse, so a
-/// tenant and a connector can be configured for them, but nothing here holds
-/// capacity for anyone yet. Shared by the three refusals (a spawn carrying a
-/// `standby_set`, `.standby` and `.standby.extend`) so a tenant reads one
-/// sentence wherever it meets them.
-pub(super) const STANDBY_SETS_LAND_LATER: &str =
-    "Standby Sets land later in Milestone 3; this provider holds no Warm Standby yet";
-
-/// Serve one standby spawn on `<addr>.<listing>.v<version>.standby`.
-///
-/// Refused outright for now: reserving capacity, the role rules of spec §6.2
-/// step 3 and the `role: standby` answer are the next ticket's. The route is
-/// registered anyway (`provider_http::router`) so that a connector carrying
-/// it — and a tenant paying it — meets this provider's own refusal rather
-/// than a hole in the router, and so the refusal is a shape a tenant can
-/// test against today.
+/// Serve one standby spawn on `<addr>.<listing>.v<version>.standby`: the
+/// same request `spawn` serves, paid at the listing's `standby_price`,
+/// buying a Warm Standby's reservation instead of a running workload.
 pub async fn standby_spawn(
-    _state: &AppState,
-    _listing_name: &str,
-    _version: u32,
-    _body: &[u8],
+    state: &AppState,
+    listing_name: &str,
+    version: u32,
+    body: &[u8],
 ) -> Result<SpawnResponse, ErrorResponse> {
-    Err(invalid(STANDBY_SETS_LAND_LATER))
+    serve(state, listing_name, version, body, SpawnRoute::Standby).await
 }
 
-/// Serve one spawn on `<addr>.<listing>.v<version>.spawn`.
+/// Serve one spawn on `<addr>.<listing>.v<version>.spawn`: a standalone
+/// lease, or a Standby Set's primary.
 pub async fn spawn(
     state: &AppState,
     listing_name: &str,
     version: u32,
     body: &[u8],
+) -> Result<SpawnResponse, ErrorResponse> {
+    serve(state, listing_name, version, body, SpawnRoute::Spawn).await
+}
+
+async fn serve(
+    state: &AppState,
+    listing_name: &str,
+    version: u32,
+    body: &[u8],
+    route: SpawnRoute,
 ) -> Result<SpawnResponse, ErrorResponse> {
     let now = state.clock.now();
 
@@ -101,6 +110,12 @@ pub async fn spawn(
         .config
         .sellable_listing(listing_name, version)?
         .clone();
+    // …and, on `.standby`, that this listing sells Warm Standbys at all —
+    // the same check, with the same code and message, that `availability`
+    // answers the standby question with (`Listing::sells_standbys`).
+    if route == SpawnRoute::Standby {
+        listing.sells_standbys()?;
+    }
     if let Some(volume) = content.volume_gb {
         if volume > listing.resources.storage_gb {
             return Err(invalid(format!(
@@ -112,11 +127,16 @@ pub async fn spawn(
     check_ports(&content.ports)?;
 
     // ── 3. the role ─────────────────────────────────────────────────────
-    // Every spawn here is standalone: a `standby_set` is parsed only so it
-    // can be refused by name rather than dropped (ADR 0004).
-    if content.standby_set.is_some() {
-        return Err(invalid(format!("standby_set: {}", STANDBY_SETS_LAND_LATER)));
-    }
+    // Position in the set and route together (spec §6.2 step 3): standalone,
+    // the set's primary, or one of its Warm Standbys.
+    let membership = standby::membership(
+        content.standby_set.as_deref(),
+        &state.keys.public_key(),
+        &request.addressees,
+        route,
+    )?;
+    let role = membership.role;
+    let reserving = role == Role::Standby;
 
     // ── 4. the workload id, 5. the image, 6. capacity ───────────────────
     // Held under one lock with the insert, so two spawns racing for the
@@ -204,9 +224,24 @@ pub async fn spawn(
                 tenant: tenant_hex.clone(),
                 listing: listing.name.clone(),
                 listing_version: listing.version,
-                role: Role::Standalone,
-                state: LeaseState::Provisioning,
+                role,
+                // A Warm Standby is Reserved from the start and never
+                // Provisioning: there is nothing to provision. Both states
+                // are live, so either way the slot, the workload id and the
+                // ports are held from this instant (spec §6.7).
+                state: if reserving {
+                    LeaseState::Reserved
+                } else {
+                    LeaseState::Provisioning
+                },
+                standby_set: membership.set,
+                // Only a reservation keeps it: it is what a Takeover would
+                // start, and a lease that is about to start its own workload
+                // needs nothing kept.
+                reserved_spawn: reserving.then(|| content.clone()),
                 created_at: now,
+                // The same interval buys either role (spec §6.2): the
+                // standby paid less for it, at the listing's standby price.
                 expires_at: now + listing.lease_interval_s,
                 ended_at: None,
                 destroyed: false,
@@ -218,6 +253,32 @@ pub async fn spawn(
             },
         );
         persist_leases(&leases, &state.config.lease_state_path);
+    }
+
+    // ── a Warm Standby stops here ───────────────────────────────────────
+    // The capacity is held and paid for and NOTHING RUNS. Step 5 above
+    // RESOLVED the image — the index, the manifest for the listing's arch
+    // and its config, exactly as `availability` does — so a reservation is
+    // never sold for an image this provider would refuse; what does not
+    // happen is everything below: no layer is fetched, no layout is loaded,
+    // no container is made, and the answer carries no `access` because there
+    // is nowhere to reach until a Takeover (spec §6.2, §7.1). That is what
+    // the tenant bought.
+    if reserving {
+        info!(
+            "reserved {} ({} v{}) for tenant {} as a Warm Standby until {}",
+            content.workload_id,
+            listing.name,
+            listing.version,
+            tenant_hex,
+            now + listing.lease_interval_s
+        );
+        return Ok(SpawnResponse {
+            workload_id: content.workload_id,
+            role,
+            expires_at: now + listing.lease_interval_s,
+            access: None,
+        });
     }
 
     // ── fetch it ────────────────────────────────────────────────────────
@@ -278,7 +339,7 @@ pub async fn spawn(
             persist_leases(&leases, &state.config.lease_state_path);
             Ok(SpawnResponse {
                 workload_id: content.workload_id,
-                role: Role::Standalone,
+                role,
                 expires_at,
                 access: Some(Access {
                     host: state.config.public_ip.clone(),

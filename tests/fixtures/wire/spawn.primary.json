@@ -1,0 +1,54 @@
+{
+  "fixture": {
+    "case": "primary",
+    "description": "A paid spawn that forms a Standby Set (spec §6.2, §7), at the member it makes the PRIMARY. The content carries `standby_set` with this provider's key at index 0, and the request carries one `p` tag per member, because the tenant signs it once and sends the same bytes to every member. Index 0 must arrive on `.spawn`, and the lease that follows runs exactly as a standalone one does: `role` is `primary` and `access` is present. The tier is `warm`, the one that prices standbys, because the rest of the set is bought on its `.standby` route at `standby_price`.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "spawn"
+  },
+  "http_path": "/listings/warm/v1/spawn",
+  "request_body": {
+    "request": {
+      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd\",\"reference\":\"docker.io/library/alpine\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"standby_set\":[\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\",\"5ab4689e400a4a160cf01cd44730845a54768df8547dcdf073d964f109f18c30\"],\"volume_gb\":2,\"workload_id\":\"a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\"}",
+      "created_at": 1700000000,
+      "id": "538cd24272cd6c8846c9adfc53aa2f4b6968f80ff7da1bdfcce59d99946934bc",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "c5831ec851fe50ec16a3119b698fc111d2afa23d3ec54f33077807c967c94b5b10fced3a47188183ae10160f36e67a22cdbf8d8d286db19c41b1eeae33e8e264",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "p",
+          "5ab4689e400a4a160cf01cd44730845a54768df8547dcdf073d964f109f18c30"
+        ],
+        [
+          "op",
+          "spawn"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "access": {
+      "host": "203.0.113.7",
+      "ports": [
+        {
+          "container_port": 443,
+          "host_port": 41000
+        }
+      ],
+      "ssh_port": 40000
+    },
+    "expires_at": 1700003600,
+    "role": "primary",
+    "workload_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+  },
+  "response_status": 200,
+  "route": "g.fixture.warm.v1.spawn"
+}

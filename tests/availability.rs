@@ -196,6 +196,8 @@ fn lease(id: u32, listing: &str, version: u32) -> LeaseRecord {
         listing_version: version,
         role: Role::Standalone,
         state: LeaseState::Running,
+        standby_set: None,
+        reserved_spawn: None,
         created_at: NOW - 600,
         expires_at: NOW + 600,
         ended_at: None,

@@ -1,173 +1,285 @@
-// Warm Standby: a provider holding capacity to take over a lease's workload if
-// the provider running it goes silent.
+// Standby Sets: which role a spawn gives THIS provider, and what the lease it
+// creates remembers about the set (spec §6.2 step 3, §7).
 //
-// Kept for Milestone 3, unwired. Nothing in the app reads any of this; the
-// pieces that survived the Paygress strip are the ones that do not depend on
-// its removed DM transport or its promotion event kind. The promotion
-// scheduler itself was deleted with those.
-#![allow(dead_code)]
+// A tenant forms a Standby Set by signing ONE spawn — `standby_set` lists the
+// members' public keys, primary first, under one `workload_id` — and posting
+// that same signed request to every member. So nothing in the request says
+// what any single provider should do; the role comes from two things
+// together: this provider's POSITION in the list, and WHICH ROUTE the request
+// arrived on. Index 0 runs the workload and arrives on `.spawn`; every other
+// index holds capacity and arrives on `.standby`. A mismatch between the two
+// is a mis-addressed spawn and does nothing (spec §6.2 step 3).
+//
+// Membership never changes: a new set is a new spawn under a new workload id
+// (spec §7), so nothing here ever updates a set.
 
-use std::collections::HashMap;
+use nostr_sdk::PublicKey;
+use serde::{Deserialize, Serialize};
 
-use crate::compute::ContainerConfig;
+use crate::nostr::wire::{ErrorCode, ErrorResponse, Role};
 
-/// Cadence at which the standby watchdog re-checks a primary's liveness.
-pub(crate) const STANDBY_WATCHDOG_INTERVAL_SECS: u64 = 30;
-
-/// How long without a sign of the primary before we treat it as gone.
-pub(crate) const STANDBY_SILENCE_SECS: u64 = 180;
-
-/// Standby `i` waits `i * DELAY` before taking over. Single-writer is
-/// best-effort: a brief two-live window is an accepted trade-off.
-pub(crate) const STANDBY_TAKEOVER_DELAY_SECS: u64 = 30;
-
-/// A paid-for, acknowledged warm-standby reservation. No workload exists yet;
-/// the standby is armed and waiting for the primary to go silent.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct StandbySlot {
-    pub workload_id: String,
-    pub primary_npub: String,
-    pub standby_index: usize,
-    pub standby_count: usize,
-    pub container_config: ContainerConfig,
-    pub listing: String,
-    pub expires_at: u64,
-    pub tenant_npub: String,
-    /// The watchdog's silence baseline before any sign of the primary is
-    /// observed; without it a fresh slot would read `last_seen == 0` as silence
-    /// and take over from a healthy primary.
-    pub created_at: u64,
-    /// The other standbys, checked at takeover time to detect that a peer got
-    /// there first; without it every standby would take over independently.
-    pub peer_standby_npubs: Vec<String>,
+/// Which of the two paid spawn routes a request arrived on.
+///
+/// Not a detail of the HTTP layer: the route is half of the role rule above,
+/// because the request itself is identical at every member of the set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnRoute {
+    /// `<addr>.<listing>.v<n>.spawn`, at the listing's `price`.
+    Spawn,
+    /// `<addr>.<listing>.v<n>.standby`, at its `standby_price`.
+    Standby,
 }
 
-/// `baseline` is the most recent sign of the primary, or the slot's reservation
-/// timestamp when none has been observed. `baseline == 0` means the caller
-/// mis-wired the lookup and returns `false`: a missed takeover beats a spurious
-/// one against a healthy primary.
-pub(crate) fn primary_is_silent(now: u64, baseline: u64, threshold: u64) -> bool {
-    if baseline == 0 {
-        return false;
+/// The Standby Set a lease serves in, kept with the lease (spec §7).
+///
+/// Persisted, because everything a Warm Standby does after the spawn needs
+/// it: the primary whose Liveness it watches is `members[0]`, and the
+/// Takeover race is settled among `members` alone.
+///
+/// No `deny_unknown_fields`, unlike the wire shapes in `nostr::wire`: this
+/// never crosses the wire, and one unknown key in a state file written by a
+/// later version would fail the WHOLE table's parse and take every lease
+/// with it (`persistence::load_leases`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StandbySet {
+    /// Every member's public key as 64 lowercase hex characters, primary
+    /// first. Normalised on the way in, so a tenant that shipped `npub1…`
+    /// and one that shipped hex leave the same record behind.
+    pub members: Vec<String>,
+    /// This provider's own position in `members`. 0 is the primary.
+    pub index: usize,
+}
+
+impl StandbySet {
+    /// The primary's public key: index 0 of the set, whatever this
+    /// provider's own position is (spec §7). It is the key a Warm Standby
+    /// watches Liveness for, and the `primary` a Takeover names.
+    ///
+    /// `None` only for a set with no members, which `membership` refuses to
+    /// build — but this struct is also read back off disk, where nothing
+    /// re-checks it, and a hand-edited state file must not panic a provider
+    /// with paid leases on it.
+    pub fn primary(&self) -> Option<&str> {
+        self.members.first().map(String::as_str)
     }
-    now.saturating_sub(baseline) >= threshold
+
+    /// Whether this provider is the set's primary.
+    pub fn is_primary(&self) -> bool {
+        self.index == 0
+    }
 }
 
-/// Slots whose lease window passed without a takeover. Without reaping them the
-/// map grows unbounded on a long-running provider.
-pub(crate) fn select_expired(slots: &HashMap<String, StandbySlot>, now: u64) -> Vec<String> {
-    slots
-        .iter()
-        .filter(|(_, slot)| slot.expires_at <= now)
-        .map(|(workload_id, _)| workload_id.clone())
-        .collect()
+/// What a spawn's `standby_set` and its route make this provider: the role
+/// the lease takes, and the set it remembers.
+pub(super) struct Membership {
+    pub role: Role,
+    /// `None` for a standalone lease — a spawn with no `standby_set` at all.
+    pub set: Option<StandbySet>,
+}
+
+fn invalid(message: impl Into<String>) -> ErrorResponse {
+    ErrorResponse::new(ErrorCode::InvalidRequest, message)
+}
+
+/// Step 3 of the spec's spawn validation (§6.2): the role.
+///
+/// Every failure here is `invalid_request`: §6.2 names no code for step 3,
+/// and a mis-addressed spawn is a request the tenant must correct rather
+/// than one this provider could serve at another time or price. The refusal
+/// is still billed (ADR 0003), so each says exactly what was wrong.
+///
+/// `addressees` are the request's `p` tags. A spawn forming a Standby Set is
+/// addressed to every member — that is what lets ONE signed request reach all
+/// of them (§6.1) — so the `p` tags must name members and nobody else; every
+/// other request names exactly this provider and nobody else.
+pub(super) fn membership(
+    standby_set: Option<&[String]>,
+    provider: &PublicKey,
+    addressees: &[PublicKey],
+    route: SpawnRoute,
+) -> Result<Membership, ErrorResponse> {
+    let Some(members) = standby_set else {
+        // No set: a standalone lease, and `.standby` sells none.
+        if route == SpawnRoute::Standby {
+            return Err(invalid(
+                "a spawn with no standby_set buys a standalone lease; buy it on .spawn",
+            ));
+        }
+        if addressees.len() > 1 {
+            return Err(invalid(
+                "a spawn with no standby_set names one provider; this one is addressed to \
+                 more than this provider",
+            ));
+        }
+        return Ok(Membership {
+            role: Role::Standalone,
+            set: None,
+        });
+    };
+
+    let keys = parse_members(members)?;
+    let Some(index) = keys.iter().position(|k| k == provider) else {
+        return Err(invalid(
+            "this provider's key is not in the standby_set; a spawn goes only to the \
+             providers the set names",
+        ));
+    };
+    if let Some(stranger) = addressees.iter().find(|a| !keys.contains(a)) {
+        return Err(invalid(format!(
+            "the spawn is addressed to {}, which the standby_set does not name",
+            stranger.to_hex()
+        )));
+    }
+
+    let role = match (index, route) {
+        (0, SpawnRoute::Spawn) => Role::Primary,
+        (0, SpawnRoute::Standby) => {
+            return Err(invalid(
+                "index 0 of a standby_set is the primary, which runs the workload; buy it \
+                 on .spawn",
+            ))
+        }
+        (_, SpawnRoute::Standby) => Role::Standby,
+        (index, SpawnRoute::Spawn) => {
+            return Err(invalid(format!(
+                "index {} of a standby_set is a Warm Standby, which runs nothing; buy it \
+                 on .standby",
+                index
+            )))
+        }
+    };
+
+    Ok(Membership {
+        role,
+        set: Some(StandbySet {
+            members: keys.iter().map(|k| k.to_hex()).collect(),
+            index,
+        }),
+    })
+}
+
+/// Every member as a public key, in order.
+///
+/// A member that is not a key at all, or a key listed twice — which would
+/// give one provider two positions and so two roles — is a set nobody can
+/// take a position in.
+fn parse_members(members: &[String]) -> Result<Vec<PublicKey>, ErrorResponse> {
+    if members.is_empty() {
+        return Err(invalid(
+            "standby_set: an empty list names no provider; omit it for a standalone lease",
+        ));
+    }
+    let mut keys = Vec::with_capacity(members.len());
+    for (index, member) in members.iter().enumerate() {
+        let key = PublicKey::parse(member)
+            .map_err(|e| invalid(format!("standby_set[{}] is not a public key: {}", index, e)))?;
+        if keys.contains(&key) {
+            return Err(invalid(format!(
+                "standby_set[{}] is listed twice; a provider has one position in a set",
+                index
+            )));
+        }
+        keys.push(key);
+    }
+    Ok(keys)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // The pure gate a watchdog uses to decide whether to take over. The edge
-    // cases are pinned so a refactor can't silently flip the semantics the
-    // crash-detection promise rests on.
+    use nostr_sdk::{Keys, ToBech32};
 
-    #[test]
-    fn a_fresh_sign_of_the_primary_is_not_silence() {
-        assert!(!primary_is_silent(1_000_000, 999_940, 180));
+    fn key() -> Keys {
+        Keys::generate()
+    }
+
+    fn role_on(
+        set: &[PublicKey],
+        me: &PublicKey,
+        route: SpawnRoute,
+    ) -> Result<Membership, ErrorResponse> {
+        let members: Vec<String> = set.iter().map(|k| k.to_hex()).collect();
+        membership(Some(&members), me, &[*me], route)
     }
 
     #[test]
-    fn primary_just_past_threshold_is_silent() {
-        assert!(primary_is_silent(1_000_000, 999_820, 180));
-        // 179s old — still alive.
-        assert!(!primary_is_silent(1_000_000, 999_821, 180));
+    fn position_and_route_together_name_the_role() {
+        let primary = key().public_key();
+        let standby = key().public_key();
+        let set = [primary, standby];
+
+        let mine = role_on(&set, &primary, SpawnRoute::Spawn).unwrap();
+        assert_eq!(mine.role, Role::Primary);
+        assert!(mine.set.as_ref().unwrap().is_primary());
+
+        let theirs = role_on(&set, &standby, SpawnRoute::Standby).unwrap();
+        assert_eq!(theirs.role, Role::Standby);
+        let theirs = theirs.set.unwrap();
+        assert_eq!(theirs.index, 1);
+        // Whatever its own position, a member knows who to watch.
+        assert_eq!(theirs.primary(), Some(primary.to_hex().as_str()));
     }
 
     #[test]
-    fn unset_baseline_is_not_silent() {
-        assert!(!primary_is_silent(1_000_000, 0, 180));
-        assert!(!primary_is_silent(50, 0, 180));
+    fn a_role_that_does_not_match_the_route_is_refused() {
+        let primary = key().public_key();
+        let standby = key().public_key();
+        let set = [primary, standby];
+        assert!(role_on(&set, &primary, SpawnRoute::Standby).is_err());
+        assert!(role_on(&set, &standby, SpawnRoute::Spawn).is_err());
     }
 
     #[test]
-    fn fresh_slot_within_grace_window_is_not_silent() {
-        let created_at = 1_000_000;
-        assert!(!primary_is_silent(created_at + 30, created_at, 180));
+    fn a_set_that_does_not_name_this_provider_is_refused() {
+        let set = [key().public_key(), key().public_key()];
+        assert!(role_on(&set, &key().public_key(), SpawnRoute::Standby).is_err());
     }
 
     #[test]
-    fn fresh_slot_past_grace_window_is_silent() {
-        let created_at = 1_000_000;
-        assert!(primary_is_silent(created_at + 180, created_at, 180));
+    fn an_empty_set_names_nobody() {
+        // `[]` is not "a set of one, me": a spawn with no members has no
+        // index 0 to be the primary, so it describes no Standby Set at all.
+        let me = key().public_key();
+        assert!(membership(Some(&[]), &me, &[me], SpawnRoute::Spawn).is_err());
+        assert!(membership(Some(&[]), &me, &[me], SpawnRoute::Standby).is_err());
     }
 
     #[test]
-    fn clock_skew_underflow_does_not_panic_or_misfire() {
-        // baseline > now (clock went backwards, or a future-stamped event).
-        assert!(!primary_is_silent(100, 200, 180));
-    }
-
-    fn make_slot(workload_id: &str, expires_at: u64) -> StandbySlot {
-        StandbySlot {
-            workload_id: workload_id.to_string(),
-            primary_npub: "npub1primary".to_string(),
-            standby_index: 0,
-            standby_count: 1,
-            container_config: ContainerConfig {
-                id: 1,
-                name: "toon-1".to_string(),
-                image: "img".to_string(),
-                cpu_millicores: 1000,
-                memory_mb: 1024,
-                storage_gb: 10,
-                ssh_key: None,
-                host_port: None,
-                ports: vec![],
-                env: HashMap::new(),
-                entrypoint: None,
-                args: vec![],
-                data_path: None,
-            },
-            listing: "basic.v1".to_string(),
-            expires_at,
-            tenant_npub: "npub1tenant".to_string(),
-            created_at: 0,
-            peer_standby_npubs: vec![],
-        }
+    fn a_member_listed_twice_has_no_single_position() {
+        let me = key().public_key();
+        let hex = me.to_hex();
+        assert!(membership(Some(&[hex.clone(), hex]), &me, &[me], SpawnRoute::Spawn).is_err());
     }
 
     #[test]
-    fn select_expired_returns_only_past_expiry_slots() {
-        let mut slots = HashMap::new();
-        slots.insert("active".to_string(), make_slot("active", 2_000));
-        slots.insert("expired".to_string(), make_slot("expired", 999));
-        let mut expired = select_expired(&slots, 1_000);
-        expired.sort();
-        assert_eq!(expired, vec!["expired".to_string()]);
+    fn a_bech32_member_names_the_same_provider_as_its_hex() {
+        // A tenant may ship either spelling; the record keeps hex.
+        let me = key().public_key();
+        let set = vec![me.to_bech32().unwrap(), key().public_key().to_hex()];
+        let mine = membership(Some(&set), &me, &[me], SpawnRoute::Spawn).unwrap();
+        assert_eq!(mine.set.unwrap().members[0], me.to_hex());
     }
 
     #[test]
-    fn select_expired_treats_expires_at_equals_now_as_expired() {
-        // expires_at is the FIRST instant the lease no longer applies, so a
-        // slot ending exactly now is reaped on this tick.
-        let mut slots = HashMap::new();
-        slots.insert("boundary".to_string(), make_slot("boundary", 1_000));
-        assert_eq!(select_expired(&slots, 1_000), vec!["boundary".to_string()]);
+    fn a_standalone_spawn_belongs_to_no_set() {
+        let me = key().public_key();
+        let mine = membership(None, &me, &[me], SpawnRoute::Spawn).unwrap();
+        assert_eq!(mine.role, Role::Standalone);
+        assert!(mine.set.is_none());
+        // …and buys nothing on the standby route.
+        assert!(membership(None, &me, &[me], SpawnRoute::Standby).is_err());
     }
 
     #[test]
-    fn select_expired_returns_empty_when_no_slots_expired() {
-        let mut slots = HashMap::new();
-        slots.insert("a".to_string(), make_slot("a", 9_999));
-        slots.insert("b".to_string(), make_slot("b", 9_999));
-        assert!(select_expired(&slots, 1_000).is_empty());
-    }
-
-    #[test]
-    fn a_slot_round_trips_through_serde() {
-        let slot = make_slot("w-1", 999);
-        let json = serde_json::to_string(&slot).unwrap();
-        let back: StandbySlot = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, slot);
+    fn a_spawn_addressed_beyond_its_set_is_refused() {
+        let me = key().public_key();
+        let peer = key().public_key();
+        let stranger = key().public_key();
+        let set = vec![me.to_hex(), peer.to_hex()];
+        assert!(membership(Some(&set), &me, &[me, peer], SpawnRoute::Spawn).is_ok());
+        assert!(membership(Some(&set), &me, &[me, stranger], SpawnRoute::Spawn).is_err());
+        // The same rule for a standalone spawn: one provider, no others.
+        assert!(membership(None, &me, &[me, stranger], SpawnRoute::Spawn).is_err());
     }
 }

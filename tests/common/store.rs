@@ -654,7 +654,7 @@ pub fn spawn_content(seed: u8, image: ImageRef) -> SpawnContent {
 pub fn signed(h: &StoreHarness, op: &'static str, content: Value, tenant: Option<Keys>) -> Value {
     RequestSpec {
         tenant: tenant.unwrap_or_else(Keys::generate),
-        provider: h.provider,
+        providers: vec![h.provider],
         op,
         content,
         created_at: h.clock.now(),
