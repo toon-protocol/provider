@@ -274,7 +274,7 @@ async fn asking_for_docker_in_the_workload_is_refused_when_the_listing_does_not_
 }
 
 #[tokio::test]
-async fn a_standby_set_is_refused_this_milestone() {
+async fn a_standby_set_is_refused_until_the_rest_of_milestone_3_lands() {
     let h = harness().await;
     let content = SpawnContent {
         standby_set: Some(vec![h.provider.to_hex(), "bb".repeat(32)]),

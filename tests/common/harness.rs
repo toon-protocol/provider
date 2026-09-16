@@ -70,6 +70,7 @@ pub fn listing(name: &str, version: u32, capacity: u32) -> Listing {
         arch: "amd64".to_string(),
         lease_interval_s: INTERVAL,
         price: 1000,
+        standby_price: None,
         capabilities: vec![],
         capacity,
     }

@@ -22,8 +22,17 @@ fn listing(name: &str, version: u32, price: u64) -> Listing {
         arch: "amd64".to_string(),
         lease_interval_s: 3600,
         price,
+        standby_price: None,
         capabilities: vec![],
         capacity: 2,
+    }
+}
+
+/// The same tier, priced for Warm Standbys too.
+fn selling_standbys(name: &str, version: u32, price: u64, standby_price: u64) -> Listing {
+    Listing {
+        standby_price: Some(standby_price),
+        ..listing(name, version, price)
     }
 }
 
@@ -132,6 +141,87 @@ fn an_ended_lease_does_not_keep_a_retired_version_alive() {
         .map(|r| r.0)
         .collect();
     assert!(!prefixes.contains(&"g.acme.basic.v1.spawn".to_string()));
+}
+
+/// A config whose `warm` tier sells standbys and whose `basic` tier does
+/// not, in two live versions each: what the two standby rows must and must
+/// not appear for.
+fn config_with_standbys() -> ProviderConfig {
+    ProviderConfig {
+        ilp_address: "g.acme".to_string(),
+        handler_base_url: "http://provider:8080".to_string(),
+        listings: vec![
+            listing("basic", 1, 1000),
+            selling_standbys("warm", 1, 1000, 400),
+            selling_standbys("warm", 2, 1500, 600),
+        ],
+        ..ProviderConfig::default()
+    }
+}
+
+#[test]
+fn a_listing_that_prices_standbys_gets_both_standby_rows_at_the_standby_price() {
+    // warm v1 is retired but still holds a lease, so both of its standby
+    // rows stay at the standby price it was sold at, exactly as `.spawn` and
+    // `.extend` do (ADR 0009).
+    let rows = rows(&render_routes(
+        &config_with_standbys(),
+        &[live_lease(1000, "warm", 1)],
+    ));
+    for (version, price) in [(1, 400), (2, 600)] {
+        assert!(
+            rows.contains(&(
+                format!("g.acme.warm.v{}.standby", version),
+                format!("http://provider:8080/listings/warm/v{}/standby", version),
+                price
+            )),
+            "missing .standby for warm v{} in {:?}",
+            version,
+            rows
+        );
+        assert!(
+            rows.contains(&(
+                format!("g.acme.warm.v{}.standby.extend", version),
+                format!(
+                    "http://provider:8080/listings/warm/v{}/standby/extend",
+                    version
+                ),
+                price
+            )),
+            "missing .standby.extend for warm v{} in {:?}",
+            version,
+            rows
+        );
+    }
+}
+
+#[test]
+fn a_listing_that_prices_no_standby_gets_no_standby_rows() {
+    // Nothing extra for `basic`: the connector must never terminate a route
+    // the provider did not price.
+    let rows = rows(&render_routes(
+        &config_with_standbys(),
+        &[live_lease(1000, "warm", 1)],
+    ));
+    let prefixes: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+    assert!(prefixes.contains(&"g.acme.basic.v1.spawn"));
+    assert!(!prefixes
+        .iter()
+        .any(|p| p.starts_with("g.acme.basic.v1.standby")));
+
+    // And the count is exact: two rows for basic v1, four for each live
+    // `warm` version, then the three free rows.
+    assert_eq!(rows.len(), 2 + 4 + 4 + 3);
+}
+
+#[test]
+fn a_retired_standby_version_with_no_live_lease_loses_its_standby_rows_too() {
+    let prefixes: Vec<String> = rows(&render_routes(&config_with_standbys(), &[]))
+        .into_iter()
+        .map(|r| r.0)
+        .collect();
+    assert!(!prefixes.iter().any(|p| p.starts_with("g.acme.warm.v1.")));
+    assert!(prefixes.contains(&"g.acme.warm.v2.standby".to_string()));
 }
 
 #[test]

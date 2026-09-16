@@ -129,6 +129,23 @@ pub async fn extend(
     })
 }
 
+/// Serve one extension of a reservation on
+/// `<addr>.<listing>.v<version>.standby.extend`.
+///
+/// Refused outright for now, like `spawn::standby_spawn`: adding an interval
+/// to a reservation — and refusing `.extend` and `.standby.extend` for the
+/// wrong role with `not_standby` (spec §6.3) — needs reservations to exist,
+/// which is a later ticket of this milestone. The route is registered so a
+/// paid packet meets a refusal rather than a hole.
+pub async fn standby_extend(
+    _state: &AppState,
+    _listing_name: &str,
+    _version: u32,
+    _body: &[u8],
+) -> Result<ExtendResponse, ErrorResponse> {
+    Err(invalid(super::spawn::STANDBY_SETS_LAND_LATER))
+}
+
 /// Serve one status on the free `<addr>.status`.
 pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, ErrorResponse> {
     let (tenant, workload_id) = authenticate(state, body, Op::Status).await?;
@@ -143,13 +160,22 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
         role: lease.role,
         state: lease.state,
         expires_at: lease.expires_at,
-        // An ended lease has no workload left, so it has nothing to reach.
-        access: lease
-            .state
-            .is_live()
-            .then(|| lease.access(&state.config.public_ip)),
+        // Only a lease with a workload has somewhere to reach. An ended one
+        // has had its workload destroyed; a `Reserved` standby has not
+        // started one yet, and spec §6.2 is explicit that `access` is absent
+        // for a standby until Takeover — naming a host and port that reach
+        // nothing would be a lie either way.
+        access: has_access(lease.state).then(|| lease.access(&state.config.public_ip)),
         template: lease.template.clone(),
     })
+}
+
+/// Whether a lease in this state has a workload a tenant can reach.
+fn has_access(state: LeaseState) -> bool {
+    match state {
+        LeaseState::Provisioning | LeaseState::Running => true,
+        LeaseState::Reserved | LeaseState::Ended(_) => false,
+    }
 }
 
 /// Serve one termination on the free `<addr>.terminate`: the workload is

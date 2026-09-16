@@ -10,7 +10,10 @@
 // The routes themselves are one module each: `spawn` starts a lease,
 // `lifecycle` extends, reports and ends one, `availability` answers whether a
 // spawn would run without starting anything, and `cleanup` is where every
-// ending — Expiry or Termination — actually destroys the workload.
+// ending — Expiry or Termination — actually destroys the workload. The two
+// Warm Standby routes live beside the routes they will become: `.standby` in
+// `spawn`, `.standby.extend` in `lifecycle`, both refusing until the rest of
+// Milestone 3 lands.
 // `image_policy` is the rule both `spawn` and `availability` apply, so the
 // two can never disagree; `fetcher` (over `oci` and the TOON store gateway)
 // is how every image byte they read arrives, verified.
@@ -38,11 +41,11 @@ pub use config::{
 };
 pub use fetcher::BlobFetcher;
 pub use image_policy::{ImagePolicy, ResolvedImage};
-pub use lifecycle::{evict, extend, status, terminate};
+pub use lifecycle::{evict, extend, standby_extend, status, terminate};
 pub use persistence::persisted_leases;
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
-pub use spawn::{spawn, VOLUME_MOUNT_PATH};
+pub use spawn::{spawn, standby_spawn, VOLUME_MOUNT_PATH};
 pub use standby::StandbySlot;
 
 use std::collections::HashMap;

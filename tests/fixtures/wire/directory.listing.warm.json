@@ -1,0 +1,59 @@
+{
+  "content": {
+    "arch": "amd64",
+    "capabilities": [],
+    "lease_interval_s": 3600,
+    "price": 1000,
+    "resources": {
+      "cpu_millicores": 500,
+      "memory_mb": 256,
+      "storage_gb": 4
+    },
+    "standby_price": 400,
+    "version": 1
+  },
+  "event": {
+    "content": "{\"version\":1,\"resources\":{\"cpu_millicores\":500,\"memory_mb\":256,\"storage_gb\":4},\"arch\":\"amd64\",\"lease_interval_s\":3600,\"price\":1000,\"standby_price\":400,\"capabilities\":[]}",
+    "created_at": 1700000000,
+    "id": "f93879c17182fce89f9852a67b838a7f0c0297601e5af3818d62a515518ec968",
+    "kind": 30432,
+    "pubkey": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+    "sig": "9e469d836603533fe32299b2df855845804b18f026178badb2267381236d92c7177bd3b69b92a5e4dc8865155cd445562f10c5d0fcba29e249be5ee3f6828091",
+    "tags": [
+      [
+        "d",
+        "warm"
+      ],
+      [
+        "a",
+        "10432:466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27:"
+      ],
+      [
+        "L",
+        "toon.network"
+      ],
+      [
+        "l",
+        "isolation:shared-kernel",
+        "toon.network"
+      ],
+      [
+        "l",
+        "arch:amd64",
+        "toon.network"
+      ],
+      [
+        "g",
+        "u4pruydqqvj"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "listing.warm",
+    "description": "The `warm` Listing: the one tier that sells Warm Standbys (spec §4.2, §7), so its content carries `standby_price` — µUSDC per interval for held capacity with nothing running, less than the `price` of a running lease. It is this field alone that gives the tier its `.standby` and `.standby.extend` routes in `routes.listing`; nothing else about the Listing changes.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "directory"
+  },
+  "kind_name": "K_LISTING",
+  "nip01_serialization": "[0,\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\",1700000000,30432,[[\"d\",\"warm\"],[\"a\",\"10432:466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27:\"],[\"L\",\"toon.network\"],[\"l\",\"isolation:shared-kernel\",\"toon.network\"],[\"l\",\"arch:amd64\",\"toon.network\"],[\"g\",\"u4pruydqqvj\"]],\"{\\\"version\\\":1,\\\"resources\\\":{\\\"cpu_millicores\\\":500,\\\"memory_mb\\\":256,\\\"storage_gb\\\":4},\\\"arch\\\":\\\"amd64\\\",\\\"lease_interval_s\\\":3600,\\\"price\\\":1000,\\\"standby_price\\\":400,\\\"capabilities\\\":[]}\"]"
+}

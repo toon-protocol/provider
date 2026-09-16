@@ -32,6 +32,13 @@ async fn check(state: &AppState, body: &[u8]) -> Result<(), ErrorResponse> {
         )
     })?;
 
+    // §6.4's optional `role` is parsed and not yet acted on: what a
+    // standby's answer must take into account — the listing's
+    // `standby_price`, and the capacity reservations hold — arrives with the
+    // reservations themselves, later in Milestone 3. Parsing it now means a
+    // tenant asking the question gets an answer rather than
+    // `invalid_request` for a field spec §6.4 names.
+    //
     // Step 2: the listing version exists and is on sale — a retired version
     // starts no lease, so `would_run` there is `false` with the same
     // `wrong_listing_version` a paid spawn would have bought. (Ports and

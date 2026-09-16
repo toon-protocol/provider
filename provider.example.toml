@@ -154,6 +154,13 @@ version = 1
 arch = "amd64"            # amd64 | arm64
 lease_interval_s = 3600   # one payment buys this many seconds
 price = 1000              # µUSDC per Lease Interval, on spawn and on extend
+# standby_price = 400     # µUSDC per Lease Interval for a Warm Standby of this
+#                         # tier: held capacity with nothing running (spec §7).
+#                         # Set it and the published Listing carries it and
+#                         # `toon-provider routes` prints a `.standby` and a
+#                         # `.standby.extend` row at this price; leave it out
+#                         # and this tier sells no standby at all. Never write
+#                         # 0: that would sell held capacity for nothing.
 capabilities = []         # granted to every workload of this tier (spec §4.4)
 capacity = 4              # leases of this tier that may run at once, all versions
 [listings.resources]

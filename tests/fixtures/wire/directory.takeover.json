@@ -1,0 +1,32 @@
+{
+  "content": {
+    "primary": "9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b",
+    "workload_id": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+  },
+  "event": {
+    "content": "{\"workload_id\":\"a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0\",\"primary\":\"9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b\"}",
+    "created_at": 1700000000,
+    "id": "311eff5e1c4cf8a1d61bd40f2537e012960b49b6e9726b98750ca1446860dc5e",
+    "kind": 30433,
+    "pubkey": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+    "sig": "d914f5e1296fc161bb409da378968f77fc246cbebfa89d70a5daba285bf3ab863e7b5f1786274db310540986e274bd1b825f04e5873ef832170c23e04c2d5922",
+    "tags": [
+      [
+        "d",
+        "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+      ],
+      [
+        "L",
+        "toon.network"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "takeover",
+    "description": "A Takeover (spec §7.1): a Warm Standby's claim on the workload of a primary that went silent, published to the PRIMARY's Relay Set, where every other member of the Standby Set is watching. Addressable on `d` = the workload id the whole set shares, so a second announcement about the same workload replaces the first and the settle query reads one claim per standby rather than a history. `primary` is the pubkey at index 0 of the `standby_set` (`constants.primary_provider`); the signer is the standby that claims the workload — here the fixture provider — and never the primary itself.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "directory"
+  },
+  "kind_name": "K_TAKEOVER",
+  "nip01_serialization": "[0,\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\",1700000000,30433,[[\"d\",\"a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0\"],[\"L\",\"toon.network\"]],\"{\\\"workload_id\\\":\\\"a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0\\\",\\\"primary\\\":\\\"9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b\\\"}\"]"
+}

@@ -55,7 +55,7 @@
   },
   "fixture": {
     "case": "listing",
-    "description": "The `basic` Listing (spec §4.2): addressable on `d`, pointing at its Profile through `a`, with one `t` tag per capability (here the experimental `x-fixture`) and `l` labels for isolation and arch. `routes.listing` is what this event generates.",
+    "description": "The `basic` Listing (spec §4.2): addressable on `d`, pointing at its Profile through `a`, with one `t` tag per capability (here the experimental `x-fixture`) and `l` labels for isolation and arch. It sells no Warm Standby, so it carries NO `standby_price` field at all — absent, never `0`, which would read as \"standbys are free\". `routes.listing` is what this event generates.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "directory"
   },

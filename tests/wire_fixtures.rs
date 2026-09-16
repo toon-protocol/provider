@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Json};
 use nostr_sdk::secp256k1::rand::{CryptoRng, RngCore};
 use nostr_sdk::secp256k1::SECP256K1;
 use nostr_sdk::{
@@ -36,18 +37,18 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::harness::post;
 use common::{sha256_hex, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory};
-use toon_provider::nostr::directory_events::Settlement;
+use toon_provider::nostr::directory_events::{takeover_event, Settlement};
 use toon_provider::nostr::image_events::{
     blob_record_event, image_entry_event, template_event, BlobPart, BlobRecordContent, BlobSource,
     EntryBlob, ImageEntryContent, TemplateContent, TemplateImage,
 };
 use toon_provider::nostr::kinds::{
-    K_BLOB, K_EVICTION, K_IMAGE, K_LEASE_REQUEST, K_LISTING, K_LIVENESS, K_PROFILE, K_TEMPLATE,
-    TOON_LABEL,
+    K_BLOB, K_EVICTION, K_IMAGE, K_LEASE_REQUEST, K_LISTING, K_LIVENESS, K_PROFILE, K_TAKEOVER,
+    K_TEMPLATE, TOON_LABEL,
 };
 use toon_provider::nostr::wire::{
-    ErrorCode, ErrorResponse, EvictionReason, ImageRef, PortRequest, Protocol, RegistryEntryRef,
-    Resources, SpawnContent,
+    ErrorCode, ErrorResponse, EvictionReason, ImageRef, LeaseState, PortRequest, Protocol,
+    RegistryEntryRef, Resources, Role, SpawnContent, StatusResponse,
 };
 use toon_provider::provider::{evict, route_table, ImagePolicyConfig};
 use toon_provider::provider_http::refuse;
@@ -72,6 +73,10 @@ const OTHER_TENANT_SECRET: &str =
 /// Template. Never a provider — spec §8's events are a publisher's, and the
 /// provider only reads them — so it gets a key of its own here.
 const PUBLISHER_SECRET: &str = "4444444444444444444444444444444444444444444444444444444444444444";
+/// The PRIMARY of a Standby Set (spec §7): index 0 of the `standby_set`,
+/// another provider entirely. The fixture provider is the STANDBY that
+/// watches it, so a Takeover it announces names this key.
+const PRIMARY_SECRET: &str = "5555555555555555555555555555555555555555555555555555555555555555";
 
 const PROVIDER_NAME: &str = "Fixture Provider";
 const ILP_ADDRESS: &str = "g.fixture";
@@ -84,6 +89,10 @@ const RELAY: &str = "ws://relay.fixture.example:7100";
 const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const GEOHASH: &str = "u4pruydqqvj";
 const LIVENESS_CADENCE_S: u64 = 60;
+/// µUSDC per interval for a Warm Standby of the `warm` tier: less than the
+/// 1000 a running lease costs, because held capacity is not a running
+/// workload.
+const STANDBY_PRICE: u64 = 400;
 
 const REFERENCE: &str = "docker.io/library/alpine";
 const SSH_KEY: &str =
@@ -264,6 +273,11 @@ fn workload_id(seed: u8) -> String {
     format!("{:02x}", seed).repeat(32)
 }
 
+/// The workload a Standby Set serves: one id across the primary and every
+/// standby (spec §7). The Takeover and the reserved status are about this
+/// one, so the two fixtures tell one story.
+const STANDBY_SET_WORKLOAD: u8 = 0xa0;
+
 fn spawn_content(seed: u8) -> Value {
     serde_json::to_value(SpawnContent {
         workload_id: workload_id(seed),
@@ -323,6 +337,7 @@ fn listing(
     capacity: u32,
     gpu: Option<&str>,
     capabilities: &[&str],
+    standby_price: Option<u64>,
 ) -> Listing {
     Listing {
         name: name.to_string(),
@@ -336,6 +351,7 @@ fn listing(
         arch: "amd64".to_string(),
         lease_interval_s: INTERVAL,
         price: 1000,
+        standby_price,
         capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
         capacity,
     }
@@ -364,8 +380,13 @@ fn config(
         geohash: Some(GEOHASH.to_string()),
         capabilities: vec!["x-fixture".to_string()],
         listings: vec![
-            listing("basic", 1, 2, None, &["x-fixture"]),
-            listing("gpu", 1, 1, Some("rtx-4090"), &[]),
+            listing("basic", 1, 2, None, &["x-fixture"], None),
+            listing("gpu", 1, 1, Some("rtx-4090"), &[], None),
+            // The one tier that sells Warm Standbys, so the fixtures show
+            // both halves of the rule: a priced listing gets `.standby` and
+            // `.standby.extend` rows and publishes `standby_price`, and the
+            // two above get neither and publish no such field.
+            listing("warm", 1, 1, None, &[], Some(STANDBY_PRICE)),
         ],
         workload_id_range_start: 1000,
         workload_id_range_end: 1003,
@@ -538,16 +559,19 @@ fn constants_and_test_keys() {
             "tenant": key(&tenant),
             "other_tenant": key(&other),
             "publisher": key(&keys(PUBLISHER_SECRET)),
+            "primary_provider": key(&keys(PRIMARY_SECRET)),
             "kinds": {
                 "K_PROFILE": K_PROFILE,
                 "K_LISTING": K_LISTING,
                 "K_LIVENESS": K_LIVENESS,
                 "K_LEASE_REQUEST": K_LEASE_REQUEST,
                 "K_EVICTION": K_EVICTION,
+                "K_TAKEOVER": K_TAKEOVER,
                 "K_IMAGE": K_IMAGE,
                 "K_BLOB": K_BLOB,
                 "K_TEMPLATE": K_TEMPLATE,
             },
+            "standby_price": STANDBY_PRICE,
             "label": TOON_LABEL,
             "signing": {
                 "id": "sha256 over the NIP-01 serialization [0, pubkey, created_at, kind, tags, content]",
@@ -609,18 +633,33 @@ fn the_routes_a_listing_generates() {
                 "routes",
                 "listing",
                 "The connector routes this provider's Profile and Listings generate: one paid \
-                 `.spawn` and `.extend` per listing version, then the three free provider-wide \
-                 routes. `prefix` is what a tenant pays; `handler_url` is the provider's own \
-                 HTTP path behind its connector and never leaves the operator's config.",
+                 `.spawn` and `.extend` per listing version, a `.standby` and a \
+                 `.standby.extend` beside them at the listing's `standby_price` when it sells \
+                 Warm Standbys (here `warm` only), then the three free provider-wide routes. A \
+                 listing that prices no standby gets neither standby row: a connector must \
+                 never terminate a route the provider did not price. `prefix` is what a tenant \
+                 pays; `handler_url` is the provider's own HTTP path behind its connector and \
+                 never leaves the operator's config.",
             ),
             "ilp_address": ILP_ADDRESS,
-            "listings": cfg.listings.iter().map(|l| json!({
-                "name": l.name, "version": l.version, "price": l.price,
-                "lease_interval_s": l.lease_interval_s,
-            })).collect::<Vec<_>>(),
+            "listings": cfg.listings.iter().map(|l| {
+                let mut row = json!({
+                    "name": l.name, "version": l.version, "price": l.price,
+                    "lease_interval_s": l.lease_interval_s,
+                });
+                // Absent, never zero, exactly as the Listing event writes it.
+                if let Some(standby_price) = l.standby_price {
+                    row["standby_price"] = json!(standby_price);
+                }
+                row
+            }).collect::<Vec<_>>(),
             "patterns": {
                 "spawn": "<ilp_address>.<listing d tag>.v<content.version>.spawn",
                 "extend": "<ilp_address>.<listing d tag>.v<content.version>.extend",
+                "standby": "<ilp_address>.<listing d tag>.v<content.version>.standby \
+                            (only when content.standby_price is present)",
+                "standby.extend": "<ilp_address>.<listing d tag>.v<content.version>.standby.extend \
+                                   (only when content.standby_price is present)",
                 "availability": "<ilp_address>.availability",
                 "status": "<ilp_address>.status",
                 "terminate": "<ilp_address>.terminate",
@@ -655,20 +694,31 @@ async fn one_directory_event_per_kind() {
     );
 
     let listings = f.directory.of_kind(K_LISTING);
-    assert_eq!(listings.len(), 2);
+    assert_eq!(listings.len(), 3);
     for (event, case, description) in [
         (
             &listings[0],
             "listing",
             "The `basic` Listing (spec §4.2): addressable on `d`, pointing at its Profile \
              through `a`, with one `t` tag per capability (here the experimental `x-fixture`) and \
-             `l` labels for isolation and arch. `routes.listing` is what this event generates.",
+             `l` labels for isolation and arch. It sells no Warm Standby, so it carries NO \
+             `standby_price` field at all — absent, never `0`, which would read as \
+             \"standbys are free\". `routes.listing` is what this event generates.",
         ),
         (
             &listings[1],
             "listing.gpu",
             "The `gpu` Listing: as `listing`, plus `resources.gpu` in content and an \
              `l gpu:<model>` label, and no capabilities.",
+        ),
+        (
+            &listings[2],
+            "listing.warm",
+            "The `warm` Listing: the one tier that sells Warm Standbys (spec §4.2, §7), so \
+             its content carries `standby_price` — µUSDC per interval for held capacity with \
+             nothing running, less than the `price` of a running lease. It is this field \
+             alone that gives the tier its `.standby` and `.standby.extend` routes in \
+             `routes.listing`; nothing else about the Listing changes.",
         ),
     ] {
         golden(
@@ -725,6 +775,39 @@ async fn one_directory_event_per_kind() {
             &one(K_EVICTION),
         ),
     );
+
+    // A Takeover, which no route produces: a Warm Standby publishes one when
+    // the primary it watches has gone silent (spec §7.1 step 2), and the
+    // watchdog that decides that is a later ticket of this milestone. The
+    // EVENT is built by the same builder that ticket will call, signed by
+    // the fixture provider in its role as the standby.
+    let takeover = with_reproducible_sig(
+        &takeover_event(
+            &workload_id(STANDBY_SET_WORKLOAD),
+            &keys(PRIMARY_SECRET).public_key(),
+            &f.provider,
+            NOW,
+        )
+        .unwrap(),
+        &f.provider,
+    );
+    golden(
+        "directory.takeover.json",
+        event_fixture(
+            "directory",
+            "takeover",
+            "A Takeover (spec §7.1): a Warm Standby's claim on the workload of a primary \
+             that went silent, published to the PRIMARY's Relay Set, where every other \
+             member of the Standby Set is watching. Addressable on `d` = the workload id \
+             the whole set shares, so a second announcement about the same workload \
+             replaces the first and the settle query reads one claim per standby rather \
+             than a history. `primary` is the pubkey at index 0 of the `standby_set` \
+             (`constants.primary_provider`); the signer is the standby that claims the \
+             workload — here the fixture provider — and never the primary itself.",
+            "K_TAKEOVER",
+            &takeover,
+        ),
+    );
 }
 
 #[tokio::test]
@@ -769,6 +852,28 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
     assert_eq!(response["would_run"], false);
     assert_eq!(error_of(&response), "wrong_listing_version");
     golden("availability.refused.json", doc);
+
+    // Availability asked about a Warm Standby rather than a running lease.
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "availability",
+            "standby_role",
+            "Availability with §6.4's optional `role`, asked about the one tier that sells \
+             Warm Standbys. `role` takes `primary` or `standby` and nothing else — \
+             `standalone` is a lease role, not a question, since every spawn with no \
+             Standby Set is standalone already — and an unknown value is `invalid_request` \
+             like any other shape. Omitting `role` asks the ordinary question, as every \
+             other availability fixture here does.",
+        ),
+        &route("availability"),
+        "/availability",
+        json!({ "listing": "warm", "version": 1, "image": image, "role": "standby" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["would_run"], true);
+    golden("availability.standby_role.json", doc);
 
     // Spawn.
     let (status, response, doc) = exchange(
@@ -1176,39 +1281,96 @@ async fn one_refusal_per_spawn_validation_step() {
         with_validation_step(doc, "§6.2 step 5: pick the manifest for the listing's arch"),
     );
 
-    // `not_standby` has no route to produce it until Milestone 3 sells Warm
-    // Standbys, so its fixture is the error shape as `provider_http::refuse`
-    // renders it — the same serialiser and status mapping every other
-    // refusal above went through — with no request to show.
-    let rendered = refuse(ErrorResponse::new(
+    // `not_standby` has no route to produce it until the rest of Milestone 3
+    // reserves and pays a standby, so its fixture is the error shape as
+    // `provider_http::refuse` renders it — the same serialiser and status
+    // mapping every other refusal above went through — with no request to
+    // show.
+    let (status, body) = rendered(refuse(ErrorResponse::new(
         ErrorCode::NotStandby,
         "this lease is not a Warm Standby; extend it on .extend",
-    ));
-    let status = rendered.status();
-    let bytes = axum::body::to_bytes(rendered.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    )))
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error_of(&body), "not_standby");
     golden(
         "error.not_standby.json",
-        json!({
-            "fixture": header(
-                "error",
-                "not_standby",
-                "The `not_standby` refusal as this provider renders it. No Milestone 1 \
-                 route can produce it: it belongs to `.standby.extend` (spec §6.3), which \
-                 arrives with Warm Standby in Milestone 3. Shape and status only.",
+        with_validation_step(
+            shape_only(
+                header(
+                    "error",
+                    "not_standby",
+                    "The `not_standby` refusal as this provider renders it. No route can \
+                     produce it yet: it belongs to `.standby.extend` (spec §6.3), which \
+                     answers a reservation once the rest of Milestone 3 has reserved and \
+                     paid one. Shape and status only.",
+                ),
+                status,
+                body,
             ),
-            "route": Value::Null,
-            "http_path": Value::Null,
-            "request_body": Value::Null,
-            "response_status": status.as_u16(),
-            "response_body": body,
-            "validation_step": "§6.3: on `.standby.extend` the lease MUST be a standby before Takeover",
-        }),
+            "§6.3: on `.standby.extend` the lease MUST be a standby before Takeover",
+        ),
     );
+
+    // The `reserved` state, likewise: `status` reads it straight off the
+    // lease, and no route writes a reservation onto the table until the next
+    // ticket. The BODY is the typed `StatusResponse` through the same
+    // serialiser `status.running` and `status.ended` came out of.
+    let (status, body) = rendered(
+        Json(StatusResponse {
+            workload_id: workload_id(STANDBY_SET_WORKLOAD),
+            role: Role::Standby,
+            state: LeaseState::Reserved,
+            expires_at: NOW + INTERVAL,
+            access: None,
+            template: None,
+        })
+        .into_response(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["state"], "reserved");
+    golden(
+        "status.reserved.json",
+        shape_only(
+            header(
+                "status",
+                "reserved",
+                "Status of a Warm Standby before Takeover (spec §6.5, §6.7): `state` is the \
+                 one word `reserved`, `role` is `standby`, and there is NO `access` — the \
+                 capacity is held and paid for, and nothing is running to reach. A \
+                 reservation counts against the listing's capacity exactly as a running \
+                 lease does. No route produces one until the rest of Milestone 3 spawns a \
+                 Standby Set; shape only.",
+            ),
+            status,
+            body,
+        ),
+    );
+}
+
+/// A response the app builds, rendered the way a route would answer it:
+/// through the same serialiser and the same status mapping.
+async fn rendered(response: axum::response::Response) -> (StatusCode, Value) {
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+/// A fixture for an answer no route can produce yet: the same document an
+/// `exchange` writes, with `route`, `http_path` and `request_body` null
+/// because there is no request to show.
+fn shape_only(header: Value, status: StatusCode, body: Value) -> Value {
+    json!({
+        "fixture": header,
+        "route": Value::Null,
+        "http_path": Value::Null,
+        "request_body": Value::Null,
+        "response_status": status.as_u16(),
+        "response_body": body,
+    })
 }
 
 // ── Milestone 2: what a publisher signs, and the three forms of `image` ──────
