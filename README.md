@@ -124,14 +124,26 @@ one HTTP path here:
 |---|---|---|
 | `<addr>.<listing>.v<n>.spawn` | `POST /listings/<listing>/v<n>/spawn` | listing price |
 | `<addr>.<listing>.v<n>.extend` | `POST /listings/<listing>/v<n>/extend` | listing price |
+| `<addr>.<listing>.v<n>.standby` | `POST /listings/<listing>/v<n>/standby` | listing `standby_price` |
+| `<addr>.<listing>.v<n>.standby.extend` | `POST /listings/<listing>/v<n>/standby/extend` | listing `standby_price` |
 | `<addr>.availability` | `POST /availability` | 0 |
 | `<addr>.status` | `POST /status` | 0 |
 | `<addr>.terminate` | `POST /terminate` | 0 |
 
+The two standby rows are printed **only for a listing that sets
+`standby_price`** (spec §7): a listing that prices no Warm Standby gets
+neither, so a connector never terminates a route this provider did not price,
+and an unset price is never read as free. Until the rest of Milestone 3
+reserves and pays a standby, both routes — and any spawn carrying a
+`standby_set` — are answered `invalid_request` with a message saying Standby
+Sets land later in Milestone 3, so nobody pays for a role this provider
+cannot yet hold.
+
 `toon-provider routes --config provider.toml` prints these as connector
 `[[routes]]` rows, ready to paste into the connector's config. It prints two
-rows per **live** listing version — the version on sale, plus every retired
-version that still has a running lease — so it reads the lease table at
+rows per **live** listing version — four for one that prices standbys — the
+version on sale plus every retired version that still has a running lease, so
+it reads the lease table at
 `lease_state_path` (read-only) to find out which those are. Run it from the
 provider's own working directory, or make `lease_state_path` absolute:
 reading the wrong table would leave out the routes running leases extend on,
@@ -367,8 +379,11 @@ Status answers:
   "template": "30436:<pubkey>:<name>" }
 ```
 
-`state` is the §6.7 lease state: `"provisioning"`, `"running"`, or
-`{ "ended": "expiry" | "termination" | "eviction" }`. It is the lease record
+`state` is the §6.7 lease state: `"provisioning"`, `"reserved"`, `"running"`,
+or `{ "ended": "expiry" | "termination" | "eviction" }`. `"reserved"` is a
+Warm Standby before Takeover — capacity held and paid for, with nothing
+running and so no `access`; no route writes one until the rest of Milestone 3
+spawns a Standby Set. It is the lease record
 as it stands, so between an expiry and the sweep that reaps it a lease still
 reads `"running"` with an `expires_at` in the past — extend and terminate
 refuse it as `expired` all the same. `access` is absent once
@@ -467,11 +482,19 @@ fails is still billed (ADR 0003). Body:
 
 ```json
 { "listing": "basic", "version": 1,
-  "image": { "reference": "docker.io/library/alpine", "digest": "sha256:…" } }
+  "image": { "reference": "docker.io/library/alpine", "digest": "sha256:…" },
+  "role": "primary" }
 ```
 
 This is the ticket's shape, not the spec draft's flatter `image_digest`; an
-unknown field (including `image_digest`) is `invalid_request`. The route
+unknown field (including `image_digest`) is `invalid_request`. `role`
+(spec §6.4) is optional and takes `"primary"` or `"standby"` — never
+`"standalone"`, which is a lease role rather than a question, since a spawn
+with no Standby Set is standalone already; any other value is
+`invalid_request`. Omitting it asks the ordinary question. The answer does
+not yet depend on it: what a standby's answer must take into account — the
+listing's `standby_price`, and the capacity reservations hold — arrives with
+the reservations themselves, later in Milestone 3. The route
 always answers HTTP 200 — the answer *is* the payload:
 
 ```json
@@ -653,8 +676,11 @@ provider (terminate, eviction), and can be run back to back with
 from the real HTTP surface and the real event builders: a signed Lease
 Request per `op` with its packet body, request and response bodies for
 spawn, extend, availability, status and terminate, one refusal per spec §5
-error code in validation order, one Profile, Listing, Liveness and Eviction
-Notice each, and the route table a Listing generates. Everything is produced
+error code in validation order, one Profile, Listing, Liveness, Eviction
+Notice and Takeover each, and the route table a Listing generates. A handful
+of shapes no route can produce yet — `not_standby`, and a `status` answer in
+the `reserved` state — are rendered through the same serialiser with their
+`route`, `http_path` and `request_body` null. Everything is produced
 over fixed test-only keys, a fixed clock and BIP-340 signatures with all-zero
 auxiliary randomness, so the bytes are reproducible and a tenant can re-derive
 every id and signature (TOON_Network #16).

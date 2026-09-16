@@ -51,6 +51,7 @@ fn tier(version: u32, price: u64, lease_interval_s: u64) -> Listing {
         arch: "amd64".to_string(),
         lease_interval_s,
         price,
+        standby_price: None,
         capabilities: vec![],
         capacity: CAPACITY,
     }

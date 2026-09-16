@@ -35,8 +35,8 @@ pub const MAX_PORTS_PER_WORKLOAD: u16 = 16;
 /// `<addr>.<name>.v<version>.spawn` / `.extend`.
 ///
 /// A price or resource change is a NEW VERSION with its own routes, so a lease
-/// keeps the price it started at (ADR 0009). Two entries may share a name as
-/// long as their versions differ.
+/// keeps the price it started at (ADR 0009) — the standby price included.
+/// Two entries may share a name as long as their versions differ.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Listing {
@@ -52,6 +52,16 @@ pub struct Listing {
     pub lease_interval_s: u64,
     /// µUSDC per Lease Interval.
     pub price: u64,
+    /// µUSDC per Lease Interval for a Warm Standby of this tier: held
+    /// capacity with nothing running (spec §7).
+    ///
+    /// Unset means this tier sells no standbys, which is a DIFFERENT thing
+    /// from selling them for nothing: the Listing event then carries no
+    /// `standby_price` at all and the route table prints no `.standby` rows,
+    /// so the connector never terminates a route this provider did not
+    /// price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standby_price: Option<u64>,
     /// Capabilities granted to every workload of this tier (ADR 0004).
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -747,6 +757,7 @@ mod tests {
             arch: "amd64".to_string(),
             lease_interval_s: 3600,
             price: 1000,
+            standby_price: None,
             capabilities: vec![],
             capacity: 2,
         }

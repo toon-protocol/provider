@@ -129,6 +129,23 @@ pub async fn extend(
     })
 }
 
+/// Serve one extension of a reservation on
+/// `<addr>.<listing>.v<version>.standby.extend`.
+///
+/// Refused outright for now, like `spawn::standby_spawn`: adding an interval
+/// to a reservation — and refusing `.extend` and `.standby.extend` for the
+/// wrong role with `not_standby` (spec §6.3) — needs reservations to exist,
+/// which is a later ticket of this milestone. The route is registered so a
+/// paid packet meets a refusal rather than a hole.
+pub async fn standby_extend(
+    _state: &AppState,
+    _listing_name: &str,
+    _version: u32,
+    _body: &[u8],
+) -> Result<ExtendResponse, ErrorResponse> {
+    Err(invalid(super::spawn::STANDBY_SETS_LAND_LATER))
+}
+
 /// Serve one status on the free `<addr>.status`.
 pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, ErrorResponse> {
     let (tenant, workload_id) = authenticate(state, body, Op::Status).await?;

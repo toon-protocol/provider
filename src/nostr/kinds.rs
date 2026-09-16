@@ -21,8 +21,10 @@ pub const K_LIVENESS: u16 = 10_433;
 /// Listing: one sellable tier. Addressable with `d` = the listing name.
 pub const K_LISTING: u16 = 30_432;
 
-/// Takeover: a warm standby announcing it runs a lease's workload.
-/// Addressable with `d` = the workload id. Not used in Milestone 1.
+/// Takeover: a warm standby announcing it claims a lease's workload, because
+/// the primary it watches went silent (spec §7.1). Addressable with `d` = the
+/// workload id, so one standby leaves one claim per workload rather than a
+/// history. Signed by the STANDBY, never by the primary.
 pub const K_TAKEOVER: u16 = 30_433;
 
 /// Image Registry entry. Addressable with `d` = `<name>:<tag>`. Signed by a

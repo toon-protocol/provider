@@ -40,6 +40,7 @@ fn listing(name: &str, version: u32, capacity: u32, arch: &str) -> Listing {
         arch: arch.to_string(),
         lease_interval_s: INTERVAL,
         price: 1000,
+        standby_price: None,
         capabilities: vec![],
         capacity,
     }
@@ -364,6 +365,56 @@ async fn a_full_listing_is_no_capacity() {
     assert_eq!(body["would_run"], false);
     assert_eq!(body["error"], "no_capacity");
     assert!(h.backend.calls().is_empty(), "availability starts nothing");
+}
+
+#[tokio::test]
+async fn a_role_is_accepted_and_answered_like_any_other_question() {
+    // §6.4's optional `role`. This ticket only teaches the route the shape:
+    // what a standby's answer must take into account — the listing's
+    // `standby_price` and the capacity reservations hold — arrives with the
+    // reservations themselves, in the next ticket.
+    let registry = common::stub_registry().await;
+    let h = harness(
+        vec![Listing {
+            standby_price: Some(400),
+            ..listing("warm", 1, 2, "amd64")
+        }],
+        ImagePolicyConfig::default(),
+        registry,
+    )
+    .await;
+
+    for role in ["primary", "standby"] {
+        let mut body = image_body("warm", 1, REFERENCE, &valid_digest());
+        body["role"] = json!(role);
+        let (status, resp) = post(&h.app, body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["would_run"], true, "role {}: {}", role, resp);
+    }
+    assert!(h.backend.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_role_outside_the_spec_vocabulary_is_invalid_request() {
+    let registry = common::stub_registry().await;
+    let h = harness(
+        vec![listing("basic", 1, 2, "amd64")],
+        ImagePolicyConfig::default(),
+        registry,
+    )
+    .await;
+
+    // `standalone` is a lease role (§6.2) but not a question: a spawn with
+    // no Standby Set is standalone already, so §6.4 names only `primary` and
+    // `standby` and anything else is a shape this provider does not know.
+    let mut body = image_body("basic", 1, REFERENCE, &valid_digest());
+    body["role"] = json!("standalone");
+    let (status, resp) = post(&h.app, body).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(resp["would_run"], false);
+    assert_eq!(resp["error"], "invalid_request");
+    assert!(h.backend.calls().is_empty());
 }
 
 #[tokio::test]

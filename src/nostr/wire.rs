@@ -244,14 +244,19 @@ pub enum LeaseEnd {
     Eviction,
 }
 
-/// `Provisioning → Running → Ended(…)` for a standalone or primary lease
-/// (spec §6.7). A standby's `Reserved` state is a later milestone.
+/// What a lease is doing (spec §6.7):
+///
+/// ```text
+/// standalone/primary:   Provisioning → Running → Ended(…)
+/// standby:              Reserved → (takeover) → Running → Ended(…)
+///                       Reserved → Ended(…)
+/// ```
 ///
 /// On the wire and on disk this is serde's externally tagged form, which is
 /// what `status` answers and what the lease table holds:
 ///
 /// ```json
-/// "provisioning" | "running" | { "ended": "expiry" | "termination" | "eviction" }
+/// "provisioning" | "reserved" | "running" | { "ended": "expiry" | "termination" | "eviction" }
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -260,12 +265,19 @@ pub enum LeaseState {
     /// id and counts against capacity already, so a racing spawn cannot take
     /// either.
     Provisioning,
+    /// A Warm Standby before Takeover: the capacity is held and paid for,
+    /// and NOTHING RUNS. It counts against capacity exactly as a running
+    /// lease does — that is what the tenant bought — and `status` answers it
+    /// with no `access`.
+    Reserved,
     Running,
     Ended(LeaseEnd),
 }
 
 impl LeaseState {
     /// Whether the lease still holds its workload id and its capacity slot.
+    /// A reservation does: a standby is holding the capacity it was paid
+    /// for, and nobody else may be sold it.
     pub fn is_live(self) -> bool {
         !matches!(self, LeaseState::Ended(_))
     }
@@ -310,6 +322,25 @@ pub struct AvailabilityRequest {
     pub listing: String,
     pub version: u32,
     pub image: ImageRef,
+    /// Which role the question is about (spec §6.4). Absent asks the
+    /// ordinary question: would a spawn run here?
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<AvailabilityRole>,
+}
+
+/// The role an `availability` question is about (spec §6.4): a primary —
+/// which is what an ordinary spawn buys — or a Warm Standby.
+///
+/// Deliberately NOT `Role`: `standalone` is a lease role, not a question.
+/// Every spawn with no Standby Set is standalone already, so asking about
+/// it is asking the default, and §6.4 names only these two values. An
+/// unknown value is `invalid_request` like any other shape this provider
+/// does not know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AvailabilityRole {
+    Primary,
+    Standby,
 }
 
 /// The answer to `availability`. Always HTTP 200: the answer IS the payload,

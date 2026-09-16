@@ -19,7 +19,7 @@ use anyhow::Result;
 use nostr_sdk::{Event, EventBuilder, Keys, Kind, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
 
-use super::kinds::{K_EVICTION, K_LISTING, K_LIVENESS, K_PROFILE, TOON_LABEL};
+use super::kinds::{K_EVICTION, K_LISTING, K_LIVENESS, K_PROFILE, K_TAKEOVER, TOON_LABEL};
 use super::wire::{EvictionReason, Resources};
 use crate::provider::{Listing, ProviderConfig};
 
@@ -73,8 +73,8 @@ pub struct ListingContent {
     pub lease_interval_s: u64,
     /// µUSDC per Lease Interval.
     pub price: u64,
-    /// Absent means the listing sells no Warm Standbys — which is every
-    /// listing in Milestone 1.
+    /// µUSDC per Lease Interval for a Warm Standby. Absent means the listing
+    /// sells none — never `0`, which would read as "standbys are free".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standby_price: Option<u64>,
     pub capabilities: Vec<String>,
@@ -190,10 +190,11 @@ pub fn listing_content(listing: &Listing) -> ListingContent {
         arch: listing.arch.clone(),
         lease_interval_s: listing.lease_interval_s,
         price: listing.price,
-        // Warm Standby is out of scope for this milestone, so no listing
-        // sells one and the field is absent rather than zero — zero would
-        // read as "standbys are free".
-        standby_price: None,
+        // Only for a listing that prices standbys. A listing that sells none
+        // publishes NO FIELD rather than a zero, and gets no standby routes
+        // (`routes::route_table`), so a connector never terminates a route
+        // this provider did not price.
+        standby_price: listing.standby_price,
         capabilities: listing.capabilities.clone(),
     }
 }
@@ -227,6 +228,44 @@ pub fn eviction_event(
     Ok(
         EventBuilder::new(Kind::Custom(K_EVICTION), serde_json::to_string(&content)?)
             .tags([Tag::parse(["x", workload_id])?, label_tag()?])
+            .custom_created_at(Timestamp::from(now))
+            .sign_with_keys(keys)?,
+    )
+}
+
+/// The content of a Takeover event (`K_TAKEOVER`, addressable), spec §7.1: a
+/// Warm Standby's claim on the workload of a primary that went silent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TakeoverContent {
+    /// The workload id the whole Standby Set shares.
+    pub workload_id: String,
+    /// The primary this claim is against: `standby_set[0]`, hex.
+    pub primary: String,
+}
+
+/// A Takeover, signed by the STANDBY that claims the workload and published
+/// to the PRIMARY's Relay Set (spec §7.1 step 2) — which is where every
+/// other member of the set is already watching.
+///
+/// Addressable on `d` = the workload id, unlike the Eviction Notice above:
+/// a standby announces once per workload and a second announcement about the
+/// same one replaces the first rather than joining it, so the relay holds one
+/// claim per standby per workload and the settle query (§7.1 step 3) reads a
+/// set of claimants rather than a history.
+pub fn takeover_event(
+    workload_id: &str,
+    primary: &nostr_sdk::PublicKey,
+    keys: &Keys,
+    now: u64,
+) -> Result<Event> {
+    let content = TakeoverContent {
+        workload_id: workload_id.to_string(),
+        primary: primary.to_hex(),
+    };
+    Ok(
+        EventBuilder::new(Kind::Custom(K_TAKEOVER), serde_json::to_string(&content)?)
+            .tags([Tag::identifier(workload_id.to_string()), label_tag()?])
             .custom_created_at(Timestamp::from(now))
             .sign_with_keys(keys)?,
     )

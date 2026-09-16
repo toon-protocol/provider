@@ -49,6 +49,32 @@ fn invalid(message: impl Into<String>) -> ErrorResponse {
     ErrorResponse::new(ErrorCode::InvalidRequest, message)
 }
 
+/// What every Warm Standby surface answers until the tickets that reserve
+/// and pay a standby land: the routes exist and the shapes parse, so a
+/// tenant and a connector can be configured for them, but nothing here holds
+/// capacity for anyone yet. Shared by the three refusals (a spawn carrying a
+/// `standby_set`, `.standby` and `.standby.extend`) so a tenant reads one
+/// sentence wherever it meets them.
+pub(super) const STANDBY_SETS_LAND_LATER: &str =
+    "Standby Sets land later in Milestone 3; this provider holds no Warm Standby yet";
+
+/// Serve one standby spawn on `<addr>.<listing>.v<version>.standby`.
+///
+/// Refused outright for now: reserving capacity, the role rules of spec §6.2
+/// step 3 and the `role: standby` answer are the next ticket's. The route is
+/// registered anyway (`provider_http::router`) so that a connector carrying
+/// it — and a tenant paying it — meets this provider's own refusal rather
+/// than a hole in the router, and so the refusal is a shape a tenant can
+/// test against today.
+pub async fn standby_spawn(
+    _state: &AppState,
+    _listing_name: &str,
+    _version: u32,
+    _body: &[u8],
+) -> Result<SpawnResponse, ErrorResponse> {
+    Err(invalid(STANDBY_SETS_LAND_LATER))
+}
+
 /// Serve one spawn on `<addr>.<listing>.v<version>.spawn`.
 pub async fn spawn(
     state: &AppState,
@@ -86,10 +112,13 @@ pub async fn spawn(
     check_ports(&content.ports)?;
 
     // ── 3. the role ─────────────────────────────────────────────────────
+    // Every spawn here is standalone: a `standby_set` is parsed only so it
+    // can be refused by name rather than dropped (ADR 0004).
     if content.standby_set.is_some() {
-        return Err(invalid(
-            "standby_set: Standby Sets are not sold in this milestone",
-        ));
+        return Err(invalid(format!(
+            "standby_set: {}",
+            STANDBY_SETS_LAND_LATER
+        )));
     }
 
     // ── 4. the workload id, 5. the image, 6. capacity ───────────────────

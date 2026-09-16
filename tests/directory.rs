@@ -66,6 +66,7 @@ fn listing(name: &str, version: u32, capacity: u32) -> Listing {
         arch: "amd64".to_string(),
         lease_interval_s: INTERVAL,
         price: 1000,
+        standby_price: None,
         // An `x-` capability, not `docker`: this backend refuses to publish a
         // grant of `docker` or `nesting` at all until it supplies one (spec
         // §4.4, `capabilities::grant_refusal`), and what this file tests is the
@@ -268,8 +269,29 @@ async fn a_listing_names_its_tier_its_profile_and_everything_a_relay_filters_on(
     assert_eq!(content.resources.gpu.as_deref(), Some("rtx4090"));
     assert_eq!(
         content.standby_price, None,
-        "no listing sells a Warm Standby in this milestone"
+        "this tier prices no Warm Standby, so it publishes no field at all"
     );
+}
+
+#[tokio::test]
+async fn a_tier_that_prices_standbys_publishes_its_standby_price() {
+    // Spec §4.2: `standby_price` is present only when the listing sells Warm
+    // Standbys, and absent — never zero — when it does not, since zero would
+    // read as "standbys are free".
+    let h = harness_with(vec![Listing {
+        standby_price: Some(400),
+        ..listing("warm", 1, 2)
+    }])
+    .await;
+    h.service.publish_directory().await.unwrap();
+
+    let listings = h.directory.of_kind(K_LISTING);
+    let content: ListingContent = serde_json::from_str(&listings[0].content).unwrap();
+    assert_eq!(content.standby_price, Some(400));
+    assert_eq!(content.price, 1000, "the full price is untouched");
+
+    let raw: serde_json::Value = serde_json::from_str(&listings[0].content).unwrap();
+    assert_eq!(raw["standby_price"], 400);
 }
 
 #[tokio::test]
