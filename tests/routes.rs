@@ -54,6 +54,7 @@ fn live_lease(id: u32, listing: &str, version: u32) -> LeaseRecord {
         expires_at: 1_700_003_600,
         ended_at: None,
         destroyed: false,
+        template: None,
         ssh_port: 40000,
         ports: vec![],
     }

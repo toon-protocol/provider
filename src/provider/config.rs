@@ -676,6 +676,7 @@ mod tests {
             expires_at: 3600,
             ended_at: None,
             destroyed: false,
+            template: None,
             ssh_port: 40000,
             ports: vec![],
         }

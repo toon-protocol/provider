@@ -28,6 +28,7 @@ fn lease(id: u32, expires_at: u64) -> LeaseRecord {
         expires_at,
         ended_at: None,
         destroyed: false,
+        template: None,
         ssh_port: 40000,
         ports: vec![],
     }

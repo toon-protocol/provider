@@ -265,6 +265,11 @@ pub struct FakeDirectory {
     /// When set, every publish is recorded but reports this relay as having
     /// refused — a Relay Set reached only in part.
     relay_always_refuses: Mutex<Option<String>>,
+    /// Every READ the provider made through the Directory port, in order. A
+    /// test that asserts the provider looked nothing up (a spawn's
+    /// `template`, which it never resolves) needs the fake to record the
+    /// question, not just the answer.
+    reads: Mutex<Vec<String>>,
 }
 
 impl FakeDirectory {
@@ -283,6 +288,11 @@ impl FakeDirectory {
             .into_iter()
             .filter(|e| e.kind.as_u16() == kind)
             .collect()
+    }
+
+    /// Every Directory read so far, in order.
+    pub fn reads(&self) -> Vec<String> {
+        self.reads.lock().unwrap().clone()
     }
 
     pub fn seed_liveness(&self, event: nostr_sdk::Event) {
@@ -321,6 +331,10 @@ impl Directory for FakeDirectory {
         &self,
         provider: nostr_sdk::PublicKey,
     ) -> Result<Option<nostr_sdk::Event>> {
+        self.reads
+            .lock()
+            .unwrap()
+            .push(format!("query_liveness({})", provider.to_hex()));
         Ok(self
             .liveness
             .lock()

@@ -17,6 +17,7 @@ use common::harness::{
 };
 use common::{BackendCall, FakeBackend, FakeClock, FakeDirectory};
 use std::sync::Arc;
+use toon_provider::nostr::wire::SpawnContent;
 use toon_provider::Clock;
 
 /// A lease that exists, and the tenant that owns it.
@@ -27,7 +28,10 @@ struct Lease {
 }
 
 async fn spawn_lease(h: &Harness, seed: u8) -> Lease {
-    let content = spawn_content(seed);
+    spawn_lease_from(h, spawn_content(seed)).await
+}
+
+async fn spawn_lease_from(h: &Harness, content: SpawnContent) -> Lease {
     let spec = RequestSpec::spawn(h, &content);
     let tenant = Keys::parse(&spec.tenant.secret_key().to_secret_hex()).unwrap();
     let (status, body) = spawn(h, spec.sign()).await;
@@ -207,6 +211,113 @@ async fn status_reports_the_state_the_expiry_and_the_access_details() {
         body["access"]["ports"],
         json!([{ "container_port": 443, "host_port": 41000 }])
     );
+}
+
+/// The `30436:<pubkey>:<d>` a tenant that expanded a Template puts in its
+/// spawn (spec §6.2). Nothing here reads it — that is the point.
+const TEMPLATE: &str =
+    "30436:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:static-site";
+
+#[tokio::test]
+async fn status_reports_the_template_a_spawn_carried_and_says_nothing_when_it_carried_none() {
+    // Spec §6.2, ADR 0004: `template` is INFORMATIONAL. The provider keeps it
+    // with the lease and hands it back so tooling can show where a spawn's
+    // values came from, and never acts on it.
+    let h = harness_with(vec![listing("basic", 1, 2)]).await;
+    let from_template = spawn_lease_from(
+        &h,
+        SpawnContent {
+            template: Some(TEMPLATE.to_string()),
+            ..spawn_content(1)
+        },
+    )
+    .await;
+    let by_hand = spawn_lease(&h, 2).await;
+
+    let (status, body) =
+        status_signed_by(&h, &from_template.tenant, &from_template.workload_id).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["template"], TEMPLATE);
+
+    let (status, body) = status_signed_by(&h, &by_hand.tenant, &by_hand.workload_id).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(
+        body.get("template"),
+        None,
+        "a spawn that named no Template reports none"
+    );
+}
+
+#[tokio::test]
+async fn a_template_costs_the_provider_no_relay_read_and_changes_nothing_it_runs() {
+    // The provider NEVER reads a Template (spec §8.3): a tenant expands one
+    // and signs the result, so a spawn that names a Template must reach the
+    // backend as exactly the same workload as one that does not, and must not
+    // send the Directory looking for it.
+    let h = harness_with(vec![listing("basic", 1, 2)]).await;
+    spawn_lease_from(
+        &h,
+        SpawnContent {
+            template: Some(TEMPLATE.to_string()),
+            ..spawn_content(1)
+        },
+    )
+    .await;
+    let plain = spawn_content(2);
+    spawn_lease_from(&h, plain).await;
+
+    assert!(
+        h.directory.reads().is_empty(),
+        "the Directory was asked {:?}",
+        h.directory.reads()
+    );
+    assert!(h.directory.published().is_empty());
+
+    // The two workloads differ only in the id the backend gave them.
+    let created = h.backend.created();
+    assert_eq!(created.len(), 2);
+    let (from_template, by_hand) = (&created[0], &created[1]);
+    assert_eq!(from_template.image, by_hand.image);
+    assert_eq!(from_template.env, by_hand.env);
+    // The host ports differ only because the provider gave the two workloads
+    // different id blocks; what the spawn asked to publish is the same.
+    let published = |c: &toon_provider::compute::ContainerConfig| {
+        c.ports
+            .iter()
+            .map(|p| (p.container_port, p.protocol.clone()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(published(from_template), published(by_hand));
+    assert_eq!(from_template.entrypoint, by_hand.entrypoint);
+    assert_eq!(from_template.args, by_hand.args);
+    assert_eq!(from_template.data_path, by_hand.data_path);
+    assert_eq!(from_template.cpu_millicores, by_hand.cpu_millicores);
+    assert_eq!(from_template.memory_mb, by_hand.memory_mb);
+    assert_eq!(from_template.storage_gb, by_hand.storage_gb);
+}
+
+#[tokio::test]
+async fn a_restart_keeps_the_template_a_lease_was_spawned_from() {
+    // It is part of the lease record, so it survives exactly as the tenant,
+    // the expiry and the access details do.
+    let h = harness().await;
+    let lease = spawn_lease_from(
+        &h,
+        SpawnContent {
+            template: Some(TEMPLATE.to_string()),
+            ..spawn_content(1)
+        },
+    )
+    .await;
+
+    let backend = FakeBackend::new();
+    backend.seed_running(1000);
+    let h2 = restarted(&h, NOW + 10, backend).await;
+    h2.service.restore_leases().await;
+
+    let (status, body) = status_signed_by(&h2, &lease.tenant, &lease.workload_id).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["template"], TEMPLATE);
 }
 
 #[tokio::test]

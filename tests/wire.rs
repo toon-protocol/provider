@@ -443,9 +443,15 @@ fn the_status_and_terminate_answers_round_trip() {
                 host_port: 41000,
             }],
         }),
+        template: None,
     };
     let value = serde_json::to_value(&running).unwrap();
     assert_eq!(value["state"], json!("running"));
+    assert_eq!(
+        value.get("template"),
+        None,
+        "a lease from no Template says nothing about one"
+    );
     assert_eq!(value["access"]["ssh_port"], 40000);
     assert_eq!(
         serde_json::from_value::<StatusResponse>(value).unwrap(),
