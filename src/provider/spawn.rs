@@ -240,6 +240,7 @@ async fn serve(
                 // needs nothing kept.
                 reserved_spawn: reserving.then(|| content.clone()),
                 takeover: None,
+                settled: None,
                 created_at: now,
                 // The same interval buys either role (spec §6.2): the
                 // standby paid less for it, at the listing's standby price.
@@ -282,81 +283,132 @@ async fn serve(
         });
     }
 
-    // ── fetch it ────────────────────────────────────────────────────────
+    // ── fetch it and start it ───────────────────────────────────────────
+    // The same two steps a Takeover's start goes through (`fetch_and_start`,
+    // shared with `settle`): a standby that won starts from the image
+    // exactly as this spawn does (ADR 0010).
+    info!(
+        "spawning workload {} ({} v{}) for tenant {} as {}",
+        content.workload_id,
+        listing.name,
+        listing.version,
+        tenant_hex,
+        container_name(id)
+    );
+    let launch = Launch {
+        id,
+        listing: &listing,
+        content: &content,
+        ssh_port,
+        ports: &ports,
+    };
+    if let Err(e) = fetch_and_start(state, &image, &resolved, launch).await {
+        // Nothing runs and nothing is left on the backend, so there is
+        // nothing to destroy: just give the slot and the id back so the
+        // tenant's next try can succeed. Nothing is refunded (ADR 0003),
+        // which is why `availability` resolves the image for free first —
+        // but a layer that fails only on the full fetch, or a daemon that
+        // refuses the start, can only be found out here.
+        let mut leases = state.leases.lock().await;
+        leases.remove(&id);
+        persist_leases(&leases, &state.config.lease_state_path);
+        return Err(e);
+    }
+
+    let mut leases = state.leases.lock().await;
+    let Some(expires_at) = mark_running(&mut leases, id) else {
+        // The lease ended while it was being provisioned — its tenant
+        // terminated it, or the sweep reaped it. Whoever ended it
+        // destroyed a workload that did not exist yet, so this one is
+        // ours to clean up. Nothing is refunded (ADR 0003).
+        warn!("lease {} ended while it was being provisioned", id);
+        persist_leases(&leases, &state.config.lease_state_path);
+        drop(leases);
+        if let Err(cleanup) = state.backend.delete_container(id).await {
+            warn!("could not clean up {}: {}", container_name(id), cleanup);
+        }
+        return Err(ErrorResponse::new(
+            ErrorCode::Expired,
+            "this lease was ended while its workload was being started",
+        ));
+    };
+    persist_leases(&leases, &state.config.lease_state_path);
+    Ok(SpawnResponse {
+        workload_id: content.workload_id,
+        role,
+        expires_at,
+        access: Some(Access {
+            host: state.config.public_ip.clone(),
+            ssh_port,
+            ports,
+        }),
+    })
+}
+
+/// What a workload is started from: the lease's slot and the spawn that
+/// describes it. One value for the two callers that start workloads — a
+/// paid spawn on `.spawn`, and a Warm Standby that won a Takeover
+/// (`settle`) — so the two cannot start a workload differently: ADR 0010
+/// promises that a Takeover starts from the image exactly as a spawn would.
+pub(super) struct Launch<'a> {
+    pub id: u32,
+    pub listing: &'a Listing,
+    pub content: &'a SpawnContent,
+    pub ssh_port: u16,
+    pub ports: &'a [PortAccess],
+}
+
+/// Fetch the image's bytes if this provider holds them, then create and
+/// start the workload: the last two steps of a spawn, and the whole of what
+/// a Takeover's start does. `image` and `resolved` are step 5's outcome —
+/// the caller resolved the image first, because a spawn does that under the
+/// lease-table lock and a Takeover does not.
+///
+/// The lease table is NOT touched: the caller owns the record and decides
+/// what a failure means for it — a spawn gives the slot back, a standby that
+/// won keeps its reservation and tries again on the next step. Nothing is
+/// left on the backend after a failure: a container that was created and
+/// did not start is deleted here. A layer no source serves is
+/// `refused_image`; a cache or a daemon with no room, or a start the backend
+/// refused, is `no_capacity`.
+pub(super) async fn fetch_and_start(
+    state: &AppState,
+    image: &SpawnImage,
+    resolved: &ResolvedImage,
+    launch: Launch<'_>,
+) -> Result<(), ErrorResponse> {
     // What the backend is told to run: `<reference>@<digest>` for the form
     // the backend pulls itself, or the id the backend gave the image this
     // provider fetched, verified and loaded.
     let run_image = match image.upstream_pull() {
         Some(pull) => pull,
-        None => match materialise(state, &resolved).await {
-            Ok(image_id) => image_id,
-            Err(e) => {
-                // Nothing was started, so there is nothing to destroy: just
-                // give the slot and the id back. The refusal is still
-                // billed (ADR 0003), which is why `availability` resolves
-                // the image for free first — but a layer that fails only on
-                // the full fetch can only be found out here.
-                warn!(
-                    "image {} for workload {} could not be fetched: {}",
-                    resolved.manifest_digest, content.workload_id, e.message
-                );
-                let mut leases = state.leases.lock().await;
-                leases.remove(&id);
-                persist_leases(&leases, &state.config.lease_state_path);
-                return Err(e);
-            }
-        },
+        None => materialise(state, resolved).await.inspect_err(|e| {
+            warn!(
+                "image {} for workload {} could not be fetched: {}",
+                resolved.manifest_digest, launch.content.workload_id, e.message
+            );
+        })?,
     };
 
-    // ── start it ────────────────────────────────────────────────────────
-    let config = container_config(id, &listing, &content, &run_image, ssh_port, &ports);
-    info!(
-        "spawning workload {} ({} v{}) for tenant {} as {}",
-        content.workload_id, listing.name, listing.version, tenant_hex, config.name
+    let config = container_config(
+        launch.id,
+        launch.listing,
+        launch.content,
+        &run_image,
+        launch.ssh_port,
+        launch.ports,
     );
     let started = match state.backend.create_container(&config).await {
-        Ok(_) => state.backend.start_container(id).await,
+        Ok(_) => state.backend.start_container(launch.id).await,
         Err(e) => Err(e),
     };
-    let mut leases = state.leases.lock().await;
     match started {
-        Ok(()) => {
-            let Some(expires_at) = mark_running(&mut leases, id) else {
-                // The lease ended while it was being provisioned — its tenant
-                // terminated it, or the sweep reaped it. Whoever ended it
-                // destroyed a workload that did not exist yet, so this one is
-                // ours to clean up. Nothing is refunded (ADR 0003).
-                warn!("lease {} ended while it was being provisioned", id);
-                persist_leases(&leases, &state.config.lease_state_path);
-                drop(leases);
-                if let Err(cleanup) = state.backend.delete_container(id).await {
-                    warn!("could not clean up {}: {}", config.name, cleanup);
-                }
-                return Err(ErrorResponse::new(
-                    ErrorCode::Expired,
-                    "this lease was ended while its workload was being started",
-                ));
-            };
-            persist_leases(&leases, &state.config.lease_state_path);
-            Ok(SpawnResponse {
-                workload_id: content.workload_id,
-                role,
-                expires_at,
-                access: Some(Access {
-                    host: state.config.public_ip.clone(),
-                    ssh_port,
-                    ports,
-                }),
-            })
-        }
+        Ok(()) => Ok(()),
         Err(e) => {
-            // Provisioning failed after payment. Nothing is refunded (ADR
-            // 0003); release the id and the slot so the tenant's next try
-            // can succeed, and leave no half-made workload behind.
-            error!("provisioning workload {} failed: {}", config.name, e);
-            leases.remove(&id);
-            persist_leases(&leases, &state.config.lease_state_path);
-            if let Err(cleanup) = state.backend.delete_container(id).await {
+            // Leave no half-made workload behind: the caller may retry, and
+            // a container by this name would make the retry fail too.
+            error!("starting workload {} failed: {}", config.name, e);
+            if let Err(cleanup) = state.backend.delete_container(launch.id).await {
                 warn!(
                     "could not clean up {} after a failed start: {}",
                     config.name, cleanup

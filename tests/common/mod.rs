@@ -596,7 +596,12 @@ impl Directory for FakeDirectory {
         self.takeover_publications
             .lock()
             .unwrap()
-            .push((event, relays.to_vec()));
+            .push((event.clone(), relays.to_vec()));
+        // A relay that took the claim holds it: the provider's own Takeover
+        // is among what `find_takeovers` answers, as it would be on the
+        // primary's Relay Set. A fake built fresh — a restart with a
+        // Directory that knows nothing — holds none of it.
+        self.takeovers.lock().unwrap().push(event);
         Ok(report)
     }
 

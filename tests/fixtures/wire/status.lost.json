@@ -1,0 +1,44 @@
+{
+  "fixture": {
+    "case": "lost",
+    "description": "Status of a Warm Standby that LOST a Takeover (spec §6.5, §7.1 steps 3 and 5). This provider is index 1 of a set of three; the standby provider at index 2 announced one second earlier, so its claim won. The lease stays `reserved` with no `access` — nothing runs here, and `.standby.extend` still pays it while `.extend` is still `not_running` — and `takeover.winner` names the member the workload went to, which is the whole of what a tenant asking THIS member needs to know. From the next watchdog step on, this provider watches the winner's Liveness on the winner's own Relay Set, so the set survives a second failure.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "status"
+  },
+  "http_path": "/status",
+  "request_body": {
+    "request": {
+      "content": "{\"workload_id\":\"a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2\"}",
+      "created_at": 1700000000,
+      "id": "3677acefa08eb0219911b94e76e265f9ee5439a437a2d2520c1429337d9d1826",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "c18a2bef5593d5e9283b95bae0b7100d336c41a85430ea26d3e0c04083c4a4066ad254a45f93479771c24ecfd8f64c084198226ef8c42e9f8944f4f24128b69f",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "status"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "expires_at": 1700003600,
+    "role": "standby",
+    "state": "reserved",
+    "takeover": {
+      "winner": "5ab4689e400a4a160cf01cd44730845a54768df8547dcdf073d964f109f18c30"
+    },
+    "workload_id": "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+  },
+  "response_status": 200,
+  "route": "g.fixture.status"
+}

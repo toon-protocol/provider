@@ -15,8 +15,8 @@
 // or Termination — releases the slot and, when there is a workload, destroys
 // it. `standby` is the rule the two spawn routes share: which role a
 // `standby_set` and a route give this provider, and what the lease then
-// remembers of the set. `.standby.extend` still refuses in `lifecycle` until
-// the ticket that pays a reservation lands.
+// remembers of the set; `settle` is what a Warm Standby does once it has
+// announced a Takeover — settle the race, and start the workload if it won.
 // `image_policy` is the rule both `spawn` and `availability` apply, so the
 // two can never disagree; `fetcher` (over `oci` and the TOON store gateway)
 // is how every image byte they read arrives, verified.
@@ -33,6 +33,7 @@ pub mod oci_layout;
 mod persistence;
 mod publish;
 pub mod routes;
+mod settle;
 mod spawn;
 mod standby;
 mod watchdog;
@@ -49,6 +50,7 @@ pub use lifecycle::{evict, extend, standby_extend, status, terminate};
 pub use persistence::persisted_leases;
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
+pub use settle::{pick_winner, Claim, TakeoverSettlement};
 pub use spawn::{spawn, standby_spawn, VOLUME_MOUNT_PATH};
 pub use standby::StandbySet;
 pub use watchdog::{silent_on_a_majority, TakeoverAnnouncement, WATCHDOG_INTERVAL_SECS};

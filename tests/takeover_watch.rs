@@ -297,11 +297,11 @@ async fn majority_silence_for_one_full_cadence_announces_exactly_one_takeover() 
     assert_eq!(content.primary, r.primary.public_key().to_hex());
 
     // Announced is announced: the silence goes on, and nothing more is said
-    // — settling the race is the next ticket's, and a second claim would
-    // only replace the first on the relay anyway.
-    for cadences in 2..6 {
-        step(&h, NOW + cadences * CADENCE).await;
-    }
+    // — a second claim would only replace the first on the relay anyway.
+    // Nothing starts either, until the settle window of two cadences is up
+    // (`tests/takeover_settle.rs` takes it from there).
+    step(&h, NOW + 2 * CADENCE).await;
+    step(&h, NOW + 3 * CADENCE - 1).await;
     assert_eq!(takeovers(&h).len(), 1);
     assert_eq!(
         status_of(&h, &r).await["state"],
@@ -503,9 +503,11 @@ async fn the_announcement_is_persisted_and_survives_a_restart() {
         .directory
         .seed_profile(profile_of(&r.primary, &PRIMARY_RELAYS, CADENCE));
 
-    for cadences in 2..6 {
-        step(&after, NOW + cadences * CADENCE).await;
-    }
+    // Inside the settle window still: nothing to settle yet, and nothing
+    // to watch — the primary's Profile and Liveness are read for a
+    // reservation that has NOT announced, and this one has.
+    step(&after, NOW + 2 * CADENCE).await;
+    step(&after, NOW + 3 * CADENCE - 1).await;
     assert!(
         takeovers(&after).is_empty(),
         "the claim was already made; it is not made again"

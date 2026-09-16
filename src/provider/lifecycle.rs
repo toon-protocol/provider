@@ -22,7 +22,7 @@ use crate::nostr::directory_events::eviction_event;
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
     ErrorCode, ErrorResponse, EvictResponse, EvictionReason, ExtendRequest, ExtendResponse,
-    StatusResponse, TerminateResponse, WorkloadContent,
+    StatusResponse, TakeoverStatus, TerminateResponse, WorkloadContent,
 };
 use crate::provider_http::AppState;
 
@@ -234,6 +234,12 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
             .has_workload()
             .then(|| lease.access(&state.config.public_ip)),
         template: lease.template.clone(),
+        // Once a Takeover has settled here, which member won — on the winner
+        // beside `running`, on a loser beside `reserved` — so a tenant
+        // asking any member learns where the workload went (spec §7.1).
+        takeover: lease.settled.as_ref().map(|s| TakeoverStatus {
+            winner: s.winner.clone(),
+        }),
     })
 }
 

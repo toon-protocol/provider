@@ -448,9 +448,15 @@ fn the_status_and_terminate_answers_round_trip() {
             }],
         }),
         template: None,
+        takeover: None,
     };
     let value = serde_json::to_value(&running).unwrap();
     assert_eq!(value["state"], json!("running"));
+    assert_eq!(
+        value.get("takeover"),
+        None,
+        "a lease no Takeover settled on says nothing about one"
+    );
     assert_eq!(
         value.get("template"),
         None,
@@ -980,6 +986,17 @@ const STATUS_RESERVED: &str = concat!(
     r#""role":"standby","state":"reserved","expires_at":1700003600}"#,
 );
 
+/// The `status` answer for a Warm Standby that WON a Takeover (spec §6.5,
+/// §7.1 step 4): `running` with `access`, the role still `standby`, and
+/// `takeover.winner` naming this provider — the same member that answers.
+/// `takeover` is last, after `access`, and absent until a Takeover settles.
+const STATUS_TAKEN_OVER: &str = concat!(
+    r#"{"workload_id":"abababababababababababababababababababababababababababababababab","#,
+    r#""role":"standby","state":"running","expires_at":1700003600,"#,
+    r#""access":{"host":"203.0.113.7","ssh_port":40000,"ports":[]},"#,
+    r#""takeover":{"winner":"6666666666666666666666666666666666666666666666666666666666666666"}}"#,
+);
+
 /// An availability request that asks about a standby rather than a primary
 /// (spec §6.4). `role` is last, and absent when the question is about an
 /// ordinary spawn.
@@ -1065,6 +1082,32 @@ fn a_reserved_status_round_trips_byte_identically() {
         "a reservation runs nothing to reach"
     );
     assert_eq!(serde_json::to_string(&response).unwrap(), STATUS_RESERVED);
+}
+
+#[test]
+fn a_taken_over_status_round_trips_byte_identically() {
+    let response: StatusResponse = serde_json::from_str(STATUS_TAKEN_OVER).unwrap();
+    assert_eq!(response.state, LeaseState::Running);
+    assert_eq!(response.role, Role::Standby, "the role never changes");
+    assert!(response.access.is_some(), "the workload runs here now");
+    assert_eq!(
+        response.takeover.as_ref().map(|t| t.winner.as_str()),
+        Some("66".repeat(32).as_str())
+    );
+    assert_eq!(serde_json::to_string(&response).unwrap(), STATUS_TAKEN_OVER);
+
+    // A standby that LOST answers the same field beside `reserved`: still
+    // no `access`, and `winner` is the OTHER member — where the workload
+    // went.
+    let lost = StatusResponse {
+        state: LeaseState::Reserved,
+        access: None,
+        ..response
+    };
+    let value = serde_json::to_value(&lost).unwrap();
+    assert_eq!(value["state"], json!("reserved"));
+    assert!(value.get("access").is_none());
+    assert_eq!(value["takeover"]["winner"], json!("66".repeat(32)));
 }
 
 #[test]
