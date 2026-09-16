@@ -285,14 +285,153 @@ async fn a_standby_set_is_refused_this_milestone() {
     assert!(body["message"].as_str().unwrap().contains("standby_set"));
 }
 
+/// The Image Registry entry address of a plausible publisher: spec §6.2's
+/// `30434:<pubkey>:<d>`, with the entry's `<name>:<tag>` as the `d`.
+const ENTRY_ADDRESS: &str =
+    "30434:4444444444444444444444444444444444444444444444444444444444444444:web:1.0";
+
+/// The two Image Registry forms of `image` (spec §6.2): digest with an entry
+/// to resolve it through, and digest alone.
+fn image_registry_forms() -> [(&'static str, ImageRef); 2] {
+    [
+        (
+            "digest with a registry entry",
+            ImageRef::from_registry(digest(), ENTRY_ADDRESS, "wss://relay.example"),
+        ),
+        ("digest alone", ImageRef::by_digest(digest())),
+    ]
+}
+
 #[tokio::test]
-async fn a_registry_entry_is_refused_this_milestone() {
+async fn an_image_registry_form_is_refused_image_until_the_registry_is_resolved() {
+    // Not `invalid_request`: both forms are exactly what §6.2 allows, and a
+    // tenant that gets `invalid_request` would go and fix a request that is
+    // already correct. This provider simply cannot fetch those bytes yet.
     let h = harness().await;
-    let mut content = spawn_content(1);
-    content.image.registry_entry = Some(json!({ "address": "x", "relay": "wss://r" }));
-    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
-    assert_eq!(error_of(&body), "invalid_request");
-    assert!(body["message"].as_str().unwrap().contains("registry_entry"));
+    for (label, image) in image_registry_forms() {
+        let content = SpawnContent {
+            image,
+            ..spawn_content(1)
+        };
+        let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{}: {}",
+            label,
+            body
+        );
+        assert_eq!(error_of(&body), "refused_image", "{}", label);
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("does not yet resolve the Image Registry"),
+            "{}: {}",
+            label,
+            body
+        );
+    }
+    assert!(
+        h.backend.calls().is_empty(),
+        "nothing was created for an image this provider cannot fetch"
+    );
+}
+
+#[tokio::test]
+async fn an_image_registry_form_is_refused_before_capacity_is_counted() {
+    // A one-slot listing with its slot already taken. `no_capacity` would be
+    // the refusal for a runnable image; the image is refused first, so a
+    // tenant learns the real reason rather than one that would change if it
+    // waited.
+    let h = harness_with(vec![listing("basic", 1, 1)]).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+
+    let content = SpawnContent {
+        image: ImageRef::by_digest(digest()),
+        ..spawn_content(2)
+    };
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
+    assert_eq!(error_of(&body), "refused_image");
+}
+
+#[tokio::test]
+async fn an_image_that_is_neither_of_the_three_forms_is_invalid_request() {
+    let h = harness().await;
+    let cases = [
+        (
+            "a reference and a registry entry name two sources",
+            json!({
+                "reference": "docker.io/library/alpine",
+                "digest": digest(),
+                "registry_entry": { "address": ENTRY_ADDRESS, "relay": "wss://relay.example" },
+            }),
+        ),
+        (
+            "a digest that is not sha256:<64 hex>, with no reference",
+            json!({ "digest": "sha256:abc" }),
+        ),
+        (
+            "a registry entry address that is not an Image Registry coordinate",
+            json!({
+                "digest": digest(),
+                "registry_entry": { "address": "30432:aa:basic", "relay": "wss://relay.example" },
+            }),
+        ),
+        (
+            "a registry entry with no relay to look it up on",
+            json!({ "digest": digest(), "registry_entry": { "address": ENTRY_ADDRESS, "relay": "" } }),
+        ),
+        (
+            "a registry entry missing a field altogether",
+            json!({ "digest": digest(), "registry_entry": { "address": ENTRY_ADDRESS } }),
+        ),
+        (
+            "no digest at all",
+            json!({ "reference": "docker.io/library/alpine" }),
+        ),
+    ];
+    for (label, image) in cases {
+        let mut content = serde_json::to_value(spawn_content(1)).unwrap();
+        content["image"] = image;
+        let (status, body) = spawn(&h, RequestSpec::op(&h, "spawn", content).sign()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{}: {}", label, body);
+        assert_eq!(error_of(&body), "invalid_request", "{}", label);
+    }
+    assert!(h.backend.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_template_is_accepted_and_ignored_but_a_capability_beside_it_is_not() {
+    // ADR 0004: a Template grants nothing, and the provider never reads one.
+    // `template` rides along informationally; anything that looks like a
+    // privilege beside it is still refused.
+    let h = harness().await;
+    let content = SpawnContent {
+        template: Some(
+            "30436:4444444444444444444444444444444444444444444444444444444444444444:static-site"
+                .to_string(),
+        ),
+        ..spawn_content(1)
+    };
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    let created = &h.backend.created()[0];
+    assert_eq!(
+        created.image,
+        format!("docker.io/library/alpine@{}", digest()),
+        "the template changed nothing about what runs"
+    );
+
+    for privilege in ["privileged", "capabilities", "devices", "mounts"] {
+        let mut with = serde_json::to_value(&content).unwrap();
+        with[privilege] = json!(true);
+        let (status, body) = spawn(&h, RequestSpec::op(&h, "spawn", with).sign()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{}: {}", privilege, body);
+        assert_eq!(error_of(&body), "invalid_request", "{}", privilege);
+    }
 }
 
 #[tokio::test]
@@ -316,22 +455,17 @@ async fn malformed_ids_keys_images_and_ports_are_invalid() {
         (
             "a tag instead of a digest",
             SpawnContent {
-                image: ImageRef {
-                    reference: "docker.io/library/alpine:latest".to_string(),
-                    digest: digest(),
-                    registry_entry: None,
-                },
+                image: ImageRef::upstream("docker.io/library/alpine:latest".to_string(), digest()),
                 ..spawn_content(1)
             },
         ),
         (
             "a digest that is not sha256:<64 hex>",
             SpawnContent {
-                image: ImageRef {
-                    reference: "docker.io/library/alpine".to_string(),
-                    digest: "sha256:abc".to_string(),
-                    registry_entry: None,
-                },
+                image: ImageRef::upstream(
+                    "docker.io/library/alpine".to_string(),
+                    "sha256:abc".to_string(),
+                ),
                 ..spawn_content(1)
             },
         ),

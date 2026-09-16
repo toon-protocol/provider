@@ -10,6 +10,7 @@
 
 use super::image_policy;
 use super::persistence::count_live;
+use crate::nostr::image_events::SpawnImage;
 use crate::nostr::wire::{AvailabilityRequest, AvailabilityResponse, ErrorCode, ErrorResponse};
 use crate::provider_http::AppState;
 
@@ -40,14 +41,11 @@ async fn check(state: &AppState, body: &[u8]) -> Result<(), ErrorResponse> {
         .config
         .sellable_listing(&request.listing, request.version)?;
 
-    // Step 5: the same image policy a paid spawn applies.
-    image_policy::check(
-        &state.image_registry,
-        &state.image_policy,
-        listing,
-        &request.image,
-    )
-    .await?;
+    // Step 5: the same three-form parse and the same image policy a paid
+    // spawn applies, so an image this provider cannot fetch is reported here
+    // for free rather than bought.
+    let image = SpawnImage::parse(&request.image)?;
+    image_policy::check(&state.image_registry, &state.image_policy, listing, &image).await?;
 
     // Step 6: capacity, counted the same way spawn counts it — live leases
     // against the listing name's declared capacity — read-only, so this

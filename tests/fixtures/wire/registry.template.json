@@ -1,0 +1,56 @@
+{
+  "content": {
+    "data_path": "/data",
+    "env_fixed": {
+      "MODE": "production"
+    },
+    "env_tenant": [
+      "SITE_TITLE"
+    ],
+    "image": {
+      "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "registry_entry": {
+        "address": "30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0",
+        "relay": "ws://relay.fixture.example:7100"
+      }
+    },
+    "min_resources": {
+      "cpu_millicores": 500,
+      "memory_mb": 256,
+      "storage_gb": 4
+    },
+    "ports": [
+      {
+        "container_port": 8080,
+        "protocol": "tcp"
+      }
+    ],
+    "version": 1
+  },
+  "event": {
+    "content": "{\"version\":1,\"image\":{\"digest\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"registry_entry\":{\"address\":\"30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0\",\"relay\":\"ws://relay.fixture.example:7100\"}},\"ports\":[{\"container_port\":8080,\"protocol\":\"tcp\"}],\"data_path\":\"/data\",\"env_fixed\":{\"MODE\":\"production\"},\"env_tenant\":[\"SITE_TITLE\"],\"min_resources\":{\"cpu_millicores\":500,\"memory_mb\":256,\"storage_gb\":4}}",
+    "created_at": 1700000000,
+    "id": "7e7386634e141424eaf3657686c7555356fa646cd2bc20ecc1e8ab9a13de94e0",
+    "kind": 30436,
+    "pubkey": "2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
+    "sig": "b86f942404f22f2d15d7303fb5f3ade723fef060d05372c4c2db826a0adfaf385d8aa973e164fe386d18e880c6c79ecdf246fa79433e1bd4fe97595e1a56cd56",
+    "tags": [
+      [
+        "d",
+        "static-site"
+      ],
+      [
+        "L",
+        "toon.network"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "template",
+    "description": "A Template (spec §8.3): `d` is the template name, and the content names the image by content address plus the Image Registry entry that lists its blobs. It GRANTS NOTHING — there is no capability field and there never will be (ADR 0004) — and the TENANT expands it into a spawn; a provider never reads one. No `x` tag: a Template is found by name, and the digest it carries is the image's, not its own.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "registry"
+  },
+  "kind_name": "K_TEMPLATE",
+  "nip01_serialization": "[0,\"2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991\",1700000000,30436,[[\"d\",\"static-site\"],[\"L\",\"toon.network\"]],\"{\\\"version\\\":1,\\\"image\\\":{\\\"digest\\\":\\\"sha256:1111111111111111111111111111111111111111111111111111111111111111\\\",\\\"registry_entry\\\":{\\\"address\\\":\\\"30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0\\\",\\\"relay\\\":\\\"ws://relay.fixture.example:7100\\\"}},\\\"ports\\\":[{\\\"container_port\\\":8080,\\\"protocol\\\":\\\"tcp\\\"}],\\\"data_path\\\":\\\"/data\\\",\\\"env_fixed\\\":{\\\"MODE\\\":\\\"production\\\"},\\\"env_tenant\\\":[\\\"SITE_TITLE\\\"],\\\"min_resources\\\":{\\\"cpu_millicores\\\":500,\\\"memory_mb\\\":256,\\\"storage_gb\\\":4}}\"]"
+}

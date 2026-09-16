@@ -167,11 +167,7 @@ pub fn workload_id(seed: u8) -> String {
 pub fn spawn_content(seed: u8) -> SpawnContent {
     SpawnContent {
         workload_id: workload_id(seed),
-        image: ImageRef {
-            reference: "docker.io/library/alpine".to_string(),
-            digest: digest(),
-            registry_entry: None,
-        },
+        image: ImageRef::upstream("docker.io/library/alpine".to_string(), digest()),
         env: BTreeMap::from([("FOO".to_string(), "bar".to_string())]),
         ports: vec![PortRequest {
             container_port: 443,

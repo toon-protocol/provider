@@ -18,9 +18,11 @@ use super::config::{Listing, MAX_PORTS_PER_WORKLOAD};
 use super::image_policy;
 use super::persistence::{count_live, persist_leases, LeaseRecord, LeaseState};
 use crate::compute::{container_name, ContainerConfig, PortMapping};
+use crate::nostr::image_events::{SpawnImage, IMAGE_REGISTRY_NOT_RESOLVED};
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
-    Access, ErrorCode, ErrorResponse, PortAccess, PortRequest, Role, SpawnContent, SpawnResponse,
+    is_lower_hex, Access, ErrorCode, ErrorResponse, PortAccess, PortRequest, Role, SpawnContent,
+    SpawnResponse,
 };
 use crate::provider_http::AppState;
 
@@ -83,6 +85,8 @@ pub async fn spawn(
     let ssh_port;
     let ports;
     let id;
+    // What the backend is told to run: `<reference>@<digest>`.
+    let pull;
     {
         let mut leases = state.leases.lock().await;
         if leases
@@ -96,7 +100,10 @@ pub async fn spawn(
                 "a lease with this workload_id is already held on this provider",
             ));
         }
-        check_image(&content)?;
+        // Step 5: which of the three forms §6.2 allows the `image` is — a
+        // fourth shape is `invalid_request` — and then whether this
+        // provider will run it.
+        let image = SpawnImage::parse(&content.image)?;
         // Step 5 continued: the provider's own image policy — a deny list
         // and a size cap, resolved against the upstream registry. The same
         // check `availability` applies, so a positive `availability` answer
@@ -106,13 +113,14 @@ pub async fn spawn(
         // already relied on, at the cost of serialising spawns behind an
         // uncached image lookup (a repeat digest is served from
         // `OciRegistry`'s in-memory cache without another fetch).
-        image_policy::check(
-            &state.image_registry,
-            &state.image_policy,
-            &listing,
-            &content.image,
-        )
-        .await?;
+        image_policy::check(&state.image_registry, &state.image_policy, &listing, &image).await?;
+        // Every form `image_policy::check` lets through names an upstream
+        // repository to pull from, so this cannot fail; it is written as a
+        // question rather than an `expect` so a future form that reaches
+        // here refuses instead of panicking.
+        pull = image.upstream_pull().ok_or_else(|| {
+            ErrorResponse::new(ErrorCode::RefusedImage, IMAGE_REGISTRY_NOT_RESOLVED)
+        })?;
         let running = count_live(&leases, &listing.name);
         if running >= state.config.capacity_of(&listing.name) as usize {
             return Err(ErrorResponse::new(
@@ -167,7 +175,7 @@ pub async fn spawn(
     }
 
     // ── start it ────────────────────────────────────────────────────────
-    let config = container_config(id, &listing, &content, ssh_port, &ports);
+    let config = container_config(id, &listing, &content, &pull, ssh_port, &ports);
     info!(
         "spawning workload {} ({} v{}) for tenant {} as {}",
         content.workload_id, listing.name, listing.version, tenant_hex, config.name
@@ -312,14 +320,6 @@ fn check_ports(ports: &[PortRequest]) -> Result<(), ErrorResponse> {
     Ok(())
 }
 
-/// Exactly `len` lowercase hex characters: the shape of a workload id and
-/// of a digest's hex.
-fn is_lower_hex(s: &str, len: usize) -> bool {
-    s.len() == len
-        && s.chars()
-            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
-}
-
 fn looks_like_ssh_public_key(key: &str) -> bool {
     let key = key.trim();
     if key.is_empty() || key.contains('\n') || key.contains('\r') {
@@ -336,57 +336,11 @@ fn looks_like_ssh_public_key(key: &str) -> bool {
     known && blob.len() >= 16
 }
 
-/// Milestone 1 image checks: the shape of `reference@digest`, and no Image
-/// Registry entry. Policy (`refused_image`) and arch selection
-/// (`no_matching_arch`) are `image_policy`'s, applied straight after this.
-fn check_image(content: &SpawnContent) -> Result<(), ErrorResponse> {
-    let image = &content.image;
-    if image.registry_entry.is_some() {
-        return Err(invalid(
-            "image.registry_entry: Image Registry entries are not read in this milestone",
-        ));
-    }
-    if !is_lower_hex(image.digest.strip_prefix("sha256:").unwrap_or(""), 64) {
-        return Err(invalid("image.digest must be `sha256:<64 lowercase hex>`"));
-    }
-    if !looks_like_repository(&image.reference) {
-        return Err(invalid(
-            "image.reference must be an OCI repository (`registry/repo`), with no tag or digest",
-        ));
-    }
-    Ok(())
-}
-
-/// `[registry[:port]/]repo[/path…]` in the character set OCI references
-/// allow, with no `@digest` and no `:tag` on the last segment.
-fn looks_like_repository(reference: &str) -> bool {
-    if reference.is_empty()
-        || reference.contains('@')
-        || !reference.chars().all(|c| {
-            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-' | '/' | ':')
-        })
-    {
-        return false;
-    }
-    let mut segments = reference.split('/');
-    let first = segments.next().unwrap_or("");
-    let rest: Vec<&str> = segments.collect();
-    // A colon is only legal in the first segment as a registry port, and
-    // never in the last segment (that would be a tag).
-    let colon_ok = |seg: &str| match seg.split_once(':') {
-        None => true,
-        Some((_, port)) => !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()),
-    };
-    if rest.is_empty() {
-        return !first.contains(':') && !first.is_empty();
-    }
-    colon_ok(first) && rest.iter().all(|s| !s.is_empty() && !s.contains(':'))
-}
-
 fn container_config(
     id: u32,
     listing: &Listing,
     content: &SpawnContent,
+    pull: &str,
     ssh_port: u16,
     ports: &[PortAccess],
 ) -> ContainerConfig {
@@ -399,7 +353,7 @@ fn container_config(
     ContainerConfig {
         id,
         name: container_name(id),
-        image: format!("{}@{}", content.image.reference, content.image.digest),
+        image: pull.to_string(),
         cpu_millicores: listing.resources.cpu_millicores,
         memory_mb: listing.resources.memory_mb,
         storage_gb: listing.resources.storage_gb,
@@ -427,20 +381,6 @@ fn container_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn repositories_with_ports_and_paths_pass_and_tags_and_digests_do_not() {
-        assert!(looks_like_repository("docker.io/library/alpine"));
-        assert!(looks_like_repository("localhost:5000/team/app"));
-        assert!(looks_like_repository("lscr.io/linuxserver/openssh-server"));
-        assert!(looks_like_repository("alpine"));
-        assert!(!looks_like_repository("alpine:3.20"), "a tag is mutable");
-        assert!(!looks_like_repository("docker.io/library/alpine:latest"));
-        assert!(!looks_like_repository("alpine@sha256:abc"));
-        assert!(!looks_like_repository("Docker.io/Alpine"));
-        assert!(!looks_like_repository(""));
-        assert!(!looks_like_repository("a//b"));
-    }
 
     #[test]
     fn ssh_public_key_lines_are_recognised() {

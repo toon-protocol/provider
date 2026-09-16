@@ -1,0 +1,54 @@
+{
+  "content": {
+    "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "part_size": 102400,
+    "parts": [
+      {
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "size": 102400,
+        "txid": "dG9vbi1zdG9yZS1wYXJ0LW9uZQ"
+      },
+      {
+        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "size": 102400,
+        "txid": "dG9vbi1zdG9yZS1wYXJ0LXR3bw"
+      },
+      {
+        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "size": 30720,
+        "txid": "dG9vbi1zdG9yZS1wYXJ0LXRocmVl"
+      }
+    ],
+    "size": 235520
+  },
+  "event": {
+    "content": "{\"digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"size\":235520,\"part_size\":102400,\"parts\":[{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LW9uZQ\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"size\":102400},{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LXR3bw\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":102400},{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LXRocmVl\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"size\":30720}]}",
+    "created_at": 1700000000,
+    "id": "46cfd30b789edf6a353716217146c8431caa2d6a0be022aa17d8b4c3f7b8c5b6",
+    "kind": 30435,
+    "pubkey": "2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
+    "sig": "50a42e79ee5c8ebef411fc0f055fefcb4a102592839dc31e3d666fbc20c337ea8a5ce7125858c6305c513b4d7a23dc322071b666ca0d49a4578f2ff2fe2b7246",
+    "tags": [
+      [
+        "d",
+        "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+      ],
+      [
+        "x",
+        "3333333333333333333333333333333333333333333333333333333333333333"
+      ],
+      [
+        "L",
+        "toon.network"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "blob_record",
+    "description": "A Blob Record (spec §8.2) for the layer the entry puts in the TOON store: `d` and `x` both name the blob's digest, and `parts` is the ORDERED list of uploads a reader concatenates and checks against it. `part_size` is what every part but the last has (102,400 bytes, the sandbox's free-tier size); the last is short, and the sizes sum to `size`.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "registry"
+  },
+  "kind_name": "K_BLOB",
+  "nip01_serialization": "[0,\"2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991\",1700000000,30435,[[\"d\",\"sha256:3333333333333333333333333333333333333333333333333333333333333333\"],[\"x\",\"3333333333333333333333333333333333333333333333333333333333333333\"],[\"L\",\"toon.network\"]],\"{\\\"digest\\\":\\\"sha256:3333333333333333333333333333333333333333333333333333333333333333\\\",\\\"size\\\":235520,\\\"part_size\\\":102400,\\\"parts\\\":[{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYXJ0LW9uZQ\\\",\\\"sha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"size\\\":102400},{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYXJ0LXR3bw\\\",\\\"sha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\",\\\"size\\\":102400},{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYXJ0LXRocmVl\\\",\\\"sha256\\\":\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\",\\\"size\\\":30720}]}\"]"
+}

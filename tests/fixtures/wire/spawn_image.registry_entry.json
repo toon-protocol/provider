@@ -1,0 +1,75 @@
+{
+  "fixture": {
+    "case": "registry_entry",
+    "description": "Form 2: `{ digest, registry_entry }`. The entry at `address` lists every blob and where its bytes are (§8.1); `relay` is a hint for finding it, not an authority — the entry is addressed by its signer. Refused `refused_image` until this provider resolves the Image Registry (§8.4): the request is exactly what the spec allows, so the code says the provider cannot fetch it, not that the tenant got it wrong.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "spawn_image"
+  },
+  "http_path": "/listings/basic/v1/spawn",
+  "image": {
+    "digest": "sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd",
+    "registry_entry": {
+      "address": "30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0",
+      "relay": "ws://relay.fixture.example:7100"
+    }
+  },
+  "request_body": {
+    "request": {
+      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd\",\"registry_entry\":{\"address\":\"30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0\",\"relay\":\"ws://relay.fixture.example:7100\"}},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"volume_gb\":2,\"workload_id\":\"d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2\"}",
+      "created_at": 1700000000,
+      "id": "25a87e90810fe8c97333abbe9052cfc246fda21c88478ed4ac7f98870d3f7892",
+      "kind": 4432,
+      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
+      "sig": "0504edb72959809a17f10d402e074251f587f588548f9d4d01b1cb789f45eb9480d741c1875a2e2581e8958f25a2f1a7f390f1ef29ba6962633dee49256c31b5",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "spawn"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "error": "refused_image",
+    "message": "image: this provider does not yet resolve the Image Registry, so it cannot fetch an image named by digest alone or by a registry entry; name it with an upstream `reference` as well"
+  },
+  "response_status": 422,
+  "route": "g.fixture.basic.v1.spawn",
+  "spawn_content": {
+    "args": [
+      "-c",
+      "sleep 300"
+    ],
+    "entrypoint": [
+      "/bin/sh"
+    ],
+    "env": {
+      "GREETING": "hello"
+    },
+    "image": {
+      "digest": "sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd",
+      "registry_entry": {
+        "address": "30434:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:web:1.0",
+        "relay": "ws://relay.fixture.example:7100"
+      }
+    },
+    "ports": [
+      {
+        "container_port": 443,
+        "protocol": "tcp"
+      }
+    ],
+    "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
+    "volume_gb": 2,
+    "workload_id": "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2"
+  },
+  "validation_step": "§6.2 step 5: resolve the image (§8.4)"
+}

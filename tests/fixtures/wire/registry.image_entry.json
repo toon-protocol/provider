@@ -1,0 +1,57 @@
+{
+  "content": {
+    "blobs": [
+      {
+        "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "media_type": "application/vnd.oci.image.manifest.v1+json",
+        "size": 1234,
+        "source": {
+          "registry": "registry-1.docker.io",
+          "repository": "library/alpine",
+          "type": "oci"
+        }
+      },
+      {
+        "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "media_type": "application/vnd.oci.image.layer.v1.tar+gzip",
+        "size": 235520,
+        "source": {
+          "blob_record_txid": "dG9vbi1zdG9yZS1ibG9iLXJlY29yZC10eGlk",
+          "type": "toon-store"
+        }
+      }
+    ],
+    "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "media_type": "application/vnd.oci.image.index.v1+json"
+  },
+  "event": {
+    "content": "{\"digest\":\"sha256:1111111111111111111111111111111111111111111111111111111111111111\",\"media_type\":\"application/vnd.oci.image.index.v1+json\",\"blobs\":[{\"digest\":\"sha256:2222222222222222222222222222222222222222222222222222222222222222\",\"size\":1234,\"media_type\":\"application/vnd.oci.image.manifest.v1+json\",\"source\":{\"type\":\"oci\",\"registry\":\"registry-1.docker.io\",\"repository\":\"library/alpine\"}},{\"digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"size\":235520,\"media_type\":\"application/vnd.oci.image.layer.v1.tar+gzip\",\"source\":{\"type\":\"toon-store\",\"blob_record_txid\":\"dG9vbi1zdG9yZS1ibG9iLXJlY29yZC10eGlk\"}}]}",
+    "created_at": 1700000000,
+    "id": "383713add0c3156c9d898872eeeac75e4266b1da458ccc25ddd19e31735c5cf8",
+    "kind": 30434,
+    "pubkey": "2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
+    "sig": "7ae77e14760c60361eb86c7f6fa84e485ca4413377d82e2eb3312cb96e1d5b305d5b1cbb8ee075d21daeab101887cf22118b2973e502629ad65349d8cf8216d4",
+    "tags": [
+      [
+        "d",
+        "web:1.0"
+      ],
+      [
+        "x",
+        "1111111111111111111111111111111111111111111111111111111111111111"
+      ],
+      [
+        "L",
+        "toon.network"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "image_entry",
+    "description": "An Image Registry entry (spec §8.1), signed by the PUBLISHER and not by any provider: `d` is `<name>:<tag>`, `x` is the image digest's hex, and `blobs` lists every blob reachable from `digest` with the source of each. Both source types are shown: a manifest still upstream (`oci`) and a layer in the TOON store (`toon-store`, naming the Blob Record's own upload). The canonical name of this image is `<publisher npub>/web:1.0`.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "registry"
+  },
+  "kind_name": "K_IMAGE",
+  "nip01_serialization": "[0,\"2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991\",1700000000,30434,[[\"d\",\"web:1.0\"],[\"x\",\"1111111111111111111111111111111111111111111111111111111111111111\"],[\"L\",\"toon.network\"]],\"{\\\"digest\\\":\\\"sha256:1111111111111111111111111111111111111111111111111111111111111111\\\",\\\"media_type\\\":\\\"application/vnd.oci.image.index.v1+json\\\",\\\"blobs\\\":[{\\\"digest\\\":\\\"sha256:2222222222222222222222222222222222222222222222222222222222222222\\\",\\\"size\\\":1234,\\\"media_type\\\":\\\"application/vnd.oci.image.manifest.v1+json\\\",\\\"source\\\":{\\\"type\\\":\\\"oci\\\",\\\"registry\\\":\\\"registry-1.docker.io\\\",\\\"repository\\\":\\\"library/alpine\\\"}},{\\\"digest\\\":\\\"sha256:3333333333333333333333333333333333333333333333333333333333333333\\\",\\\"size\\\":235520,\\\"media_type\\\":\\\"application/vnd.oci.image.layer.v1.tar+gzip\\\",\\\"source\\\":{\\\"type\\\":\\\"toon-store\\\",\\\"blob_record_txid\\\":\\\"dG9vbi1zdG9yZS1ibG9iLXJlY29yZC10eGlk\\\"}}]}\"]"
+}

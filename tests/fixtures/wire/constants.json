@@ -6,11 +6,14 @@
     "surface": "constants"
   },
   "kinds": {
+    "K_BLOB": 30435,
     "K_EVICTION": 4433,
+    "K_IMAGE": 30434,
     "K_LEASE_REQUEST": 4432,
     "K_LISTING": 30432,
     "K_LIVENESS": 10433,
-    "K_PROFILE": 10432
+    "K_PROFILE": 10432,
+    "K_TEMPLATE": 30436
   },
   "label": "toon.network",
   "lease_interval_s": 3600,
@@ -25,6 +28,10 @@
     "name": "Fixture Provider",
     "public_key": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
     "secret_key": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "publisher": {
+    "public_key": "2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
+    "secret_key": "4444444444444444444444444444444444444444444444444444444444444444"
   },
   "signing": {
     "aux_rand": "32 zero bytes, so every fixture signature is reproducible; real signers use fresh randomness",
