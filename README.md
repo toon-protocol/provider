@@ -415,8 +415,8 @@ state file: it sends `{ "workload_id", "reason", "message"? }` to the
 holds the lease table and the compute backend needed to act on it. It prints
 the JSON answer and exits non-zero if the provider refused it.
 
-Reason codes (`--reason`), this provider's own vocabulary for the spec's "a
-reason code" — pick the closest and use `message` for anything it doesn't say:
+Reason codes (`--reason`), spec §6.7's vocabulary — pick the closest and use
+`message` for anything it doesn't say (with `other` it is all a reader has):
 
 | Code | Meaning |
 |---|---|
@@ -671,7 +671,16 @@ make fixtures-check                            # verify without touching them (w
 
 The spec repository's copy and its README (`docs/spec/fixtures/README.md`
 there) are what tenant implementations test against; keep them in sync with
-the same commit that changes the wire.
+the same change that alters the wire. **That sync is the only drift guard
+between the two repositories:** TOON_Network is private, so this repository's
+CI has no token that reaches it and there is no job that diffs
+`tests/fixtures/wire` against the spec's copy. A wire change therefore lands
+in two pull requests — this one with the regenerated fixtures (CI verifies
+them byte-for-byte), and a TOON_Network one carrying the synced copy (its CI
+runs `check.mjs` over it) — and the reviewer confirms
+`diff -r tests/fixtures/wire <TOON_Network>/docs/spec/fixtures/wire` is
+empty. If TOON_Network becomes public or a read token is provisioned, add a
+CI job here that clones it and runs that diff.
 
 ## Build, test and run
 
