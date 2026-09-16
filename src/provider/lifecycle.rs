@@ -160,13 +160,22 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
         role: lease.role,
         state: lease.state,
         expires_at: lease.expires_at,
-        // An ended lease has no workload left, so it has nothing to reach.
-        access: lease
-            .state
-            .is_live()
-            .then(|| lease.access(&state.config.public_ip)),
+        // Only a lease with a workload has somewhere to reach. An ended one
+        // has had its workload destroyed; a `Reserved` standby has not
+        // started one yet, and spec §6.2 is explicit that `access` is absent
+        // for a standby until Takeover — naming a host and port that reach
+        // nothing would be a lie either way.
+        access: has_access(lease.state).then(|| lease.access(&state.config.public_ip)),
         template: lease.template.clone(),
     })
+}
+
+/// Whether a lease in this state has a workload a tenant can reach.
+fn has_access(state: LeaseState) -> bool {
+    match state {
+        LeaseState::Provisioning | LeaseState::Running => true,
+        LeaseState::Reserved | LeaseState::Ended(_) => false,
+    }
 }
 
 /// Serve one termination on the free `<addr>.terminate`: the workload is

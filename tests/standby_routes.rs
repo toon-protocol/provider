@@ -6,6 +6,11 @@
 //! reserve and pay a standby land — every request on them, and every spawn
 //! carrying a `standby_set`, is refused `invalid_request` with a message
 //! that says so. Nobody pays for a role this provider cannot yet hold.
+//!
+//! The one shape that is already ANSWERED is the `reserved` lease state
+//! (spec §6.7): nothing writes a reservation onto the lease table yet, so
+//! the last test here puts one there by hand and reads it back through
+//! `status`, which is the whole of what a tenant will see.
 
 mod common;
 
@@ -13,11 +18,11 @@ use axum::http::StatusCode;
 use serde_json::json;
 
 use common::harness::{
-    error_of, harness_with, listing, post, spawn, spawn_content, workload_id, RequestSpec,
+    error_of, harness_with, listing, post, spawn, spawn_content, workload_id, RequestSpec, NOW,
 };
 use common::BackendCall;
-use toon_provider::nostr::wire::SpawnContent;
-use toon_provider::provider::Listing;
+use toon_provider::nostr::wire::{LeaseState, Role, SpawnContent};
+use toon_provider::provider::{LeaseRecord, Listing};
 
 /// A tier that prices standbys, so nothing here is refused merely because
 /// the listing sells none: the refusal under test is the milestone's, not
@@ -151,4 +156,48 @@ async fn an_ordinary_spawn_is_unaffected() {
     let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(5)).sign()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["role"], "standalone");
+}
+
+/// A Warm Standby's lease as the next ticket will write it: capacity held
+/// and paid for, with no workload and so no `ssh_port` forward in use.
+fn reservation(id: u32, tenant: &str, workload_id: &str) -> LeaseRecord {
+    LeaseRecord {
+        id,
+        workload_id: workload_id.to_string(),
+        tenant: tenant.to_string(),
+        listing: "warm".to_string(),
+        listing_version: 1,
+        role: Role::Standby,
+        state: LeaseState::Reserved,
+        created_at: NOW,
+        expires_at: NOW + 3600,
+        ended_at: None,
+        destroyed: false,
+        template: None,
+        ssh_port: 40000,
+        ports: vec![],
+    }
+}
+
+#[tokio::test]
+async fn status_answers_the_reserved_state_with_no_access() {
+    let h = harness_with(vec![warm()]).await;
+    let request = RequestSpec::about(&h, "status", &workload_id(6));
+    h.service.app_state().leases.lock().await.insert(
+        1000,
+        reservation(1000, &request.tenant.public_key().to_hex(), &workload_id(6)),
+    );
+
+    let (status, body) = post(&h.app, "/status", json!({ "request": request.sign() })).await;
+
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["state"], "reserved");
+    assert_eq!(body["role"], "standby");
+    assert_eq!(body["expires_at"].as_u64().unwrap(), NOW + 3600);
+    assert!(
+        body.get("access").is_none(),
+        "a reservation runs nothing to reach: {}",
+        body
+    );
+    assert!(h.backend.calls().is_empty(), "nothing runs for a standby");
 }
