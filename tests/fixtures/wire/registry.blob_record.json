@@ -1,41 +1,41 @@
 {
   "content": {
-    "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "digest": "sha256:7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4",
     "part_size": 102400,
     "parts": [
       {
-        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "sha256": "da1945f2d7ae1d6b9d81a3eb37562cd78283907d1652b9bd65ebcbf1a72acd96",
         "size": 102400,
         "txid": "dG9vbi1zdG9yZS1wYXJ0LW9uZQ"
       },
       {
-        "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "sha256": "7017a31652c759ea8d1e230d88868de23bf61518cb69d949e3940a396d549aee",
         "size": 102400,
         "txid": "dG9vbi1zdG9yZS1wYXJ0LXR3bw"
       },
       {
-        "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-        "size": 30720,
+        "sha256": "f7c86514f7aee207d26205be8486f9e4455529861feaab9d4f61118c62e011d2",
+        "size": 30208,
         "txid": "dG9vbi1zdG9yZS1wYXJ0LXRocmVl"
       }
     ],
-    "size": 235520
+    "size": 235008
   },
   "event": {
-    "content": "{\"digest\":\"sha256:3333333333333333333333333333333333333333333333333333333333333333\",\"size\":235520,\"part_size\":102400,\"parts\":[{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LW9uZQ\",\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"size\":102400},{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LXR3bw\",\"sha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"size\":102400},{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LXRocmVl\",\"sha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"size\":30720}]}",
+    "content": "{\"digest\":\"sha256:7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4\",\"size\":235008,\"part_size\":102400,\"parts\":[{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LW9uZQ\",\"sha256\":\"da1945f2d7ae1d6b9d81a3eb37562cd78283907d1652b9bd65ebcbf1a72acd96\",\"size\":102400},{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LXR3bw\",\"sha256\":\"7017a31652c759ea8d1e230d88868de23bf61518cb69d949e3940a396d549aee\",\"size\":102400},{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LXRocmVl\",\"sha256\":\"f7c86514f7aee207d26205be8486f9e4455529861feaab9d4f61118c62e011d2\",\"size\":30208}]}",
     "created_at": 1700000000,
-    "id": "46cfd30b789edf6a353716217146c8431caa2d6a0be022aa17d8b4c3f7b8c5b6",
+    "id": "fd32398568da9d47464b729a10339c1d6160cb7c4fe75a9ced421bba820b5535",
     "kind": 30435,
     "pubkey": "2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
-    "sig": "50a42e79ee5c8ebef411fc0f055fefcb4a102592839dc31e3d666fbc20c337ea8a5ce7125858c6305c513b4d7a23dc322071b666ca0d49a4578f2ff2fe2b7246",
+    "sig": "dabf7e42a4aaebcc23093d7fd64445d0dd08ae7a3c81a17bedfc1b027310c7471d9d3856e1ac8a418f75ea949b0ed87e3b9e5f19253459cb39c5517547a1bd7f",
     "tags": [
       [
         "d",
-        "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+        "sha256:7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4"
       ],
       [
         "x",
-        "3333333333333333333333333333333333333333333333333333333333333333"
+        "7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4"
       ],
       [
         "L",
@@ -45,10 +45,10 @@
   },
   "fixture": {
     "case": "blob_record",
-    "description": "A Blob Record (spec §8.2) for the layer the entry puts in the TOON store: `d` and `x` both name the blob's digest, and `parts` is the ORDERED list of uploads a reader concatenates and checks against it. `part_size` is what every part but the last has (102,400 bytes, the sandbox's free-tier size); the last is short, and the sizes sum to `size`.",
+    "description": "A Blob Record (spec §8.2) for the application layer the entry puts in the TOON store: `d` and `x` both name the blob's digest, and `parts` is the ORDERED list of uploads a reader concatenates and checks against it — each part's `sha256` is the real hash of that slice of the layer. `part_size` is what every part but the last has (102,400 bytes, the sandbox's free-tier size); the last is short, and the sizes sum to `size`.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "registry"
   },
   "kind_name": "K_BLOB",
-  "nip01_serialization": "[0,\"2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991\",1700000000,30435,[[\"d\",\"sha256:3333333333333333333333333333333333333333333333333333333333333333\"],[\"x\",\"3333333333333333333333333333333333333333333333333333333333333333\"],[\"L\",\"toon.network\"]],\"{\\\"digest\\\":\\\"sha256:3333333333333333333333333333333333333333333333333333333333333333\\\",\\\"size\\\":235520,\\\"part_size\\\":102400,\\\"parts\\\":[{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYXJ0LW9uZQ\\\",\\\"sha256\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"size\\\":102400},{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYXJ0LXR3bw\\\",\\\"sha256\\\":\\\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\\\",\\\"size\\\":102400},{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYXJ0LXRocmVl\\\",\\\"sha256\\\":\\\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\\\",\\\"size\\\":30720}]}\"]"
+  "nip01_serialization": "[0,\"2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991\",1700000000,30435,[[\"d\",\"sha256:7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4\"],[\"x\",\"7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4\"],[\"L\",\"toon.network\"]],\"{\\\"digest\\\":\\\"sha256:7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4\\\",\\\"size\\\":235008,\\\"part_size\\\":102400,\\\"parts\\\":[{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYXJ0LW9uZQ\\\",\\\"sha256\\\":\\\"da1945f2d7ae1d6b9d81a3eb37562cd78283907d1652b9bd65ebcbf1a72acd96\\\",\\\"size\\\":102400},{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYXJ0LXR3bw\\\",\\\"sha256\\\":\\\"7017a31652c759ea8d1e230d88868de23bf61518cb69d949e3940a396d549aee\\\",\\\"size\\\":102400},{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYXJ0LXRocmVl\\\",\\\"sha256\\\":\\\"f7c86514f7aee207d26205be8486f9e4455529861feaab9d4f61118c62e011d2\\\",\\\"size\\\":30208}]}\"]"
 }

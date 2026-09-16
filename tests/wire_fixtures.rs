@@ -389,6 +389,9 @@ struct Fixture {
     other_tenant: Keys,
     /// Keeps the stubbed registry answering while the app may still ask it.
     _registry: MockServer,
+    /// The TOON store as the provider reads it (`/raw/<txid>`), holding the
+    /// Milestone 2 image's records and parts.
+    _gateway: MockServer,
 }
 
 impl Fixture {
@@ -429,9 +432,17 @@ async fn fixture_provider(policy: ImagePolicyConfig, registry: MockServer) -> Fi
         .join("leases.json")
         .to_string_lossy()
         .into_owned();
+    // The relay holds the Milestone 2 entry, and the gateway and registry
+    // serve its bytes, whether or not a fixture goes on to ask for them.
     let directory = FakeDirectory::new();
+    directory.seed_image_entry(image_entry());
+    let gateway = MockServer::start().await;
+    mount_image_bytes(&gateway, &registry).await;
     let service = ProviderService::with_backend_clock_and_directory(
-        config(state_path, Some(registry.uri()), policy),
+        ProviderConfig {
+            gateway_url_pattern: Some(format!("{}/raw/{{txid}}", gateway.uri())),
+            ..config(state_path, Some(registry.uri()), policy)
+        },
         FakeBackend::new(),
         FakeClock::at(NOW),
         directory.clone(),
@@ -445,6 +456,7 @@ async fn fixture_provider(policy: ImagePolicyConfig, registry: MockServer) -> Fi
         tenant: keys(TENANT_SECRET),
         other_tenant: keys(OTHER_TENANT_SECRET),
         _registry: registry,
+        _gateway: gateway,
     }
 }
 
@@ -1195,28 +1207,114 @@ async fn one_refusal_per_spawn_validation_step() {
 
 // ── Milestone 2: what a publisher signs, and the three forms of `image` ──────
 
-/// The image the Milestone 2 fixtures publish: an OCI index with one
-/// manifest and one layer. The layer's bytes are in the TOON store and named
-/// by a Blob Record; the manifest is still upstream, which is the point of
-/// having two source types at all — a publisher pays only for what exists
-/// nowhere else (spec §8.1).
-const INDEX_DIGEST: &str =
-    "sha256:1111111111111111111111111111111111111111111111111111111111111111";
-const MANIFEST_DIGEST: &str =
-    "sha256:2222222222222222222222222222222222222222222222222222222222222222";
-const LAYER_DIGEST: &str =
-    "sha256:3333333333333333333333333333333333333333333333333333333333333333";
-
+/// The image the Milestone 2 fixtures publish, `<publisher npub>/web:1.0`:
+/// a real, loadable OCI image built here from fixed bytes — a manifest, a
+/// config and two layers. The base layer is the kind a publisher leaves
+/// upstream (`oci`, "registry-1.docker.io/library/alpine" for the story);
+/// the application layer, the config and the manifest exist nowhere else
+/// and are in the TOON store, each named by a Blob Record. That is the
+/// point of having two source types at all: a publisher pays only for what
+/// exists nowhere else (spec §8.1). Because the bytes are real, the
+/// `spawn_image.registry_entry` fixture is a spawn that RUNS, fetched
+/// through this very entry.
 const IMAGE_NAME: &str = "web";
 const IMAGE_TAG: &str = "1.0";
 const TEMPLATE_NAME: &str = "static-site";
+const UPSTREAM_REGISTRY: &str = "registry-1.docker.io";
+const UPSTREAM_REPOSITORY: &str = "library/alpine";
+
+const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
+const CONFIG_MEDIA_TYPE: &str = "application/vnd.oci.image.config.v1+json";
+/// Uncompressed, so a layer's diff id IS its digest and a reader can check
+/// the config's `rootfs.diff_ids` against the manifest by eye.
+const LAYER_MEDIA_TYPE: &str = "application/vnd.oci.image.layer.v1.tar";
 
 /// The TOON store part size the sandbox uses: 102,400 bytes, which fits the
 /// free tier's 107,520-byte data item (spec §8.2, Appendix A).
 const PART_SIZE: u64 = 102_400;
 
+/// Transaction ids of the uploads, readable on purpose (each is the base64
+/// of what it holds). A real txid is 43 characters of Arweave base64url.
+const LAYER_RECORD_TXID: &str = "dG9vbi1zdG9yZS1ibG9iLXJlY29yZC10eGlk";
+const LAYER_PART_TXIDS: [&str; 3] = [
+    "dG9vbi1zdG9yZS1wYXJ0LW9uZQ",
+    "dG9vbi1zdG9yZS1wYXJ0LXR3bw",
+    "dG9vbi1zdG9yZS1wYXJ0LXRocmVl",
+];
+const CONFIG_RECORD_TXID: &str = "dG9vbi1zdG9yZS1jb25maWctcmVjb3Jk";
+const CONFIG_PART_TXIDS: [&str; 1] = ["dG9vbi1zdG9yZS1jb25maWctcGFydA"];
+const MANIFEST_RECORD_TXID: &str = "dG9vbi1zdG9yZS1tYW5pZmVzdC1yZWNvcmQ";
+const MANIFEST_PART_TXIDS: [&str; 1] = ["dG9vbi1zdG9yZS1tYW5pZmVzdC1wYXJ0"];
+
 fn publisher() -> Keys {
     keys(PUBLISHER_SECRET)
+}
+
+fn digest_of(bytes: &[u8]) -> String {
+    format!("sha256:{}", sha256_hex(bytes))
+}
+
+/// One file in a tar, with every header field fixed, so the bytes are the
+/// same on every run.
+fn tar_of(name: &str, content: &[u8]) -> Vec<u8> {
+    let mut tar = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(content.len() as u64);
+    header.set_mode(0o644);
+    header.set_mtime(0);
+    header.set_cksum();
+    tar.append_data(&mut header, name, content).unwrap();
+    tar.into_inner().unwrap()
+}
+
+/// The base layer: what an upstream image would contribute. Tiny.
+fn base_layer_bytes() -> Vec<u8> {
+    tar_of("etc/motd", b"a base layer, still upstream\n")
+}
+
+/// The application layer: long enough to need three parts at `PART_SIZE`
+/// — two full and a short last one — so a reader sees that `part_size` is
+/// not the last part's size and that the sizes sum to the blob's.
+fn app_layer_bytes() -> Vec<u8> {
+    let line = b"<p>served from the TOON store</p>\n";
+    let content: Vec<u8> = line.iter().cycle().take(233_472).copied().collect();
+    tar_of("srv/www/index.html", &content)
+}
+
+fn config_bytes() -> Vec<u8> {
+    json!({
+        "architecture": "amd64",
+        "os": "linux",
+        "config": { "Cmd": ["/bin/sh"] },
+        "rootfs": {
+            "type": "layers",
+            "diff_ids": [digest_of(&base_layer_bytes()), digest_of(&app_layer_bytes())]
+        }
+    })
+    .to_string()
+    .into_bytes()
+}
+
+fn manifest_bytes() -> Vec<u8> {
+    let base = base_layer_bytes();
+    let app = app_layer_bytes();
+    let config = config_bytes();
+    json!({
+        "schemaVersion": 2,
+        "mediaType": MANIFEST_MEDIA_TYPE,
+        "config": { "mediaType": CONFIG_MEDIA_TYPE, "digest": digest_of(&config), "size": config.len() },
+        "layers": [
+            { "mediaType": LAYER_MEDIA_TYPE, "digest": digest_of(&base), "size": base.len() },
+            { "mediaType": LAYER_MEDIA_TYPE, "digest": digest_of(&app), "size": app.len() },
+        ]
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// The image's content address: its manifest's digest.
+fn image_digest() -> String {
+    digest_of(&manifest_bytes())
 }
 
 /// `30434:<publisher>:<name>:<tag>` — the coordinate a spawn or a Template
@@ -1238,61 +1336,147 @@ fn registry_entry_ref() -> RegistryEntryRef {
     }
 }
 
+/// A Blob Record for `bytes` split at `PART_SIZE`, its parts uploaded
+/// under `part_txids` (one per part, in order).
+fn blob_record_for(bytes: &[u8], part_txids: &[&str]) -> BlobRecordContent {
+    let chunks: Vec<&[u8]> = bytes.chunks(PART_SIZE as usize).collect();
+    assert_eq!(chunks.len(), part_txids.len(), "one txid per part");
+    BlobRecordContent {
+        digest: digest_of(bytes),
+        size: bytes.len() as u64,
+        part_size: PART_SIZE,
+        parts: chunks
+            .iter()
+            .zip(part_txids)
+            .map(|(chunk, txid)| BlobPart {
+                txid: txid.to_string(),
+                sha256: sha256_hex(chunk),
+                size: chunk.len() as u64,
+            })
+            .collect(),
+    }
+}
+
+/// The application layer's Blob Record: the one `registry.blob_record`
+/// shows.
+fn blob_record_content() -> BlobRecordContent {
+    blob_record_for(&app_layer_bytes(), &LAYER_PART_TXIDS)
+}
+
+/// Every blob in the TOON store, with the txid of its record's own upload
+/// and of each part: what the fixture gateway serves, and what the entry's
+/// `toon-store` sources cite.
+fn stored_blobs() -> Vec<(BlobRecordContent, &'static str, Vec<u8>)> {
+    vec![
+        (
+            blob_record_for(&manifest_bytes(), &MANIFEST_PART_TXIDS),
+            MANIFEST_RECORD_TXID,
+            manifest_bytes(),
+        ),
+        (
+            blob_record_for(&config_bytes(), &CONFIG_PART_TXIDS),
+            CONFIG_RECORD_TXID,
+            config_bytes(),
+        ),
+        (blob_record_content(), LAYER_RECORD_TXID, app_layer_bytes()),
+    ]
+}
+
 fn image_entry_content() -> ImageEntryContent {
+    let toon_store = |txid: &str| BlobSource::ToonStore {
+        blob_record_txid: txid.to_string(),
+    };
     ImageEntryContent {
-        digest: INDEX_DIGEST.to_string(),
-        media_type: "application/vnd.oci.image.index.v1+json".to_string(),
+        digest: image_digest(),
+        media_type: MANIFEST_MEDIA_TYPE.to_string(),
         blobs: vec![
             EntryBlob {
-                digest: MANIFEST_DIGEST.to_string(),
-                size: 1234,
-                media_type: "application/vnd.oci.image.manifest.v1+json".to_string(),
+                digest: image_digest(),
+                size: manifest_bytes().len() as u64,
+                media_type: MANIFEST_MEDIA_TYPE.to_string(),
+                source: toon_store(MANIFEST_RECORD_TXID),
+            },
+            EntryBlob {
+                digest: digest_of(&config_bytes()),
+                size: config_bytes().len() as u64,
+                media_type: CONFIG_MEDIA_TYPE.to_string(),
+                source: toon_store(CONFIG_RECORD_TXID),
+            },
+            EntryBlob {
+                digest: digest_of(&base_layer_bytes()),
+                size: base_layer_bytes().len() as u64,
+                media_type: LAYER_MEDIA_TYPE.to_string(),
                 source: BlobSource::Oci {
-                    registry: "registry-1.docker.io".to_string(),
-                    repository: "library/alpine".to_string(),
+                    registry: UPSTREAM_REGISTRY.to_string(),
+                    repository: UPSTREAM_REPOSITORY.to_string(),
                 },
             },
             EntryBlob {
-                digest: LAYER_DIGEST.to_string(),
-                size: 235_520,
-                media_type: "application/vnd.oci.image.layer.v1.tar+gzip".to_string(),
-                source: BlobSource::ToonStore {
-                    blob_record_txid: "dG9vbi1zdG9yZS1ibG9iLXJlY29yZC10eGlk".to_string(),
-                },
+                digest: digest_of(&app_layer_bytes()),
+                size: app_layer_bytes().len() as u64,
+                media_type: LAYER_MEDIA_TYPE.to_string(),
+                source: toon_store(LAYER_RECORD_TXID),
             },
         ],
     }
 }
 
-fn blob_record_content() -> BlobRecordContent {
-    // Three parts: two full and a short last one, so a reader sees both that
-    // `part_size` is not the last part's size and that the sizes sum to the
-    // blob's.
-    let parts = [
-        ("dG9vbi1zdG9yZS1wYXJ0LW9uZQ", "aa", PART_SIZE),
-        ("dG9vbi1zdG9yZS1wYXJ0LXR3bw", "bb", PART_SIZE),
-        ("dG9vbi1zdG9yZS1wYXJ0LXRocmVl", "cc", 30_720),
-    ];
-    BlobRecordContent {
-        digest: LAYER_DIGEST.to_string(),
-        size: parts.iter().map(|(_, _, size)| size).sum(),
-        part_size: PART_SIZE,
-        parts: parts
-            .iter()
-            .map(|(txid, byte, size)| BlobPart {
-                txid: txid.to_string(),
-                sha256: byte.repeat(32),
-                size: *size,
-            })
-            .collect(),
+/// The entry as published: signed by the publisher with zero aux
+/// randomness, so the event in `registry.image_entry` is byte-for-byte the
+/// one the fixture provider resolves the spawn through.
+fn image_entry() -> Event {
+    with_reproducible_sig(
+        &image_entry_event(
+            IMAGE_NAME,
+            IMAGE_TAG,
+            &image_entry_content(),
+            &publisher(),
+            NOW,
+        )
+        .unwrap(),
+        &publisher(),
+    )
+}
+
+/// The TOON store as the fixture provider reads it: every record and every
+/// part at `/raw/<txid>`; and the upstream registry serving the base layer
+/// by digest.
+async fn mount_image_bytes(gateway: &MockServer, registry: &MockServer) {
+    for (record, record_txid, bytes) in stored_blobs() {
+        let event = with_reproducible_sig(
+            &blob_record_event(&record, &publisher(), NOW).unwrap(),
+            &publisher(),
+        );
+        mount_raw(gateway, record_txid, serde_json::to_vec(&event).unwrap()).await;
+        for (part, chunk) in record.parts.iter().zip(bytes.chunks(PART_SIZE as usize)) {
+            mount_raw(gateway, &part.txid, chunk.to_vec()).await;
+        }
     }
+    let base = base_layer_bytes();
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/v2/{}/blobs/{}",
+            UPSTREAM_REPOSITORY,
+            digest_of(&base)
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(base))
+        .mount(registry)
+        .await;
+}
+
+async fn mount_raw(gateway: &MockServer, txid: &str, bytes: Vec<u8>) {
+    Mock::given(method("GET"))
+        .and(path(format!("/raw/{}", txid)))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+        .mount(gateway)
+        .await;
 }
 
 fn template_content() -> TemplateContent {
     TemplateContent {
         version: 1,
         image: TemplateImage {
-            digest: INDEX_DIGEST.to_string(),
+            digest: image_digest(),
             registry_entry: Some(registry_entry_ref()),
         },
         ports: vec![PortRequest {
@@ -1325,17 +1509,6 @@ fn template_address() -> String {
 #[test]
 fn one_publisher_event_per_milestone_2_kind() {
     let publisher = publisher();
-    let entry = with_reproducible_sig(
-        &image_entry_event(
-            IMAGE_NAME,
-            IMAGE_TAG,
-            &image_entry_content(),
-            &publisher,
-            NOW,
-        )
-        .unwrap(),
-        &publisher,
-    );
     golden(
         "registry.image_entry.json",
         event_fixture(
@@ -1343,12 +1516,14 @@ fn one_publisher_event_per_milestone_2_kind() {
             "image_entry",
             "An Image Registry entry (spec §8.1), signed by the PUBLISHER and not by any \
              provider: `d` is `<name>:<tag>`, `x` is the image digest's hex, and `blobs` \
-             lists every blob reachable from `digest` with the source of each. Both source \
-             types are shown: a manifest still upstream (`oci`) and a layer in the TOON \
-             store (`toon-store`, naming the Blob Record's own upload). The canonical name \
-             of this image is `<publisher npub>/web:1.0`.",
+             lists EVERY blob reachable from `digest` — the manifest, its config and both \
+             layers — with the source of each. Both source types are shown: a base layer \
+             still upstream (`oci`) and the manifest, config and application layer in the \
+             TOON store (`toon-store`, each naming its Blob Record's own upload). The \
+             canonical name of this image is `<publisher npub>/web:1.0`, and its bytes are \
+             real: `spawn_image.registry_entry` is a spawn fetched through this entry.",
             "K_IMAGE",
-            &entry,
+            &image_entry(),
         ),
     );
 
@@ -1361,11 +1536,12 @@ fn one_publisher_event_per_milestone_2_kind() {
         event_fixture(
             "registry",
             "blob_record",
-            "A Blob Record (spec §8.2) for the layer the entry puts in the TOON store: `d` \
-             and `x` both name the blob's digest, and `parts` is the ORDERED list of \
-             uploads a reader concatenates and checks against it. `part_size` is what every \
-             part but the last has (102,400 bytes, the sandbox's free-tier size); the last \
-             is short, and the sizes sum to `size`.",
+            "A Blob Record (spec §8.2) for the application layer the entry puts in the TOON \
+             store: `d` and `x` both name the blob's digest, and `parts` is the ORDERED \
+             list of uploads a reader concatenates and checks against it — each part's \
+             `sha256` is the real hash of that slice of the layer. `part_size` is what \
+             every part but the last has (102,400 bytes, the sandbox's free-tier size); \
+             the last is short, and the sizes sum to `size`.",
             "K_BLOB",
             &record,
         ),
@@ -1448,60 +1624,86 @@ async fn one_spawn_per_image_form() {
     doc["spawn_content"] = content.clone();
     golden("spawn_image.reference.json", doc);
 
-    // Forms 2 and 3: the Image Registry forms. Well-formed and allowed by
-    // §6.2, and refused `refused_image` on a paid spawn — never
-    // `invalid_request`, which would send a tenant off to fix a request
-    // that is already correct. Form 2 resolves on `availability` (§8.4)
-    // but this provider cannot yet run what it resolved; form 3 is not
-    // resolved yet at all.
-    for (case, image, description) in [
+    // Form 2: `{ digest, registry_entry }`, and it RUNS: the entry in
+    // `registry.image_entry` is read from the relay, the manifest and the
+    // config are resolved through its sources, every layer is fetched and
+    // verified, and the image is loaded into the backend and started by
+    // its id.
+    let content = spawn_content_with(
+        0xd2,
+        ImageRef::from_registry(image_digest(), entry_address(), RELAY),
+        None,
+    );
+    let event = lease_request(
+        &f.tenant,
+        f.provider_pubkey(),
+        "spawn",
+        &content,
+        NOW,
+        NOW + TTL,
+    );
+    let (status, response, mut doc) = exchange(
+        &f,
         (
+            "spawn_image",
             "registry_entry",
-            ImageRef::from_registry(valid_digest(), entry_address(), RELAY),
-            "Form 2: `{ digest, registry_entry }`. The entry at `address` lists every blob \
-             and where its bytes are (§8.1); `relay` is a hint for finding it, not an \
-             authority — the entry is addressed by its signer. `availability` resolves \
-             this form through the entry (§8.4); a paid spawn is refused `refused_image` \
-             until this provider can run what it resolved, before any relay or gateway is \
-             read: the request is exactly what the spec allows, so the code says the \
-             provider cannot run it yet, not that the tenant got it wrong.",
+            "Form 2 of §6.2's `image`: `{ digest, registry_entry }`. The entry at `address` \
+             (`registry.image_entry`) lists every blob and where its bytes are (§8.1); \
+             `relay` is a hint for finding it, not an authority — the entry is addressed \
+             by its signer. The provider resolves the image through the entry (§8.4): the \
+             manifest and config for `availability`, then every layer for the paid spawn, \
+             each blob fetched from the source the entry names — the Blob Record and its \
+             parts from the TOON store, the base layer from the upstream registry by \
+             digest — verified against its digest, cached, assembled into an OCI layout, \
+             loaded into the backend and run by image id. Same success shape as form 1.",
         ),
+        &spawn_route,
+        spawn_path,
+        envelope(&event),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    doc["image"] = content["image"].clone();
+    doc["spawn_content"] = content.clone();
+    golden("spawn_image.registry_entry.json", doc);
+
+    // Form 3: `{ digest }` alone. Well-formed and allowed by §6.2, and
+    // refused `refused_image` on a paid spawn — never `invalid_request`,
+    // which would send a tenant off to fix a request that is already
+    // correct — because this provider does not resolve it yet.
+    let content = spawn_content_with(0xd3, ImageRef::by_digest(image_digest()), None);
+    let event = lease_request(
+        &f.tenant,
+        f.provider_pubkey(),
+        "spawn",
+        &content,
+        NOW,
+        NOW + TTL,
+    );
+    let (status, response, mut doc) = exchange(
+        &f,
         (
+            "spawn_image",
             "digest_only",
-            ImageRef::by_digest(valid_digest()),
             "Form 3: `{ digest }` alone. The blobs are found by Blob Record lookup on the \
              provider's own Relay Set (§8.4 step 3), so anyone who knows a digest someone \
              already uploaded can spawn it. Refused `refused_image` until this provider \
              looks Blob Records up, on `availability` and on a spawn alike, before \
              capacity is counted or any container is created.",
         ),
-    ] {
-        let content = spawn_content_with(0xd2, image, None);
-        let event = lease_request(
-            &f.tenant,
-            f.provider_pubkey(),
-            "spawn",
-            &content,
-            NOW,
-            NOW + TTL,
-        );
-        let (status, response, mut doc) = exchange(
-            &f,
-            ("spawn_image", case, description),
-            &spawn_route,
-            spawn_path,
-            envelope(&event),
-        )
-        .await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", response);
-        assert_eq!(error_of(&response), "refused_image");
-        doc["image"] = content["image"].clone();
-        doc["spawn_content"] = content.clone();
-        golden(
-            &format!("spawn_image.{}.json", case),
-            with_validation_step(doc, "§6.2 step 5: resolve the image (§8.4)"),
-        );
-    }
+        &spawn_route,
+        spawn_path,
+        envelope(&event),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", response);
+    assert_eq!(error_of(&response), "refused_image");
+    doc["image"] = content["image"].clone();
+    doc["spawn_content"] = content.clone();
+    golden(
+        "spawn_image.digest_only.json",
+        with_validation_step(doc, "§6.2 step 5: resolve the image (§8.4)"),
+    );
 
     // The same refusal on the free route, which is where a tenant should
     // meet it: `availability` answers it for nothing, a spawn bills for it.
@@ -1521,7 +1723,7 @@ async fn one_spawn_per_image_form() {
         json!({
             "listing": "basic",
             "version": 1,
-            "image": ImageRef::by_digest(valid_digest()),
+            "image": ImageRef::by_digest(image_digest()),
         }),
     )
     .await;

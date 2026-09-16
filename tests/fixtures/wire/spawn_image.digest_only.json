@@ -7,16 +7,16 @@
   },
   "http_path": "/listings/basic/v1/spawn",
   "image": {
-    "digest": "sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd"
+    "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126"
   },
   "request_body": {
     "request": {
-      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"volume_gb\":2,\"workload_id\":\"d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2\"}",
+      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"volume_gb\":2,\"workload_id\":\"d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3\"}",
       "created_at": 1700000000,
-      "id": "6945439d3a50b1a206f09558da96b0281c7aaaaf4393915c62d6cd6eb4f89536",
+      "id": "d4a16f2e14fb9033fc4f1f9fcf1078692e9b90b4b84b583489b85c1bfefa60fe",
       "kind": 4432,
       "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
-      "sig": "cccf49d6aa06fe38524dc9f681262a7c308a6d6d50f1d53ee49f52f158757e3159b634eeaf78397c4d5554e6b82fd9b84485b2f3ecde4f85cd53ccc88e2d67c7",
+      "sig": "4be35e8444f93b56064fb2e3064838c8ec05d1dc7acdb2c68e4b88c60cc6d6e17b34aab4e7aff7d92d7a3efbfb300d21ffa9be4929c41e9ade1cd856375b653c",
       "tags": [
         [
           "p",
@@ -51,7 +51,7 @@
       "GREETING": "hello"
     },
     "image": {
-      "digest": "sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd"
+      "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126"
     },
     "ports": [
       {
@@ -61,7 +61,7 @@
     ],
     "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
     "volume_gb": 2,
-    "workload_id": "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2"
+    "workload_id": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3"
   },
   "validation_step": "§6.2 step 5: resolve the image (§8.4)"
 }
