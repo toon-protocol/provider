@@ -10,6 +10,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
 use super::persistence::LeaseRecord;
+use crate::capabilities;
 use crate::nostr::directory_events::Settlement;
 use crate::nostr::wire::{ErrorCode, ErrorResponse, Resources};
 
@@ -399,7 +400,8 @@ impl ProviderConfig {
 
     /// Refuse a config that would misbehave at runtime rather than at load:
     /// listing names that are not ILP segments, duplicate versions, versions
-    /// below 1, a zero interval, and a port block that overflows `u16`.
+    /// below 1, a zero interval, a port block that overflows `u16`, and a
+    /// capability this backend cannot deliver.
     pub fn validate(&self) -> Result<()> {
         if self.ilp_address.is_empty()
             || !self
@@ -462,7 +464,22 @@ impl ProviderConfig {
                 );
             }
         }
+        // A capability is a promise to a tenant who cannot inspect this host:
+        // it picks a tier by the Listing's `t` tags alone (spec §4.4). So a
+        // grant this backend cannot deliver is refused here, where the
+        // operator who wrote it is looking, and not by the tenant discovering
+        // an empty /var/run/docker.sock after paying.
+        for capability in &self.capabilities {
+            if let Some(why) = capabilities::grant_refusal(capability) {
+                bail!("capabilities: {}", why);
+            }
+        }
         for listing in &self.listings {
+            for capability in &listing.capabilities {
+                if let Some(why) = capabilities::grant_refusal(capability) {
+                    bail!("listing {:?}: {}", listing.name, why);
+                }
+            }
             if listing.name.is_empty() || !listing.name.chars().all(is_ilp_segment_char) {
                 bail!(
                     "listing name {:?} is not an ILP address segment ([A-Za-z0-9_~-]+)",
@@ -723,7 +740,7 @@ version = 1
 arch = "amd64"
 lease_interval_s = 3600
 price = 1000
-capabilities = ["docker"]
+capabilities = ["x-ci-sandbox"]
 capacity = 4
 [listings.resources]
 cpu_millicores = 500
@@ -737,7 +754,7 @@ storage_gb = 1
         let basic = cfg.listing("basic", 1).expect("basic v1 exists");
         assert_eq!(basic.price, 1000);
         assert_eq!(basic.resources.cpu_millicores, 500);
-        assert_eq!(basic.capabilities, vec!["docker".to_string()]);
+        assert_eq!(basic.capabilities, vec!["x-ci-sandbox".to_string()]);
         assert_eq!(cfg.capacity_of("basic"), 4);
         assert!(cfg.listing("basic", 2).is_none());
     }
@@ -749,7 +766,7 @@ storage_gb = 1
         let cfg = ProviderConfig {
             provider_name: "Round Trip".to_string(),
             relay_set: vec!["wss://relay.toon.example".to_string()],
-            capabilities: vec!["docker".to_string()],
+            capabilities: vec!["x-ci-sandbox".to_string()],
             listings: vec![listing("basic", 1)],
             ssh_port_start: Some(40000),
             ..ProviderConfig::default()
@@ -760,9 +777,54 @@ storage_gb = 1
 
         assert_eq!(back.provider_name, "Round Trip");
         assert_eq!(back.relay_set, vec!["wss://relay.toon.example".to_string()]);
-        assert_eq!(back.capabilities, vec!["docker".to_string()]);
+        assert_eq!(back.capabilities, vec!["x-ci-sandbox".to_string()]);
         assert_eq!(back.listings, vec![listing("basic", 1)]);
         assert_eq!(back.ssh_port_start, Some(40000));
+    }
+
+    #[test]
+    fn a_capability_this_backend_cannot_deliver_is_refused_at_load() {
+        // Spec §4.4: a tier that publishes `t docker` owes its tenant a Docker
+        // daemon of the lease's own. This backend supplies none, so the tier
+        // must not load — a tenant picks a listing by that tag alone and has
+        // no way to find out it was empty until it has paid.
+        for granted in [vec!["docker".to_string()], vec!["nesting".to_string()]] {
+            let cfg = ProviderConfig {
+                listings: vec![Listing {
+                    capabilities: granted.clone(),
+                    ..listing("ci", 1)
+                }],
+                ..ProviderConfig::default()
+            };
+            let err = cfg.validate().expect_err("granted but not built");
+            assert!(err.to_string().contains("ci"), "{}", err);
+        }
+
+        // The provider-wide list is the same promise, so it fails the same way.
+        let cfg = ProviderConfig {
+            capabilities: vec!["docker".to_string()],
+            ..ProviderConfig::default()
+        };
+        assert!(cfg.validate().is_err());
+
+        // A typo is not a capability either; an `x-` experiment is the
+        // provider's own business and loads.
+        let typo = ProviderConfig {
+            listings: vec![Listing {
+                capabilities: vec!["dockerr".to_string()],
+                ..listing("ci", 1)
+            }],
+            ..ProviderConfig::default()
+        };
+        assert!(typo.validate().is_err());
+        let experiment = ProviderConfig {
+            listings: vec![Listing {
+                capabilities: vec!["x-ci-sandbox".to_string()],
+                ..listing("ci", 1)
+            }],
+            ..ProviderConfig::default()
+        };
+        assert!(experiment.validate().is_ok());
     }
 
     #[test]

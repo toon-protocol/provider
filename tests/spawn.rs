@@ -215,6 +215,65 @@ async fn runtime_flags_host_mounts_devices_and_capabilities_are_invalid() {
 }
 
 #[tokio::test]
+async fn asking_for_docker_in_the_workload_is_refused_when_the_listing_does_not_grant_it() {
+    // Spec §4.4 and ADR 0004: a Docker daemon inside the workload is a
+    // capability the LISTING grants, and the harness listing grants nothing.
+    // Every shape the ask could take — the capability by name, a flag, the
+    // host socket as a mount, the device a nested VM would want — is one
+    // refusal, `invalid_request`, and nothing reaches the backend. Starting a
+    // workload anyway would be worse than refusing: the tenant pays for the
+    // interval either way (spec §2), and would only find the missing daemon
+    // once its build had failed inside a lease it had already bought.
+    let h = harness().await;
+    for (field, value) in [
+        ("capabilities", json!(["docker"])),
+        ("docker", json!(true)),
+        ("privileged", json!(true)),
+        (
+            "mounts",
+            json!([{ "host": "/var/run/docker.sock", "container": "/var/run/docker.sock" }]),
+        ),
+        (
+            "volumes",
+            json!(["/var/run/docker.sock:/var/run/docker.sock"]),
+        ),
+        ("devices", json!(["/dev/kvm"])),
+    ] {
+        let mut content = serde_json::to_value(spawn_content(1)).unwrap();
+        content[field] = value;
+        let spec = RequestSpec {
+            content,
+            ..RequestSpec::spawn(&h, &spawn_content(1))
+        };
+        let (status, body) = spawn(&h, spec.sign()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{}: {}", field, body);
+        assert_eq!(error_of(&body), "invalid_request", "{}", field);
+    }
+    assert!(
+        h.backend.calls().is_empty(),
+        "no workload starts on a capability that was never granted"
+    );
+
+    // And the daemon a tenant might hope to find is not smuggled in by the
+    // fields a spawn IS allowed to set: env is env, not a grant.
+    let content = SpawnContent {
+        env: std::collections::BTreeMap::from([(
+            "DOCKER_HOST".to_string(),
+            "unix:///var/run/docker.sock".to_string(),
+        )]),
+        ..spawn_content(1)
+    };
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    let created = &h.backend.created()[0];
+    assert_eq!(
+        created.env.get("DOCKER_HOST").map(String::as_str),
+        Some("unix:///var/run/docker.sock"),
+        "the variable is set, and points at a socket nothing mounted"
+    );
+}
+
+#[tokio::test]
 async fn a_standby_set_is_refused_this_milestone() {
     let h = harness().await;
     let content = SpawnContent {
