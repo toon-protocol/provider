@@ -429,7 +429,7 @@ fn check_entry_address(address: &str) -> Result<(), ErrorResponse> {
             "image.registry_entry.address must be `<kind>:<pubkey>:<d>`",
         ));
     };
-    if kind != K_IMAGE.to_string() {
+    if kind.parse::<u16>() != Ok(K_IMAGE) {
         return Err(invalid(format!(
             "image.registry_entry.address must name an Image Registry entry (kind {}), not kind {:?}",
             K_IMAGE, kind

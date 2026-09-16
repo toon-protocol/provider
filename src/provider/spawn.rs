@@ -18,7 +18,7 @@ use super::config::{Listing, MAX_PORTS_PER_WORKLOAD};
 use super::image_policy;
 use super::persistence::{count_live, persist_leases, LeaseRecord, LeaseState};
 use crate::compute::{container_name, ContainerConfig, PortMapping};
-use crate::nostr::image_events::SpawnImage;
+use crate::nostr::image_events::{SpawnImage, IMAGE_REGISTRY_NOT_RESOLVED};
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
     Access, ErrorCode, ErrorResponse, PortAccess, PortRequest, Role, SpawnContent, SpawnResponse,
@@ -118,10 +118,7 @@ pub async fn spawn(
         // question rather than an `expect` so a future form that reaches
         // here refuses instead of panicking.
         pull = image.upstream_pull().ok_or_else(|| {
-            ErrorResponse::new(
-                ErrorCode::RefusedImage,
-                crate::nostr::image_events::IMAGE_REGISTRY_NOT_RESOLVED,
-            )
+            ErrorResponse::new(ErrorCode::RefusedImage, IMAGE_REGISTRY_NOT_RESOLVED)
         })?;
         let running = count_live(&leases, &listing.name);
         if running >= state.config.capacity_of(&listing.name) as usize {
