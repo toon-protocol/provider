@@ -271,6 +271,16 @@ pub struct FakeDirectory {
     /// Every `(address, relay)` the provider asked for, in order — so a
     /// test can see that a relay was (or was not) consulted.
     entry_lookups: Mutex<Vec<(String, String)>>,
+    /// Every READ the provider made through the Directory port, in order. A
+    /// test that asserts the provider looked nothing up (a spawn's
+    /// `template`, which it never resolves) needs the fake to record the
+    /// question, not just the answer.
+    ///
+    /// Prose rather than a `BackendCall`-style enum on purpose: the tests
+    /// that read it ask whether the journal is EMPTY, and the string is what
+    /// the failure prints. A new read on the port needs one `push` here and
+    /// no new variant anywhere.
+    reads: Mutex<Vec<String>>,
 }
 
 impl FakeDirectory {
@@ -289,6 +299,11 @@ impl FakeDirectory {
             .into_iter()
             .filter(|e| e.kind.as_u16() == kind)
             .collect()
+    }
+
+    /// Every Directory read so far, in order.
+    pub fn reads(&self) -> Vec<String> {
+        self.reads.lock().unwrap().clone()
     }
 
     pub fn seed_liveness(&self, event: nostr_sdk::Event) {
@@ -339,6 +354,10 @@ impl Directory for FakeDirectory {
         &self,
         provider: nostr_sdk::PublicKey,
     ) -> Result<Option<nostr_sdk::Event>> {
+        self.reads
+            .lock()
+            .unwrap()
+            .push(format!("query_liveness({})", provider.to_hex()));
         Ok(self
             .liveness
             .lock()
@@ -352,6 +371,10 @@ impl Directory for FakeDirectory {
         address: &str,
         relay: &str,
     ) -> Result<Option<nostr_sdk::Event>> {
+        self.reads
+            .lock()
+            .unwrap()
+            .push(format!("get_image_entry({address}, {relay})"));
         self.entry_lookups
             .lock()
             .unwrap()

@@ -72,6 +72,13 @@ pub struct LeaseRecord {
     #[serde(default)]
     pub destroyed: bool,
 
+    /// The Template the tenant expanded to make this spawn, if it named one
+    /// (spec §6.2). INFORMATIONAL: the provider never read it and never will
+    /// (ADR 0004) — it is kept so `status` can say where the values came
+    /// from, which is the whole of what a `template` is for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+
     /// The SSH forward and the published ports, as handed to the tenant.
     pub ssh_port: u16,
     #[serde(default)]
@@ -180,6 +187,7 @@ mod tests {
             expires_at,
             ended_at: None,
             destroyed: false,
+            template: None,
             ssh_port: 40000 + id as u16,
             ports: vec![PortAccess {
                 container_port: 443,

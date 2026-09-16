@@ -283,6 +283,11 @@ pub struct StatusResponse {
     /// host and port that no longer reach it would be a lie.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<Access>,
+    /// The Template the spawn said its values came from, echoed back for
+    /// tooling. Absent when the spawn named none. The provider never read it
+    /// (spec §8.3, ADR 0004).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
 }
 
 /// The answer to a successful termination (spec §6.6). The state is always

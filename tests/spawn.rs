@@ -16,7 +16,7 @@ use common::harness::{
     spawn_content, workload_id, RequestSpec, INTERVAL, NOW, PUBLIC_IP, SSH_KEY,
 };
 use common::{BackendCall, FakeBackend, FakeClock, FakeDirectory};
-use toon_provider::compute::PortMapping;
+use toon_provider::compute::{ContainerConfig, PortMapping};
 use toon_provider::nostr::kinds::K_LEASE_REQUEST;
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, SpawnContent};
 use toon_provider::provider::ImagePolicyConfig;
@@ -407,7 +407,7 @@ async fn an_image_that_is_neither_of_the_three_forms_is_invalid_request() {
 }
 
 #[tokio::test]
-async fn a_template_is_accepted_and_ignored_but_a_capability_beside_it_is_not() {
+async fn a_template_grants_nothing_and_a_capability_beside_it_is_still_refused() {
     // ADR 0004: a Template grants nothing, and the provider never reads one.
     // `template` rides along informationally; anything that looks like a
     // privilege beside it is still refused.
@@ -426,6 +426,34 @@ async fn a_template_is_accepted_and_ignored_but_a_capability_beside_it_is_not() 
         created.image,
         format!("docker.io/library/alpine@{}", digest()),
         "the template changed nothing about what runs"
+    );
+    // The lease got exactly the capabilities of the listing it was bought on
+    // and no more: that listing grants none, and the workload the backend was
+    // asked for is the one a spawn WITHOUT the Template produces, field for
+    // field. A `ContainerConfig` has no privilege, device, mount or
+    // capability field at all, so there is nothing for a Template to reach.
+    // `capabilities::grant_refusal` refuses every capability this build could
+    // publish, so a listing that grants none is the only listing there is —
+    // and the strongest statement of "exactly its listing's capabilities"
+    // available until the backend supplies one.
+    assert!(
+        listing("basic", 1, 2).capabilities.is_empty(),
+        "the listing these leases are bought on grants nothing"
+    );
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(2)).sign()).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    let by_hand = &h.backend.created()[1];
+    assert_eq!(
+        ContainerConfig {
+            id: created.id,
+            name: created.name.clone(),
+            ssh_key: created.ssh_key.clone(),
+            host_port: created.host_port,
+            ports: created.ports.clone(),
+            ..by_hand.clone()
+        },
+        *created,
+        "a Template changes nothing but the id and the ports the provider chose"
     );
 
     for privilege in ["privileged", "capabilities", "devices", "mounts"] {

@@ -185,6 +185,9 @@ pub async fn spawn(
                 expires_at: now + listing.lease_interval_s,
                 ended_at: None,
                 destroyed: false,
+                // Kept, never read: `status` hands it back so tooling can
+                // show which Template the tenant expanded (spec §6.2).
+                template: content.template.clone(),
                 ssh_port,
                 ports: ports.clone(),
             },

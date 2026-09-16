@@ -237,10 +237,14 @@ tenant pays for the same answer.
 
 The image is pulled as `reference@digest`, so the daemon verifies the bytes
 and picks the manifest for its own architecture. `template` — the
-`30436:<pubkey>:<name>` a tenant expanded its values from — is parsed and
-never read: a Template grants nothing, and only the listing decides what
-privileges a workload gets (ADR 0004). Anything else in the content — a
-runtime flag, a host mount, a device, a capability — is refused as
+`30436:<pubkey>:<name>` a tenant expanded its values from — is parsed, kept
+with the lease and reported by `status`, and never read: the provider makes no
+relay lookup for it, and a spawn that names one gets exactly the capabilities
+of the listing it was bought on and no more. A Template grants nothing, and
+only the listing decides what privileges a workload gets (ADR 0004).
+Expanding a Template into a spawn is the TENANT's job and happens in the
+sandbox harness, never here. Anything else in the
+content — a runtime flag, a host mount, a device, a capability — is refused as
 `invalid_request`. That includes every way of asking for a Docker daemon
 inside the workload: see [Capabilities](#capabilities).
 
@@ -315,7 +319,8 @@ Status answers:
 { "workload_id": "…", "role": "standalone", "state": "running",
   "expires_at": 1757350000,
   "access": { "host": "203.0.113.7", "ssh_port": 40000,
-              "ports": [ { "container_port": 443, "host_port": 41000 } ] } }
+              "ports": [ { "container_port": 443, "host_port": 41000 } ] },
+  "template": "30436:<pubkey>:<name>" }
 ```
 
 `state` is the §6.7 lease state: `"provisioning"`, `"running"`, or
@@ -325,6 +330,12 @@ reads `"running"` with an `expires_at` in the past — extend and terminate
 refuse it as `expired` all the same. `access` is absent once
 the lease has ended — the workload is gone, and there is nothing left to
 reach. The same encoding is what the lease table holds on disk.
+
+`template` is the one the spawn named, echoed back unchanged, and absent when
+the spawn named none. It is the whole of what a `template` is for: the
+provider kept it with the lease so tooling can show where a workload's values
+came from, and it survives a restart like the rest of the record. Nothing
+reads it: the provider never fetches a Template (see **Spawn** above).
 
 Terminate stops and deletes the workload immediately and answers
 `{ "workload_id": "…", "state": { "ended": "termination" } }`. Nothing is
