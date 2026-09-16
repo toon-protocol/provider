@@ -11,9 +11,10 @@
 // a tenant can rely on: the first reason is the one reported.
 //
 // Step 5 is the resolution `availability` also does (`image_policy::check`:
-// the entry, the index, the manifest for the listing's arch, its config).
-// For an image named through its Image Registry entry the bytes then have
-// to be FETCHED — every layer through the entry's sources, verified,
+// the entry if there is one, the index, the manifest for the listing's
+// arch, its config). For an image named by content address — through its
+// Image Registry entry or by digest alone — the bytes then have to be
+// FETCHED — every layer down §8.4's chain, verified,
 // cached, assembled into an OCI layout and loaded into the backend — and
 // that happens after the slot is reserved and outside the lease-table lock,
 // since a layer can take minutes and nothing else should wait on it. A
@@ -131,7 +132,7 @@ pub async fn spawn(
         image = SpawnImage::parse(&content.image)?;
         resolved = image_policy::check(
             &state.fetcher,
-            state.directory.as_ref(),
+            &state.directory,
             &state.image_policy,
             &listing,
             &image,
@@ -293,10 +294,7 @@ pub async fn spawn(
 /// the load.
 async fn materialise(state: &AppState, image: &ResolvedImage) -> Result<String, ErrorResponse> {
     for layer in image.layer_digests() {
-        state
-            .fetcher
-            .fetch(layer, &image.sources_for(layer)?)
-            .await?;
+        state.fetcher.fetch(layer, &image.sources).await?;
     }
 
     let cache = state.fetcher.cache().clone();

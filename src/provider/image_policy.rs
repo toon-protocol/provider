@@ -8,7 +8,8 @@
 //   no network access to apply the parts that don't.
 // - `check` resolves the image — through the upstream registry for the
 //   `reference` form, through its Image Registry entry for the
-//   `registry_entry` form — fetching only what resolution needs (an index,
+//   `registry_entry` form, through Blob Records on the provider's Relay Set
+//   for `{ digest }` alone — fetching only what resolution needs (an index,
 //   the manifest for the listing's arch, its config; never a layer), and
 //   applies the policy to what it found.
 //
@@ -22,25 +23,16 @@
 // tenant's check hang or retry against a provider that has already decided
 // not to run the image right now.
 
+use std::sync::Arc;
+
 use serde_json::Value;
 
 use super::config::{ImagePolicyConfig, Listing};
-use super::fetcher::{BlobFetcher, Candidate};
-use super::oci::{parse_reference, OciEndpoint};
+use super::fetcher::{BlobFetcher, BlobSources};
+use super::oci::parse_reference;
 use crate::directory::Directory;
 use crate::nostr::image_events::{ImageEntry, SpawnImage};
 use crate::nostr::wire::{ErrorCode, ErrorResponse, RegistryEntryRef};
-
-/// What a provider says to `{ digest }` alone until it looks Blob Records
-/// up on its Relay Set (§8.4 step 3). `refused_image`, not
-/// `invalid_request`: the request is well-formed and the spec allows it —
-/// this provider simply cannot find those bytes yet, and a tenant must learn
-/// that from `availability` before it pays rather than from a lease it
-/// cannot use.
-pub const IMAGE_DIGEST_ONLY_NOT_RESOLVED: &str =
-    "image: this provider does not yet look up Blob Records on its Relay Set, so it cannot \
-     fetch an image named by digest alone; name its Image Registry entry (`registry_entry`) \
-     or an upstream `reference` as well";
 
 fn refused(message: impl Into<String>) -> ErrorResponse {
     ErrorResponse::new(ErrorCode::RefusedImage, message)
@@ -95,9 +87,11 @@ pub struct ResolvedImage {
     pub size_bytes: u64,
     /// The manifest itself, already verified against `manifest_digest`.
     pub manifest: Value,
-    /// The Image Registry entry the image was resolved through, when it was
-    /// named by one: the source of every blob a spawn still has to fetch.
-    pub entry: Option<ImageEntry>,
+    /// Where the rest of this image's blobs may be fetched from, in §8.4's
+    /// order — the chain resolution itself came down, memo and all, so a
+    /// spawn's fetch of the layers reuses every Relay Set lookup
+    /// resolution already made.
+    pub sources: BlobSources,
 }
 
 impl ResolvedImage {
@@ -119,29 +113,7 @@ impl ResolvedImage {
             .and_then(Value::as_str)
             .unwrap_or("application/vnd.oci.image.manifest.v1+json")
     }
-
-    /// Where one of this image's blobs may be fetched from, in §8.4's
-    /// order — for the form that was resolved through an entry, the source
-    /// the entry lists. `refused_image` for a blob the image's description
-    /// does not account for, or for a form whose bytes the provider does
-    /// not fetch itself (Milestone 1's `reference`, which the backend
-    /// pulls whole).
-    pub fn sources_for(&self, digest: &str) -> Result<Vec<Candidate>, ErrorResponse> {
-        match &self.entry {
-            Some(entry) => entry_sources(entry, digest),
-            None => Err(refused(format!(
-                "no source is known for blob {} of image {}",
-                digest, self.manifest_digest
-            ))),
-        }
-    }
 }
-
-/// Which sources may serve a blob of the image being resolved, by digest.
-/// `Err` when the image's own description does not account for the blob —
-/// an entry that omits a blob its manifest needs is incomplete (§8.1), and
-/// a provider with nothing else to consult refuses it.
-type Sources<'a> = dyn Fn(&str) -> Result<Vec<Candidate>, ErrorResponse> + Sync + 'a;
 
 /// Apply the provider's image policy to a spawn's (or availability's)
 /// image, resolving it exactly as a spawn's step 5 would. Called by both
@@ -156,7 +128,7 @@ type Sources<'a> = dyn Fn(&str) -> Result<Vec<Candidate>, ErrorResponse> + Sync 
 /// than the index digest) is on the deny list.
 pub async fn check(
     fetcher: &BlobFetcher,
-    directory: &dyn Directory,
+    directory: &Arc<dyn Directory>,
     policy: &ImagePolicy,
     listing: &Listing,
     image: &SpawnImage,
@@ -180,55 +152,45 @@ pub async fn check(
             let (registry, repository) = parse_reference(reference);
             // Milestone 1's form: the registry serves every manifest, and
             // the layers are the backend's to pull once the image passes.
-            let sources = move |_: &str| {
-                Ok(vec![Candidate::Oci {
-                    registry: registry.clone(),
-                    repository: repository.clone(),
-                    endpoint: OciEndpoint::Manifests,
-                }])
-            };
+            // Nothing else is checked for them here, because this provider
+            // never holds their bytes.
+            let sources = BlobSources::upstream(registry, repository, directory.clone());
             let (manifest_digest, size_bytes, manifest) =
                 resolve(fetcher, digest, &listing.arch, &sources).await?;
             ResolvedImage {
                 manifest_digest,
                 size_bytes,
                 manifest,
-                entry: None,
+                sources,
             }
         }
         SpawnImage::Registry { entry, .. } => {
-            let entry = load_entry(directory, entry).await?;
+            let entry = load_entry(directory.as_ref(), entry).await?;
             if entry.content.digest != digest {
                 return Err(refused(format!(
                     "the Image Registry entry {}:{} names image {}, not {}",
                     entry.name, entry.tag, entry.content.digest, digest
                 )));
             }
-            let sources = |wanted: &str| entry_sources(&entry, wanted);
-            let (manifest_digest, size_bytes, manifest) =
-                resolve(fetcher, digest, &listing.arch, &sources).await?;
-            // The entry MUST list every blob reachable from the image
-            // (§8.1); one it omits could never be fetched, so the image is
-            // refused now rather than after a tenant has paid.
-            for blob in manifest_blob_digests(&manifest) {
-                sources(blob)?;
-            }
-            // The config is the one blob short enough to fetch for free and
-            // long enough to prove the entry's sources serve: it goes
-            // through the same chain a spawn will send every layer down.
-            if let Some(config_digest) = manifest_config_digest(&manifest) {
-                fetcher
-                    .fetch(config_digest, &sources(config_digest)?)
-                    .await?;
-            }
-            ResolvedImage {
-                manifest_digest,
-                size_bytes,
-                manifest,
-                entry: Some(entry),
-            }
+            resolve_fetched(
+                fetcher,
+                digest,
+                &listing.arch,
+                BlobSources::entry(entry, directory.clone()),
+            )
+            .await?
         }
-        SpawnImage::Digest { .. } => return Err(refused(IMAGE_DIGEST_ONLY_NOT_RESOLVED)),
+        // `{ digest }` alone: nothing names a source, so every blob is
+        // found by `#x` on this provider's Relay Set (§8.4 step 3).
+        SpawnImage::Digest { .. } => {
+            resolve_fetched(
+                fetcher,
+                digest,
+                &listing.arch,
+                BlobSources::relay_set(directory.clone()),
+            )
+            .await?
+        }
     };
 
     if policy.digest_denied(&resolved.manifest_digest) {
@@ -248,6 +210,42 @@ pub async fn check(
     Ok(resolved)
 }
 
+/// Resolve an image whose bytes THIS PROVIDER fetches — the two Image
+/// Registry forms — and prove, for free, that every blob it will need has
+/// somewhere to come from.
+///
+/// Three things, in the order a tenant should meet them:
+/// 1. the index and the manifest for the listing's arch, down the chain;
+/// 2. every blob the manifest names has at least one source — the cache, a
+///    source the entry lists, or a Blob Record on the Relay Set. A blob
+///    nothing can serve is `refused_image` HERE, on `availability`, rather
+///    than on the paid spawn that would have discovered it (§6.4);
+/// 3. the config is actually FETCHED. It is the one blob short enough to
+///    fetch for free and long enough to prove a source serves rather than
+///    merely claims to, and it goes down the same chain every layer will.
+async fn resolve_fetched(
+    fetcher: &BlobFetcher,
+    digest: &str,
+    arch: &str,
+    sources: BlobSources,
+) -> Result<ResolvedImage, ErrorResponse> {
+    let (manifest_digest, size_bytes, manifest) = resolve(fetcher, digest, arch, &sources).await?;
+    for blob in manifest_blob_digests(&manifest) {
+        if !fetcher.can_serve(blob, &sources).await {
+            return Err(refused(sources.no_source_message(blob)));
+        }
+    }
+    if let Some(config_digest) = manifest_config_digest(&manifest) {
+        fetcher.fetch(config_digest, &sources).await?;
+    }
+    Ok(ResolvedImage {
+        manifest_digest,
+        size_bytes,
+        manifest,
+        sources,
+    })
+}
+
 /// Resolve `digest` (an index or a manifest) to the manifest that would
 /// actually run: itself if it is already a single-platform manifest, or the
 /// entry of an index matching `arch`. Answers the manifest's digest, its
@@ -256,7 +254,7 @@ async fn resolve(
     fetcher: &BlobFetcher,
     digest: &str,
     arch: &str,
-    sources: &Sources<'_>,
+    sources: &BlobSources,
 ) -> Result<(String, u64, Value), ErrorResponse> {
     let value = fetch_json(fetcher, digest, sources).await?;
 
@@ -299,9 +297,9 @@ async fn resolve(
 async fn fetch_json(
     fetcher: &BlobFetcher,
     digest: &str,
-    sources: &Sources<'_>,
+    sources: &BlobSources,
 ) -> Result<Value, ErrorResponse> {
-    let bytes = fetcher.fetch(digest, &sources(digest)?).await?;
+    let bytes = fetcher.fetch(digest, sources).await?;
     serde_json::from_slice(&bytes).map_err(|e| {
         refused(format!(
             "image manifest {} is not valid JSON: {}",
@@ -354,23 +352,6 @@ fn manifest_size(manifest: &Value) -> u64 {
         })
         .unwrap_or(0);
     config_size + layers_size
-}
-
-/// Where an entry says one of its blobs lives — the one source the entry
-/// names for it (§8.4 step 2).
-fn entry_sources(entry: &ImageEntry, digest: &str) -> Result<Vec<Candidate>, ErrorResponse> {
-    entry
-        .content
-        .blobs
-        .iter()
-        .find(|blob| blob.digest == digest)
-        .map(|blob| vec![Candidate::from_entry_source(&blob.source, &blob.media_type)])
-        .ok_or_else(|| {
-            refused(format!(
-                "the Image Registry entry {}:{} does not list blob {}, which the image needs",
-                entry.name, entry.tag, digest
-            ))
-        })
 }
 
 /// The Image Registry entry a spawn named, read from the relay it hinted
