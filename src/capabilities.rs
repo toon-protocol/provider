@@ -12,9 +12,10 @@
 //! capability it did not mean to.
 //!
 //! Spec §4.4 gives `docker` and `nesting` a normative meaning, and says a
-//! Listing MUST NOT carry a `t` tag for a capability it does not grant. This
-//! backend supplies neither yet (see `grant_refusal`), so the one caller is
-//! `ProviderConfig::validate`: the refusal lands at config load, on the
+//! Listing MUST NOT carry a `t` tag for a capability it does not grant. The
+//! Docker backend supplies `docker` (a per-lease `dind` sidecar, `docker.rs`)
+//! and not `nesting` (see `grant_refusal`), and `ProviderConfig::validate`
+//! is where that is enforced: the refusal lands at config load, on the
 //! operator who wrote the line, rather than on the first tenant who buys the
 //! tier and finds an empty `/var/run/docker.sock`.
 #![allow(dead_code)]
@@ -36,12 +37,10 @@ pub const EXPERIMENTAL_PREFIX: &str = "x-";
 /// may. The message is written to be read by an operator with a config file
 /// open, so it names the value, what granting it would oblige, and the way out.
 ///
-/// Both capabilities the spec defines are refused here, for the same reason:
-/// granting either obliges the provider to give the workload something the
-/// Docker backend does not build. `docker` needs a daemon of the lease's own
-/// (a `dind` sidecar or equivalent), and `nesting` needs the workload to hold
-/// kernel privileges this backend never hands out. Until one of them is built,
-/// publishing the grant would be publishing a lie.
+/// `docker` is grantable: the Docker backend runs a daemon of the lease's own
+/// beside every workload of such a tier (`docker.rs`). `nesting` is refused,
+/// because granting it means handing tenant code kernel privileges this
+/// backend never hands out; publishing that grant would be publishing a lie.
 pub fn grant_refusal(capability: &str) -> Option<String> {
     let value = capability.trim();
     if value.is_empty() {
@@ -51,14 +50,7 @@ pub fn grant_refusal(capability: &str) -> Option<String> {
         return None;
     }
     if value.eq_ignore_ascii_case(DOCKER) {
-        return Some(format!(
-            "{:?}: granting it obliges this provider to give the workload a Docker daemon of \
-             its own at /var/run/docker.sock, scoped to the lease (spec §4.4). The Docker \
-             backend runs no such per-lease daemon, and it MUST NOT hand a workload the host \
-             daemon it creates workloads with — so this tier would publish a `t` tag it \
-             cannot honour. Drop it until the backend supplies one.",
-            capability
-        ));
+        return None;
     }
     if value.eq_ignore_ascii_case(NESTING) {
         return Some(format!(
@@ -135,17 +127,19 @@ mod tests {
     }
 
     #[test]
-    fn the_defined_capabilities_may_not_be_granted_by_this_backend() {
+    fn docker_is_grantable_and_nesting_is_not() {
         // Spec §4.4: a Listing MUST NOT carry a `t` tag for a capability it
-        // does not grant, and neither of these is built. The message has to
-        // say what was refused and why, because it is the only thing the
-        // operator sees.
-        for value in [DOCKER, "Docker", " docker ", NESTING] {
-            let why = grant_refusal(value).expect("neither is grantable yet");
-            assert!(why.contains("§4.4"), "{}", why);
+        // does not grant. The backend builds a per-lease daemon, so `docker`
+        // loads; `nesting` is not built, and its message has to say what was
+        // refused and why, because it is the only thing the operator sees.
+        for value in [DOCKER, "Docker", " docker "] {
+            assert_eq!(grant_refusal(value), None, "{:?}", value);
         }
-        assert!(grant_refusal(DOCKER).unwrap().contains("docker.sock"));
-        assert!(grant_refusal(NESTING).unwrap().contains("privileges"));
+        for value in [NESTING, "Nesting", " nesting "] {
+            let why = grant_refusal(value).expect("nesting is not built");
+            assert!(why.contains("§4.4"), "{}", why);
+            assert!(why.contains("privileges"), "{}", why);
+        }
     }
 
     #[test]

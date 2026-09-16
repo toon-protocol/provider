@@ -303,39 +303,86 @@ asked for, is mounted at `/data`.
 ## Capabilities
 
 A capability is a privilege beyond an ordinary workload that a **listing**
-grants, never a spawn (ADR 0004). Spec §4.4 defines two, and **this backend
-delivers neither yet**:
+grants, never a spawn (ADR 0004). Spec §4.4 defines two:
 
 | Capability | What granting it obliges | Here |
 |---|---|---|
-| `docker` | A Docker-compatible daemon of the **lease's own** at `/var/run/docker.sock`, scoped to that lease, with everything it runs counted against the listing's `resources` | Not built |
-| `nesting` | The workload may create containers or VMs of its own, which means tenant code holding kernel privileges | Not built |
+| `docker` | A Docker-compatible daemon of the **lease's own** at `/var/run/docker.sock`, scoped to that lease, with everything it runs counted against the listing's `resources` | **Granted**: a per-lease `dind` sidecar, below |
+| `nesting` | The workload may create containers or VMs of its own, which means tenant code holding kernel privileges | Not built: refused at config load |
 
-So `capabilities = ["docker"]` **fails at config load**, on the operator who
-wrote it, rather than on the first tenant who buys the tier and finds nothing
-on the socket: a tenant picks a listing by its `t` tags alone, so a tag this
-provider cannot honour is a listing that lies. A capability of your own —
-between you and your tenants until the spec defines one — goes in prefixed
-`x-`, and loads.
+A grant this backend cannot deliver **fails at config load**, on the operator
+who wrote it, rather than on the first tenant who buys the tier and finds
+nothing on the socket: a tenant picks a listing by its `t` tags alone, so a
+tag this provider cannot honour is a listing that lies. A capability of your
+own — between you and your tenants until the spec defines one — goes in
+prefixed `x-`, and loads.
 
 **The host daemon is never a workload's.** This app drives the host's Docker
 daemon to create workloads, which is why its own container mounts
 `/var/run/docker.sock`. That socket is on the provider's side of the workload
 boundary and is never passed through: `DockerBackend::run_args` gives a
-workload a name, CPU and memory limits, port forwards, environment and a
-*named volume* — no `--privileged`, no `--device`, no host path, no
+workload a name, CPU and memory limits, port forwards, environment and
+*named volumes* — no `--privileged`, no `--device`, no host path, no
 `DOCKER_HOST`. Mounting it into a workload would hand one tenant every other
 tenant's containers, and the spec forbids it outright (§4.4). A unit test
-asserts on the real argv so a future ticket cannot cross that line by
-accident.
+asserts on the real argv so a future change cannot cross that line by
+accident, with or without a `docker` grant.
 
-**What building `docker` would take** (not in this milestone): a per-lease
-`dind` sidecar sharing a private network with the workload, whose socket is
-the only one the workload sees, torn down with the lease — plus resource
-accounting across the pair, since §4.4 requires the listing's
-`cpu_millicores` and `memory_mb` to bound the workload, its daemon and every
-container that daemon runs *as one unit*, which is the part the current
-one-container-per-lease shape has no answer for.
+### How `docker` is granted
+
+A listing with `capabilities = ["docker"]` (the spec's Appendix A.1 `ci`
+tier is one) gets, per lease, the reference shape of §4.4 — four objects
+named after the workload and destroyed with it on termination, expiry and
+eviction (`src/docker.rs` has the full account):
+
+- **`toon-<id>-dind`**, the sidecar: the official `docker:28-dind` image
+  pinned by digest, `--privileged`. It is the one privileged container of
+  the lease and it is the *provider's*: it runs no tenant code. Its daemon
+  listens on one unix socket and no TCP port. Pre-pull the image
+  (`DockerBackend::DIND_IMAGE`) or the first such lease pays for the pull.
+- **`toon-<id>-run`**, a volume holding that socket: the sidecar mounts it
+  at `/toon/run`, the workload at `/var/run`, so a client in the workload
+  with no `DOCKER_HOST` finds `/var/run/docker.sock`. The volume is seeded
+  with the image's own `/var/run` contents before the daemon starts, so an
+  image that built something there (a Debian sshd's `/run/sshd`) keeps it;
+  the socket is `0666`, because everything in the workload is the tenant's
+  and the daemon is the lease's. The sidecar is reachable on the lease's
+  network as `docker`, so a port a nested container publishes is
+  `docker:<port>` from the workload.
+- **`toon-<id>-docker`**, a volume for the daemon's `/var/lib/docker`:
+  nested images, containers and volumes live there and go with the lease.
+  The provider's own image cache is not shared in; what the daemon pulls is
+  the lease's egress. Nested images are the host's architecture; no
+  emulation is offered.
+- **`toon-<id>-net`**, the bridge network the pair shares. The workload's
+  SSH forward and published ports are on the host as for any lease.
+
+**Accounting as one unit.** Both containers are created under one per-lease
+cgroup parent (`toon-<id>.slice` with the systemd cgroup driver; an absolute
+path with the cgroupfs driver), and the listing's `cpu_millicores` and
+`memory_mb` are written to that parent's `cpu.max`, `memory.max` and
+`memory.swap.max` by a short-lived helper container that bind-mounts the
+host's `/sys/fs/cgroup` — so it works whether or not this app runs in a
+container of its own. The nested daemon's containers are the sidecar's
+cgroup children, so the workload, the daemon and everything it runs share
+one limit, as §4.4 requires. Each container also carries the listing's
+limits itself; on a host where the parent cannot be written (cgroup v1) the
+provider logs the deviation once and the pair is bounded at twice the
+listing, per container. `storage_gb` has no hard quota here, for nested
+layers or the workload's own, as before.
+
+**Where the daemon's addresses go.** The nested daemon's default bridge is
+moved to `172.16.0.0/16`: Docker's own default, `172.17.0.1`, is also the
+address the *host* daemon's embedded DNS forwards through on a host whose
+resolver is loopback-only (systemd-resolved), and a nested bridge on that
+subnet swallows every nested pull's lookup. A tenant whose nested containers
+must reach a `172.16.0.0/16` of yours is the one case this costs.
+
+`cargo test -- --ignored` runs the whole shape against a real daemon: a
+`docker` lease's workload runs `docker run --rm hello-world` against its own
+socket as a non-root uid, the host daemon never sees the nested container,
+the unit limit is on the lease's slice, a stop/start brings the daemon back
+first, and termination leaves no sidecar, volume or network behind.
 
 ## Extending, checking and ending a lease
 
