@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -29,11 +29,14 @@ use nostr_sdk::Keys;
 use tokio::sync::Mutex;
 use tracing::info;
 
+use crate::anon_control::AnonControlService;
 use crate::clock::Clock;
 use crate::compute::ComputeBackend;
 use crate::directory::{ConnectorDirectory, Directory, NullDirectory};
+use crate::hidden_service::HiddenService;
 use crate::nostr::lease_request::AcceptedRequests;
 use crate::nostr::wire::{ErrorCode, ErrorResponse, EvictRequest};
+use crate::outbound_proxy::OutboundProxy;
 use crate::provider::routes::{
     AVAILABILITY_PATH, EXTEND_PATTERN, SPAWN_PATTERN, STANDBY_EXTEND_PATTERN, STANDBY_PATTERN,
     STATUS_PATH, TERMINATE_PATH,
@@ -57,6 +60,14 @@ pub struct AppState {
     /// ticket — Eviction Notices go. The second of the provider's two I/O
     /// ports; a test swaps it for a fake and reads back what was published.
     pub directory: Arc<dyn Directory>,
+    /// A Hidden Provider's window onto its `anon` daemon: the per-lease
+    /// `.anyone` addresses and the egress policy (spec §10). The third
+    /// port, and the only optional one — `None` on a provider that is not
+    /// hidden, which never touches it. A test installs a fake with
+    /// `with_hidden_service`; the real adapter that drives the daemon's
+    /// control port is selected from `[anon.control]` from M4-3
+    /// (TOON_Network #40), so until then no config installs one.
+    pub hidden_service: Option<Arc<dyn HiddenService>>,
     pub leases: Arc<Mutex<HashMap<u32, LeaseRecord>>>,
     pub accepted_requests: Arc<AcceptedRequests>,
     /// What this provider refuses to run, and the client that resolves an
@@ -83,20 +94,27 @@ impl AppState {
         config.validate()?;
         let keys = Keys::parse(&config.nostr_private_key)
             .context("nostr_private_key must be a hex or nsec1 secret key")?;
-        let directory = directory_from_config(&config)?;
+        let proxy = outbound_proxy_from_config(&config)?;
+        let directory = directory_from_config(&config, proxy.as_ref())?;
+        let hidden_service = hidden_service_from_config(&config)?;
         let image_policy = Arc::new(ImagePolicy::from_config(&config.image_policy));
         let cache = BlobCache::open(config.blob_cache_dir(), config.blob_cache_max_bytes)?;
-        let fetcher = Arc::new(BlobFetcher::new(
+        let fetcher = BlobFetcher::new(
             config.gateway_url_pattern.clone(),
             config.image_policy.registry_url_override.clone(),
             cache,
-        ));
+        );
+        let fetcher = Arc::new(match &proxy {
+            Some(proxy) => fetcher.with_proxy(proxy)?,
+            None => fetcher,
+        });
         Ok(Self {
             config: Arc::new(config),
             backend,
             clock,
             keys,
             directory,
+            hidden_service,
             leases: Arc::new(Mutex::new(HashMap::new())),
             accepted_requests: Arc::new(AcceptedRequests::new()),
             image_policy,
@@ -112,20 +130,94 @@ impl AppState {
         self.directory = directory;
         self
     }
+
+    /// Install the `HiddenService` this state creates per-lease addresses
+    /// through — a fake in tests, the `anon` control-port adapter in a
+    /// running hidden provider. Shaped like `with_directory` for the same
+    /// reason: the constructor stays as it is, and a test needs no config
+    /// that names a live daemon.
+    pub fn with_hidden_service(mut self, hidden_service: Arc<dyn HiddenService>) -> Self {
+        self.hidden_service = Some(hidden_service);
+        self
+    }
+}
+
+/// Where this provider's OWN outbound goes: the `anon` SOCKS port when it is
+/// hidden, and nowhere — direct, exactly as before — when it is not (spec
+/// §10, TOON_Network #42).
+///
+/// Read only under `hidden = true`, though `anon.socks_proxy` is a key any
+/// config may carry: a provider that publishes no `hidden: true` claims
+/// nothing about where its packets come from, and silently routing it
+/// through a daemon it happened to name would change what it does without
+/// changing what it says.
+///
+/// The proxy's own name is resolved here, once, at startup — see
+/// `OutboundProxy`. A daemon that cannot be resolved is a refusal to start
+/// and not a warning: a hidden provider whose proxy is unreachable would
+/// otherwise carry on publishing from its real address.
+fn outbound_proxy_from_config(config: &ProviderConfig) -> Result<Option<OutboundProxy>> {
+    if !config.hidden {
+        return Ok(None);
+    }
+    match &config.anon.socks_proxy {
+        Some(url) => Ok(Some(OutboundProxy::resolve(url)?)),
+        // Unreachable through `validate`, which requires the key under
+        // `hidden = true`; an `Ok(None)` here would be a provider that is
+        // hidden everywhere but on its own socket.
+        None => bail!(
+            "hidden = true, so anon.socks_proxy must be set: this provider's own relay reads, \
+             image fetches and Directory writes have nowhere to leave through (spec §10)"
+        ),
+    }
 }
 
 /// The Directory a config describes: the real one when it names a directory
 /// publisher, and one that publishes nothing when it does not. A provider
 /// with no `publish_url` still serves every route — it is simply not in the
 /// directory.
-fn directory_from_config(config: &ProviderConfig) -> Result<Arc<dyn Directory>> {
+///
+/// `proxy` is `Some` only on a Hidden Provider, and then EVERY relay read
+/// goes out through it — a publisher-less one included, because watching a
+/// primary and resolving an image are reads that name this host to a relay
+/// operator just as a publication would.
+fn directory_from_config(
+    config: &ProviderConfig,
+    proxy: Option<&OutboundProxy>,
+) -> Result<Arc<dyn Directory>> {
     match &config.publish_url {
-        Some(url) => Ok(Arc::new(ConnectorDirectory::new(
-            url.clone(),
-            config.relay_set.clone(),
-        )?)),
-        None => Ok(Arc::new(NullDirectory::new(config.relay_set.clone()))),
+        Some(url) => {
+            let mut directory = ConnectorDirectory::new(url.clone(), config.relay_set.clone())?;
+            if let Some(proxy) = proxy {
+                directory = directory.with_proxy(proxy)?;
+            }
+            Ok(Arc::new(directory))
+        }
+        None => {
+            let mut directory = NullDirectory::new(config.relay_set.clone());
+            if let Some(proxy) = proxy {
+                directory = directory.with_proxy(proxy);
+            }
+            Ok(Arc::new(directory))
+        }
     }
+}
+
+/// The `HiddenService` a config describes: the `anon` control-port adapter
+/// on a Hidden Provider, and none at all on a provider that is not hidden —
+/// which has no daemon, no per-lease addresses and no egress policy, and
+/// never touches the port.
+///
+/// It opens no connection: the daemon is proved reachable once at startup
+/// (`anon_control::refuse_unreachable_control`, from `ProviderService::run`),
+/// so that `toon-provider routes` and every test that builds an `AppState`
+/// need no daemon, and so a provider is still constructible while its
+/// sidecar is coming up.
+fn hidden_service_from_config(config: &ProviderConfig) -> Result<Option<Arc<dyn HiddenService>>> {
+    if !config.hidden {
+        return Ok(None);
+    }
+    Ok(Some(Arc::new(AnonControlService::from_config(config)?)))
 }
 
 /// The app's routes. Separate from `serve` so tests can drive it in-process,

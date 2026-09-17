@@ -40,10 +40,12 @@ use tracing::{error, info, warn};
 
 use super::config::{Listing, MAX_PORTS_PER_WORKLOAD};
 use super::image_policy::{self, ResolvedImage};
+use super::lease_address;
 use super::oci_layout::write_layout_tar;
 use super::persistence::{count_live, persist_leases, LeaseRecord, LeaseState};
 use super::standby::{self, SpawnRoute};
-use crate::compute::{container_name, ContainerConfig, PortMapping};
+use crate::compute::{container_name, ContainerConfig, EgressPolicy, PortMapping};
+use crate::hidden_service::HiddenAddress;
 use crate::nostr::image_events::SpawnImage;
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
@@ -104,6 +106,10 @@ async fn serve(
     let content: SpawnContent = serde_json::from_str(&request.content)
         .map_err(|e| invalid(format!("spawn content: {}", e)))?;
     check_shape(&content)?;
+    // A Hidden Provider with no daemon to make addresses on starts no lease
+    // (spec §10). Before the slot and before the money's work: the free
+    // `availability` route answers the same first (spec §9).
+    lease_address::refuse_without_a_daemon(state)?;
 
     // ── 2. the listing version, and the fit ─────────────────────────────
     let listing = state
@@ -255,6 +261,9 @@ async fn serve(
                 template: content.template.clone(),
                 ssh_port,
                 ports: ports.clone(),
+                // Made below, with the workload, and only on a Hidden
+                // Provider: there is nothing to reach until then.
+                hidden_address: None,
             },
         );
         persist_leases(&leases, &state.config.lease_state_path);
@@ -305,21 +314,25 @@ async fn serve(
         ssh_port,
         ports: &ports,
     };
-    if let Err(e) = fetch_and_start(state, &image, &resolved, launch).await {
-        // Nothing runs and nothing is left on the backend, so there is
-        // nothing to destroy: just give the slot and the id back so the
-        // tenant's next try can succeed. Nothing is refunded (ADR 0003),
-        // which is why `availability` resolves the image for free first —
-        // but a layer that fails only on the full fetch, or a daemon that
-        // refuses the start, can only be found out here.
-        let mut leases = state.leases.lock().await;
-        leases.remove(&id);
-        persist_leases(&leases, &state.config.lease_state_path);
-        return Err(e);
-    }
+    let address = match fetch_and_start(state, &image, &resolved, launch).await {
+        Ok(address) => address,
+        Err(e) => {
+            // Nothing runs and nothing is left on the backend or on the
+            // daemon, so there is nothing to destroy: just give the slot and
+            // the id back so the tenant's next try can succeed. Nothing is
+            // refunded (ADR 0003), which is why `availability` resolves the
+            // image for free first — but a layer that fails only on the full
+            // fetch, or a daemon that refuses the start, can only be found
+            // out here.
+            let mut leases = state.leases.lock().await;
+            leases.remove(&id);
+            persist_leases(&leases, &state.config.lease_state_path);
+            return Err(e);
+        }
+    };
 
     let mut leases = state.leases.lock().await;
-    let Some(expires_at) = mark_running(&mut leases, id) else {
+    let Some((expires_at, access)) = mark_running(&mut leases, id, address, &state.config) else {
         // The lease ended while it was being provisioned — its tenant
         // terminated it, or the sweep reaped it. Whoever ended it
         // destroyed a workload that did not exist yet, so this one is
@@ -330,6 +343,9 @@ async fn serve(
         if let Err(cleanup) = state.backend.delete_container(id).await {
             warn!("could not clean up {}: {}", container_name(id), cleanup);
         }
+        // The ending destroyed the address of a lease that had none on its
+        // record yet, so this one is ours too.
+        lease_address::destroy_unrecorded(state, &content.workload_id).await;
         return Err(ErrorResponse::new(
             ErrorCode::Expired,
             "this lease was ended while its workload was being started",
@@ -340,11 +356,11 @@ async fn serve(
         workload_id: content.workload_id,
         role,
         expires_at,
-        access: Some(Access {
-            host: state.config.public_ip.clone(),
-            ssh_port,
-            ports,
-        }),
+        // Built from the RECORD, by the same rule `status` answers it with
+        // (`LeaseRecord::access_host`): the lease's own `.anyone` address on
+        // a Hidden Provider, the provider's `public_ip` otherwise. The two
+        // answers cannot drift, because there is one rule (spec §6.2, §10).
+        access: Some(access),
     })
 }
 
@@ -367,19 +383,26 @@ pub(super) struct Launch<'a> {
 /// the caller resolved the image first, because a spawn does that under the
 /// lease-table lock and a Takeover does not.
 ///
+/// On a Hidden Provider it also makes the lease's `.anyone` address, just
+/// before the workload starts, and answers it for the caller to record:
+/// ONE place a workload comes into being is one place its address does, so
+/// a spawn and a Takeover's start cannot differ about it (ADR 0010, spec
+/// §10). `None` on a provider that is not hidden, which touches the port
+/// never.
+///
 /// The lease table is NOT touched: the caller owns the record and decides
 /// what a failure means for it — a spawn gives the slot back, a standby that
 /// won keeps its reservation and tries again on the next step. Nothing is
-/// left on the backend after a failure: a container that was created and
-/// did not start is deleted here. A layer no source serves is
-/// `refused_image`; a cache or a daemon with no room, or a start the backend
-/// refused, is `no_capacity`.
+/// left on the backend or on the daemon after a failure: a container that
+/// was created and did not start is deleted here, and an address made for
+/// it is destroyed. A layer no source serves is `refused_image`; a cache or
+/// a daemon with no room, or a start the backend refused, is `no_capacity`.
 pub(super) async fn fetch_and_start(
     state: &AppState,
     image: &SpawnImage,
     resolved: &ResolvedImage,
     launch: Launch<'_>,
-) -> Result<(), ErrorResponse> {
+) -> Result<Option<HiddenAddress>, ErrorResponse> {
     // What the backend is told to run: `<reference>@<digest>` for the form
     // the backend pulls itself, or the id the backend gave the image this
     // provider fetched, verified and loaded.
@@ -393,6 +416,17 @@ pub(super) async fn fetch_and_start(
         })?,
     };
 
+    // BEFORE the workload: a hidden lease whose address the daemon refuses
+    // must not leave a container running that no tenant can reach.
+    let address = lease_address::create(
+        state,
+        &launch.content.workload_id,
+        launch.ssh_port,
+        launch.ports,
+    )
+    .await?;
+
+    let egress = egress_policy(state, &launch.content.workload_id)?;
     let config = container_config(
         launch.id,
         launch.listing,
@@ -400,16 +434,19 @@ pub(super) async fn fetch_and_start(
         &run_image,
         launch.ssh_port,
         launch.ports,
+        egress,
     );
     let started = match state.backend.create_container(&config).await {
         Ok(_) => state.backend.start_container(launch.id).await,
         Err(e) => Err(e),
     };
     match started {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(address),
         Err(e) => {
             // Leave no half-made workload behind: the caller may retry, and
-            // a container by this name would make the retry fail too.
+            // a container by this name would make the retry fail too. The
+            // address goes with it — the caller has not recorded it, so
+            // nothing else would ever ask for it again.
             error!("starting workload {} failed: {}", config.name, e);
             if let Err(cleanup) = state.backend.delete_container(launch.id).await {
                 warn!(
@@ -417,6 +454,7 @@ pub(super) async fn fetch_and_start(
                     config.name, cleanup
                 );
             }
+            lease_address::destroy_unrecorded(state, &launch.content.workload_id).await;
             Err(ErrorResponse::new(
                 ErrorCode::NoCapacity,
                 format!("the workload could not be started: {}", e),
@@ -505,19 +543,29 @@ async fn free_workload_id(state: &AppState, leases: &HashMap<u32, LeaseRecord>) 
     None
 }
 
-/// Promote a lease whose workload has started, and answer its expiry.
+/// Promote a lease whose workload has started, record the `.anyone` address
+/// it was started behind, and answer its expiry and the access details the
+/// tenant reaches it at.
 ///
 /// `None` when the lease is no longer the Provisioning one this spawn
 /// inserted: a Termination or a sweep may end a lease between the insert and
 /// the start, and an ended lease must never be brought back to Running — its
-/// workload has already been destroyed, or is about to be.
-fn mark_running(leases: &mut HashMap<u32, LeaseRecord>, id: u32) -> Option<u64> {
+/// workload has already been destroyed, or is about to be. The address is
+/// then not recorded either, and the caller destroys it with the workload.
+fn mark_running(
+    leases: &mut HashMap<u32, LeaseRecord>,
+    id: u32,
+    address: Option<HiddenAddress>,
+    config: &super::config::ProviderConfig,
+) -> Option<(u64, Access)> {
     let lease = leases.get_mut(&id)?;
     if lease.state != LeaseState::Provisioning {
         return None;
     }
     lease.state = LeaseState::Running;
-    Some(lease.expires_at)
+    lease.hidden_address = address;
+    let host = lease.access_host(config).unwrap_or_default().to_string();
+    Some((lease.expires_at, lease.access(&host)))
 }
 
 /// The shape checks that need no listing: the workload id, the SSH key and
@@ -582,6 +630,30 @@ fn looks_like_ssh_public_key(key: &str) -> bool {
     known && blob.len() >= 16
 }
 
+/// The egress policy a workload is attached with (spec §10): what the
+/// `HiddenService` port answers for it on a Hidden Provider, `None` on a
+/// provider that is not hidden — today's networking, untouched. A hidden
+/// provider with no `HiddenService` installed has nothing to confine a
+/// workload with, so it starts none: `no_capacity`, since the request was
+/// fine and it is this provider that cannot serve it.
+fn egress_policy(
+    state: &AppState,
+    workload_id: &str,
+) -> Result<Option<EgressPolicy>, ErrorResponse> {
+    if !state.config.hidden {
+        return Ok(None);
+    }
+    match &state.hidden_service {
+        Some(hidden_service) => Ok(Some(hidden_service.egress_for(workload_id))),
+        None => Err(ErrorResponse::new(
+            ErrorCode::NoCapacity,
+            "this Hidden Provider has no HiddenService to confine a workload's egress with, \
+             so it starts none",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn container_config(
     id: u32,
     listing: &Listing,
@@ -589,6 +661,7 @@ fn container_config(
     pull: &str,
     ssh_port: u16,
     ports: &[PortAccess],
+    egress: Option<EgressPolicy>,
 ) -> ContainerConfig {
     let (entrypoint, leading_args) = match &content.entrypoint {
         Some(e) => (e.first().cloned(), e[1..].to_vec()),
@@ -622,6 +695,7 @@ fn container_config(
             .filter(|gb| *gb > 0)
             .map(|_| VOLUME_MOUNT_PATH.to_string()),
         capabilities: listing.capabilities.clone(),
+        egress,
     }
 }
 

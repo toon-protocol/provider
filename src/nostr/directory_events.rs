@@ -53,7 +53,9 @@ pub struct ProfileContent {
     pub settlement: Vec<Settlement>,
     /// `shared-kernel` | `dedicated-host`.
     pub isolation: String,
-    /// Hidden Provider declaration (spec §10). Always false in Milestone 1.
+    /// Hidden Provider declaration (spec §10): a self-assertion nobody
+    /// verifies, and one that hides where the provider is, not that it was
+    /// paid.
     pub hidden: bool,
     /// The host tenants connect workloads to. MUST be absent when `hidden`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,6 +111,13 @@ fn label_value_tag(name: &str, value: &str) -> Result<Tag> {
     Ok(Tag::parse(["l", &format!("{name}:{value}"), TOON_LABEL])?)
 }
 
+/// The label every Listing of a Hidden Provider carries (spec §4.2, §4.4,
+/// §10): `["l", "hidden:true", "toon.network"]`. Present exactly when the
+/// Profile declares `hidden: true`, and never `hidden:false` — a tenant
+/// filters for hidden compute with `#l = hidden:true` and against it by its
+/// absence, so a false value would be a second way to say nothing.
+pub const HIDDEN_LABEL: &str = "hidden:true";
+
 /// The Provider Profile. Replaceable: one per provider, and republishing it
 /// is how a provider changes its connector, its Relay Set or its cadence.
 pub fn profile_event(config: &ProviderConfig, keys: &Keys, now: u64) -> Result<Event> {
@@ -131,10 +140,11 @@ pub fn profile_content(config: &ProviderConfig) -> ProfileContent {
         relays: config.relay_set.clone(),
         settlement: config.settlement.clone(),
         isolation: config.isolation.clone(),
-        // Milestone 1 has no Hidden Provider (spec §10 is a follow-up), so
-        // this is a constant rather than a config key nobody may set to true.
-        hidden: false,
-        host: Some(config.public_ip.clone()),
+        hidden: config.hidden,
+        // `validate` requires `public_ip` exactly when the provider is not
+        // hidden, so this is the host of a public provider and NO KEY AT ALL
+        // on a hidden one (spec §4.1: `host` MUST be absent when `hidden`).
+        host: config.public_ip.clone(),
         liveness_cadence_s: config.liveness_cadence_s,
     }
 }
@@ -164,6 +174,9 @@ pub fn listing_event(
         label_value_tag("isolation", &config.isolation)?,
         label_value_tag("arch", &listing.arch)?,
     ];
+    if config.hidden {
+        tags.push(Tag::parse(["l", HIDDEN_LABEL, TOON_LABEL])?);
+    }
     if let Some(gpu) = &listing.resources.gpu {
         tags.push(label_value_tag("gpu", gpu)?);
     }

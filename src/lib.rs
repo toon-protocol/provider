@@ -5,25 +5,36 @@
 //! its storage (Blossom) removed. See `NOTICE` for attribution and the
 //! `TOON_Network` repository for the spec, ADRs and glossary.
 
+pub mod anon_control;
 pub mod capabilities;
 pub mod clock;
 pub mod compute;
 pub mod directory;
 pub mod docker;
+pub mod hidden_service;
 pub mod nostr;
+pub mod outbound_proxy;
 pub mod provider;
 pub mod provider_http;
 pub mod reputation;
 
+pub use anon_control::AnonControlService;
 pub use clock::{system_clock, Clock, SystemClock};
-pub use compute::{ComputeBackend, ContainerConfig, ContainerStatus, NodeStatus, PortMapping};
+pub use compute::{
+    ComputeBackend, ContainerConfig, ContainerStatus, EgressPolicy, NodeStatus, PortMapping,
+};
 pub use directory::{
     ConnectorDirectory, Directory, LivenessState, NullDirectory, PublishReport, RelayLiveness,
 };
 pub use docker::DockerBackend;
+pub use hidden_service::{
+    is_anyone_host, AddressPort, HiddenAddress, HiddenService, ANYONE_SUFFIX,
+};
+pub use outbound_proxy::{http_client, is_private_url, OutboundProxy};
 pub use provider::persisted_leases;
 pub use provider::{
-    load_config, render_routes, BackendKind, LeaseEnd, LeaseRecord, LeaseState, Listing,
-    ProviderConfig, ProviderService, SWEEP_INTERVAL_SECS, WATCHDOG_INTERVAL_SECS,
+    load_config, render_routes, AnonConfig, AnonControl, BackendKind, LeaseEnd, LeaseRecord,
+    LeaseState, Listing, ProviderConfig, ProviderService, SWEEP_INTERVAL_SECS,
+    WATCHDOG_INTERVAL_SECS,
 };
 pub use provider_http::{operator_router, router, AppState};

@@ -1,0 +1,69 @@
+{
+  "content": {
+    "arch": "amd64",
+    "capabilities": [
+      "x-fixture"
+    ],
+    "lease_interval_s": 3600,
+    "price": 1000,
+    "resources": {
+      "cpu_millicores": 500,
+      "memory_mb": 256,
+      "storage_gb": 4
+    },
+    "version": 1
+  },
+  "event": {
+    "content": "{\"version\":1,\"resources\":{\"cpu_millicores\":500,\"memory_mb\":256,\"storage_gb\":4},\"arch\":\"amd64\",\"lease_interval_s\":3600,\"price\":1000,\"capabilities\":[\"x-fixture\"]}",
+    "created_at": 1700000000,
+    "id": "d8f7c29fc1cf33bd268b49722b420cac75bad8a8062e09281c7d101272428a86",
+    "kind": 30432,
+    "pubkey": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+    "sig": "01c587f05ca9fffbf2223905586f77d2b6c5014d4c0dac69e2a779ae3bbd3ef730a0f33470045157ce57daf803ec97030658f94dcb334cbf7cee611c375cabfc",
+    "tags": [
+      [
+        "d",
+        "basic"
+      ],
+      [
+        "a",
+        "10432:466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27:"
+      ],
+      [
+        "L",
+        "toon.network"
+      ],
+      [
+        "l",
+        "isolation:shared-kernel",
+        "toon.network"
+      ],
+      [
+        "l",
+        "arch:amd64",
+        "toon.network"
+      ],
+      [
+        "l",
+        "hidden:true",
+        "toon.network"
+      ],
+      [
+        "t",
+        "x-fixture"
+      ],
+      [
+        "g",
+        "u4pruydqqvj"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "listing.hidden",
+    "description": "The `basic` Listing of the HIDDEN PROVIDER of `directory.profile.hidden` (spec §4.2, §10): `directory.listing` plus one tag, `[\"l\", \"hidden:true\", \"toon.network\"]`, beside the isolation and arch labels, so a tenant can filter for or against hidden compute by tag alone (`#l = hidden:true`). Present on every Listing of a hidden provider and on no Listing of any other; never `hidden:false`. Content is unchanged, and so are the routes it generates.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "directory"
+  },
+  "kind_name": "K_LISTING",
+  "nip01_serialization": "[0,\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\",1700000000,30432,[[\"d\",\"basic\"],[\"a\",\"10432:466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27:\"],[\"L\",\"toon.network\"],[\"l\",\"isolation:shared-kernel\",\"toon.network\"],[\"l\",\"arch:amd64\",\"toon.network\"],[\"l\",\"hidden:true\",\"toon.network\"],[\"t\",\"x-fixture\"],[\"g\",\"u4pruydqqvj\"]],\"{\\\"version\\\":1,\\\"resources\\\":{\\\"cpu_millicores\\\":500,\\\"memory_mb\\\":256,\\\"storage_gb\\\":4},\\\"arch\\\":\\\"amd64\\\",\\\"lease_interval_s\\\":3600,\\\"price\\\":1000,\\\"capabilities\\\":[\\\"x-fixture\\\"]}\"]"
+}

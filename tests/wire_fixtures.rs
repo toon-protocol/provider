@@ -34,9 +34,15 @@ use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use common::harness::post;
-use common::{sha256_hex, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory};
-use toon_provider::nostr::directory_events::{takeover_event, ProfileContent, Settlement};
+use common::harness::{hidden_config, post, socks_proxy_of, HIDDEN_CONNECTOR_URL};
+use common::socks::SocksStub;
+use common::{
+    sha256_hex, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory,
+    FakeHiddenService,
+};
+use toon_provider::nostr::directory_events::{
+    takeover_event, ProfileContent, Settlement, HIDDEN_LABEL,
+};
 use toon_provider::nostr::image_events::{
     blob_record_event, image_entry_event, template_event, BlobPart, BlobRecordContent, BlobSource,
     EntryBlob, ImageEntryContent, TemplateContent, TemplateImage,
@@ -384,7 +390,7 @@ fn config(
     ProviderConfig {
         provider_name: PROVIDER_NAME.to_string(),
         ilp_address: ILP_ADDRESS.to_string(),
-        public_ip: PUBLIC_IP.to_string(),
+        public_ip: Some(PUBLIC_IP.to_string()),
         nostr_private_key: PROVIDER_SECRET.to_string(),
         relay_set: vec![RELAY.to_string()],
         connector_url: CONNECTOR_URL.to_string(),
@@ -469,6 +475,17 @@ impl Fixture {
 }
 
 async fn fixture_provider(policy: ImagePolicyConfig, registry: MockServer) -> Fixture {
+    fixture_provider_configured(policy, registry, |config| config).await
+}
+
+/// `fixture_provider` with the config changed on its way in — how the
+/// Hidden Provider fixtures are made: the same keys, listings and world,
+/// with `hidden = true` and everything spec §10 requires beside it.
+async fn fixture_provider_configured(
+    policy: ImagePolicyConfig,
+    registry: MockServer,
+    adjust: impl FnOnce(ProviderConfig) -> ProviderConfig,
+) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let state_path = dir
         .keep()
@@ -489,15 +506,19 @@ async fn fixture_provider(policy: ImagePolicyConfig, registry: MockServer) -> Fi
     mount_image_bytes(&gateway, &registry).await;
     let clock = FakeClock::at(NOW);
     let service = ProviderService::with_backend_clock_and_directory(
-        ProviderConfig {
+        adjust(ProviderConfig {
             gateway_url_pattern: Some(format!("{}/raw/{{txid}}", gateway.uri())),
             ..config(state_path, Some(registry.uri()), policy)
-        },
+        }),
         FakeBackend::new(),
         clock.clone(),
         directory.clone(),
     )
-    .unwrap();
+    .unwrap()
+    // Installed on every fixture provider, hidden or not: a hidden one's
+    // leases get their `.anyone` addresses from it, and a public one's
+    // fixtures show that it was never asked (`spawn.ok` carries an IP).
+    .with_hidden_service(FakeHiddenService::new());
     Fixture {
         app: router(service.app_state()),
         service,
@@ -836,6 +857,152 @@ async fn one_directory_event_per_kind() {
             &takeover,
         ),
     );
+}
+
+/// The Hidden Provider's two directory shapes (spec §4.1, §4.2, §10;
+/// TOON_Network #38): the same fixture provider — same key, same listings,
+/// same relay — configured with `hidden = true`, its connector at an
+/// `.anyone` host and every `[anon]` key the startup gate requires. What
+/// changes on the wire is exactly two things: the Profile says `hidden:
+/// true` and carries no `host` key at all, and every Listing carries the
+/// `hidden:true` label. Nothing else in either event moves.
+#[tokio::test]
+async fn a_hidden_providers_profile_and_listing() {
+    let f = fixture_provider_configured(
+        ImagePolicyConfig::default(),
+        stub_registry().await,
+        hidden_config,
+    )
+    .await;
+    f.service.publish_directory().await.unwrap();
+
+    let profiles = f.directory.of_kind(K_PROFILE);
+    assert_eq!(profiles.len(), 1);
+    let profile = with_reproducible_sig(&profiles[0], &f.provider);
+    let content: ProfileContent = serde_json::from_str(&profile.content).unwrap();
+    assert!(content.hidden);
+    assert_eq!(content.host, None);
+    assert_eq!(content.connector_url, HIDDEN_CONNECTOR_URL);
+    golden(
+        "directory.profile.hidden.json",
+        event_fixture(
+            "directory",
+            "profile.hidden",
+            "The Provider Profile of a HIDDEN PROVIDER (spec §4.1, §10): `hidden: true`, NO \
+             `host` key at all, and a `connector_url` at an `.anyone` host — the only way the \
+             connector is reached. Everything else is `directory.profile`'s: same key, same \
+             sealing key, same Relay Set, same settlement. `hidden` is a self-assertion that \
+             nothing verifies, and it hides where the provider is, not that it was paid: \
+             payments stay public on chain (ADR 0008).",
+            "K_PROFILE",
+            &profile,
+        ),
+    );
+
+    let listings = f.directory.of_kind(K_LISTING);
+    assert_eq!(listings.len(), 3);
+    for event in &listings {
+        assert!(
+            event
+                .tags
+                .iter()
+                .any(|t| t.clone().to_vec() == ["l", HIDDEN_LABEL, TOON_LABEL]),
+            "every Listing of a hidden provider carries the label"
+        );
+    }
+    golden(
+        "directory.listing.hidden.json",
+        event_fixture(
+            "directory",
+            "listing.hidden",
+            "The `basic` Listing of the HIDDEN PROVIDER of `directory.profile.hidden` (spec \
+             §4.2, §10): `directory.listing` plus one tag, `[\"l\", \"hidden:true\", \
+             \"toon.network\"]`, beside the isolation and arch labels, so a tenant can filter \
+             for or against hidden compute by tag alone (`#l = hidden:true`). Present on every \
+             Listing of a hidden provider and on no Listing of any other; never `hidden:false`. \
+             Content is unchanged, and so are the routes it generates.",
+            "K_LISTING",
+            &with_reproducible_sig(&listings[0], &f.provider),
+        ),
+    );
+}
+
+/// The Hidden Provider's LEASE (spec §6.2, §6.5, §10; TOON_Network #39):
+/// the same paid spawn `spawn.ok` shows, on the same listing, for the same
+/// workload, bought from the same fixture provider configured with
+/// `hidden = true`. One thing changes, and it is the whole point: `access`
+/// carries the lease's OWN `.anyone` address in place of the provider's IP,
+/// and `status` answers the same one. The ports do not move — a tenant
+/// dials `ssh_port` and each `host_port` on the address exactly as it would
+/// on an IP — and no IP appears anywhere in either answer.
+///
+/// The address here is the fake `HiddenService`'s, derived from the
+/// workload id so the fixture is reproducible; a real one is 56 base32
+/// characters the daemon chooses.
+#[tokio::test]
+async fn a_hidden_providers_lease_is_reached_at_its_own_anyone_address() {
+    // A hidden provider's image fetch leaves through `anon.socks_proxy`
+    // (§10), so the stub registry is reached through a SOCKS stub that
+    // dials the registry's IP literal as given.
+    let socks = SocksStub::start(&[]).await;
+    let f = fixture_provider_configured(
+        ImagePolicyConfig::default(),
+        stub_registry().await,
+        |config| socks_proxy_of(hidden_config(config), &socks.url()),
+    )
+    .await;
+    let aa = 0xaa;
+    let host = FakeHiddenService::address_for(&workload_id(aa));
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "spawn",
+            "ok.hidden",
+            "The paid spawn of `spawn.ok`, on a HIDDEN PROVIDER (spec §6.2, §10): the same \
+             request, the same listing and the same workload id, answered with the lease's \
+             OWN `.anyone` address as `access.host` instead of an IP. The provider published \
+             no host (`directory.profile.hidden`), so this address — created for this lease \
+             before its workload started, mapping its SSH forward and every port it published \
+             — is the only way to reach it; a tenant dials it through a `socks5h://` proxy, on \
+             the SAME `ssh_port` and `host_port`s a public provider would have given. It is \
+             destroyed when the lease ends, and re-established at the same host if the \
+             provider restarts. No IP appears anywhere in the answer.",
+        ),
+        &route("basic.v1.spawn"),
+        "/listings/basic/v1/spawn",
+        envelope(&f.spawn_request(aa, TTL)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["access"]["host"], host);
+    assert!(toon_provider::is_anyone_host(&host));
+    // The ports are `spawn.ok`'s, unchanged: hiding moves the host, not the
+    // numbers a tenant dials.
+    assert_eq!(response["access"]["ssh_port"], 40000);
+    assert_eq!(response["access"]["ports"][0]["host_port"], 41000);
+    golden("spawn.ok.hidden.json", doc);
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "status",
+            "running.hidden",
+            "Status of that hidden lease (spec §6.5, §10): `status.running` with the same \
+             `.anyone` host its spawn answered. A provider restarted on its lease table \
+             re-establishes each live lease's address from the key it stored, so this answer \
+             does not change across a restart; a lease whose key was not kept is given a fresh \
+             address, and this is where its tenant reads it.",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.about_request(&f.tenant, "status", aa, TTL)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["state"], "running");
+    assert_eq!(response["access"]["host"], host);
+    golden("status.running.hidden.json", doc);
 }
 
 #[tokio::test]

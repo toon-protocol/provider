@@ -16,6 +16,7 @@ pub use crate::nostr::wire::{LeaseEnd, LeaseState};
 use super::settle::TakeoverSettlement;
 use super::standby::StandbySet;
 use super::watchdog::TakeoverAnnouncement;
+use crate::hidden_service::HiddenAddress;
 use crate::nostr::wire::{Access, PortAccess, Role, SpawnContent};
 
 /// How many live (`Provisioning`, `Reserved` or `Running`) leases of
@@ -139,6 +140,22 @@ pub struct LeaseRecord {
     pub ssh_port: u16,
     #[serde(default)]
     pub ports: Vec<PortAccess>,
+
+    /// The lease's OWN `.anyone` address, on a Hidden Provider: the host a
+    /// tenant dials in place of an IP, and the key that host is derived from
+    /// (spec §10, ADR 0008). `None` on every lease of a provider that is not
+    /// hidden, and on a Warm Standby's reservation until a Takeover starts
+    /// its workload — there is nowhere to reach until then.
+    ///
+    /// Persisted because an address made over the daemon's control port
+    /// lives only as long as the daemon: a provider restarted on this file
+    /// hands the KEY back (`HiddenService::restore_address`) so every live
+    /// lease is reachable where its tenant last found it, rather than at a
+    /// new address the tenant was never told about. Cleared when the daemon
+    /// confirms the address destroyed, which is part of a lease's ending
+    /// (`cleanup::destroy_workload`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_address: Option<HiddenAddress>,
 }
 
 impl LeaseRecord {
@@ -148,6 +165,22 @@ impl LeaseRecord {
             host: host.to_string(),
             ssh_port: self.ssh_port,
             ports: self.ports.clone(),
+        }
+    }
+
+    /// The host this lease is reached at: its own `.anyone` address when it
+    /// has one, and otherwise the provider's `public_ip`.
+    ///
+    /// The two are exclusive by construction — a Hidden Provider has no
+    /// `public_ip` (`ProviderConfig::access_host` is `None` there) and a
+    /// provider that is not hidden gives no lease an address — so this is
+    /// the whole of what `access.host` may say on either kind of provider
+    /// (spec §6.2, §10). `None` only while a lease has neither: a hidden
+    /// lease whose address is gone, which is a lease with nowhere to reach.
+    pub fn access_host<'a>(&'a self, config: &'a super::ProviderConfig) -> Option<&'a str> {
+        match &self.hidden_address {
+            Some(address) => Some(address.host.as_str()),
+            None => config.access_host(),
         }
     }
 }
@@ -254,6 +287,7 @@ mod tests {
                 container_port: 443,
                 host_port: 41000,
             }],
+            hidden_address: None,
         }
     }
 
@@ -343,6 +377,7 @@ mod tests {
         assert_eq!(loaded[&2000].takeover, None);
         assert_eq!(loaded[&2000].settled, None);
         assert!(!loaded[&2000].taken_over);
+        assert_eq!(loaded[&2000].hidden_address, None);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -410,6 +445,26 @@ mod tests {
         persist_leases(&HashMap::from([(2000, announced.clone())]), &p);
 
         assert_eq!(load_leases(&p)[&2000], announced);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_hidden_leases_address_and_key_survive_a_restart() {
+        // What a Hidden Provider cannot re-derive after a restart: the
+        // `.anyone` host its tenant was handed, and the key that host comes
+        // from. Without the key the daemon would answer a DIFFERENT address
+        // and the tenant would be left dialling one nothing answers on
+        // (spec §10).
+        let p = temp_path("hidden-address");
+        let mut hidden = lease(2000, 9999);
+        hidden.hidden_address = Some(HiddenAddress {
+            host: "k".repeat(56) + ".anyone",
+            key: Some("ED25519-V3:fake-aaaaaaaaaaaaaaaa".to_string()),
+        });
+        persist_leases(&HashMap::from([(2000, hidden.clone())]), &p);
+
+        let loaded = load_leases(&p);
+        assert_eq!(loaded[&2000], hidden);
         let _ = std::fs::remove_file(&p);
     }
 

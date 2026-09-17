@@ -119,6 +119,252 @@ parts:
   `http://127.0.0.1:8090`): the loopback-only operator endpoint `toon-provider
   evict` talks to. See [Eviction](#eviction) — **this port must never be
   exposed off the host the provider runs on.**
+- `public_ip`: the host a lease's access details name. Required unless the
+  provider is hidden, and refused beside `hidden = true`.
+- `hidden` and `[anon]`: the Hidden Provider declaration and everything it
+  needs from its `anon` daemon — see [Hidden Provider](#hidden-provider).
+
+## Hidden Provider
+
+A provider that sets `hidden = true` (spec §10, ADR 0008) publishes a
+Profile with `hidden: true` and **no `host`**, and every Listing it
+publishes carries `["l", "hidden:true", "toon.network"]` beside its
+isolation and arch labels, so a tenant can filter for or against hidden
+compute by tag alone. The flag is a **self-assertion**: nothing outside the
+provider verifies it, and it hides where the provider is, not that it was
+paid — payments stay public on chain.
+
+Because it is a claim, the app refuses to start — and `load_config`
+refuses to load, so `toon-provider routes` refuses too — unless every
+hiding condition is configured. Each missing one is its own refusal naming
+it:
+
+| Condition (ADR 0008) | Config | Refused when |
+|---|---|---|
+| No published host | `public_ip` absent | `public_ip` is set beside `hidden = true` |
+| Connector reachable only at `.anyone` | `connector_url` | its host is not one base32 label before `.anyone` (what the daemon writes) |
+| Per-lease `.anyone` addresses | `[anon.control]` — `addr`, and `cookie_file` **or** `password` | missing, not `host:port`, neither or both authentications |
+| The provider's own outbound through `anon` | `anon.socks_proxy` | missing, or not `socks5h://<host>:<port>` |
+| All workload egress through `anon`, direct egress dropped | `[anon.egress]` — `network`, `gateway` | missing, or `gateway` not an IP address |
+| Its own settlement RPC | `anon.settlement_rpc_url` | missing, or its host is public (below) |
+
+**The settlement RPC rule.** The URL's host must be loopback, a private
+range (RFC 1918 `10/8`, `172.16/12`, `192.168/16`; link-local; IPv6 `::1`,
+ULA `fc00::/7`, `fe80::/10`), or a hostname whose DNS resolution yields
+**only** such addresses; `localhost` is loopback by definition. A public
+address anywhere in the answer — `https://api.mainnet-beta.solana.com`
+resolved, or `8.8.8.8` written down — is refused, because an unproxied read
+of a public RPC links the operator's network location to its on-chain
+identity. A hostname that **does not resolve where the config is loaded** is
+accepted **with a warning** at load: the sandbox's chain hostnames (`anvil`,
+`solana-validator`) resolve only inside its compose network, and an operator
+rendering the route table on the host with `toon-provider routes` must not
+be told a config is invalid that is valid where it runs. The **running**
+provider checks the name again at startup and refuses to start if it still
+does not resolve there — a hidden provider that cannot show its RPC is
+self-hosted does not publish `hidden: true`. Without `hidden = true` none of
+the `[anon]` keys is required and the RPC is not gated; keys that are
+present are still checked for shape, so a typo fails where it was written.
+
+### A hidden lease's own address
+
+Every lease on a Hidden Provider is reached at a `.anyone` address of its
+own. A paid spawn asks the `HiddenService` port
+(`src/hidden_service.rs`) for one that maps the lease's SSH forward and
+every port it published — before the workload starts, so a workload behind
+an address the daemon refused never runs — and `access.host` is that
+address instead of an IP. `status` answers the same one, the ports do not
+move, and a tenant dials them through its `socks5h://` proxy exactly as it
+would on an IP. A Takeover winner's start makes its address the same way
+and by the same call; a Warm Standby's reservation has none, because
+nothing is running to reach.
+
+The address and the KEY it is derived from are stored on the lease record,
+so a restart of the provider re-establishes each live lease's address
+(`restore_address`) rather than publishing a new one the tenant was never
+told about. A lease whose key the implementation could not give back is
+given a fresh address instead of being left unreachable, and `status` is
+where its tenant reads it. A restore the daemon REFUSES — most often
+because the provider restarted and the daemon did not, so it is still
+serving that address and will not add the key twice — takes the address off
+the record: `status` then answers no `access` at all, which is the truth,
+rather than a host this provider cannot account for. Restarting the daemon
+is the fix, and the next restart gives the lease a fresh address.
+
+Every ending destroys the address: expiry, termination and eviction all go
+through the same `end_lease`, and the one teardown path below it destroys
+the workload and the address together. A destroy the daemon refuses leaves
+the lease not-destroyed and the next sweep tries again, exactly as a
+container that would not stop is retried. A primary that stopped its own
+workload under the self-stop rule keeps its address — stopping is not
+ending.
+
+A running Hidden Provider always has a daemon to ask: the config gate
+refuses `hidden = true` without `[anon.control]`, and startup refuses a
+control port it cannot authenticate to. The `no_capacity` refusal a spawn
+and `availability` answer when the service is somehow absent is a guard,
+not a state an operator can reach. The Profile, the Listings and Liveness
+are published as usual either way.
+
+**Driving the daemon.** `src/anon_control.rs` is the real `HiddenService`:
+it speaks the daemon's control protocol over `[anon.control].addr`, which is
+Tor's, because `anon` v0.4.10.2 is. Per address it sends `PROTOCOLINFO 1`,
+then `AUTHENTICATE <hex of the cookie file>` (or `AUTHENTICATE "<password>"`),
+then
+
+```
+ADD_ONION NEW:ED25519-V3 Flags=Detach Port=40000,127.0.0.1:40000 Port=41000,…
+```
+
+— one `Port=` per lease port, each mapped to `anon.forward_host` — and reads
+`250-ServiceID=` as the lease's `<id>.anyone` host and `250-PrivateKey=` as
+the key that IS that address. `Flags=Detach` is what makes the address
+outlive the control connection; without it the daemon would destroy it the
+moment the command's connection closed. `restore_address` sends the same
+command with the stored key in place of `NEW:ED25519-V3` and gets the same
+host back, which is how a restarted provider reaches its live leases where
+their tenants last found them — and how it re-learns the service id, since
+the lease record keeps the key and not the id. `destroy_address` sends
+`DEL_ONION <service id>`; a `552` (the daemon has no such service) is
+success, because the address being gone is what was asked for.
+
+A connection is opened, authenticated, used and dropped per call — detached
+services make that free, and it leaves no reconnect path to get wrong.
+Authentication is plain `COOKIE`, not `SAFECOOKIE`: the daemon offers both
+whenever `CookieAuthentication 1` is set, and anyone who can read the cookie
+file could speak either. **What the daemon's `anonrc` must carry** is
+therefore `ControlPort <port>` (it defaults to `0`) and either
+`CookieAuthentication 1` with a `CookieAuthFile` this process can read — in
+compose, the daemon's data directory mounted into the provider's container,
+plus `CookieAuthFileGroupReadable 1` when the two run as different users — or
+a `HashedControlPassword`. The provider connects and authenticates **once at
+startup**, before it serves or publishes anything, and refuses to start with
+a message naming the control endpoint if it cannot: a provider that cannot
+create addresses must not advertise itself as one that can, and finding out
+at the first paid spawn would mean refusing a tenant who has already paid.
+
+`cargo test --test anon_control` drives all of this against an in-process
+stub control port, command by command. One test in that file is `#[ignore]`
+and runs the create/restore/destroy cycle against a **real** daemon:
+
+```sh
+TOON_ANON_CONTROL=127.0.0.1:9051 \
+  TOON_ANON_COOKIE=/var/lib/anon/control_auth_cookie \
+  cargo test --test anon_control -- --ignored
+```
+
+(or `TOON_ANON_PASSWORD` instead of the cookie). With none of them set it
+prints why and passes, exactly as the Docker-only tests do on a machine with
+no Docker. The sandbox's hidden provider daemon (`anon-hs`, under the `hs`
+profile) answers it at `172.30.1.2:9051` with the cookie the sandbox mounts
+at `/var/lib/anon/control/control_auth_cookie`; see the sandbox README §6.8.
+
+### The provider's own outbound
+
+Hiding the workloads is not enough if the process itself dials from its real
+address. With `hidden = true` **every connection this provider opens for
+itself** leaves through `anon.socks_proxy`:
+
+| What | Through |
+|---|---|
+| Relay websockets — Liveness watching, Profile lookups, Takeover and Blob Record queries | the nostr client's SOCKS connection mode, for **every** relay and not only `.anyone` ones |
+| The TOON store gateway, upstream OCI registries, and the **anonymous pull-token exchange** a registry's 401 sends it to | one proxied HTTP client, shared by all three |
+| The publish request to the directory publisher | the same proxy — unless the publisher is on this host or its own private network, which is dialled directly |
+
+The scheme is `socks5h`, never `socks5`, and a config that says otherwise is
+refused at startup naming the key: the trailing `h` is what makes the *proxy*
+resolve the destination's name. Under plain `socks5` this host resolves a
+relay's — or an `.anyone` address's — name first, and that lookup is exactly
+what hiding is for. The proxy's own host is the one name resolved here, once,
+at startup; a proxy that does not resolve there is a refusal to start, because
+a hidden provider that cannot reach its daemon must not carry on publishing
+from its real address.
+
+A **near publisher** is the one direct dial, and it hides nothing: a publisher
+on loopback, or one container over on a private network (the sandbox's
+`directory-publisher-hs`), is reached by a packet that crosses nothing anyone
+outside can watch, and `anon` builds no circuit to such an address in any
+case. The test is the one the settlement RPC uses — loopback, a private or
+link-local range, or a name resolving only to those — so an operator has one
+notion of "near" to hold. The hop that does leave is the publisher's own, to
+the connector that sells the relay write, so every publish request from a
+hidden provider **carries the proxy** (`"proxy": "socks5h://…"` beside `event`
+and `relays`), near publisher or not, and the publisher dials through it for
+any host.
+See [`tools/publisher/README.md`](tools/publisher/README.md). A provider that
+is not hidden sends no `proxy` field and opens every connection directly,
+exactly as before.
+
+### Workload egress on a Hidden Provider
+
+A hidden lease's workload has **no network path except the `anon`
+egress**, and the policy is enforced by the kernel — routing and Docker's
+isolation of an internal network — never by an environment variable or a
+proxy setting an image could ignore. On every create of a hidden lease the
+provider hands the Docker backend the `EgressPolicy` its `HiddenService`
+answers (`egress_for`; the configured `[anon.egress]`), and the backend
+builds the lease from four objects instead of one (`src/docker.rs` has the
+full account and the two Docker facts that decide the shape):
+
+- **`toon-<id>-egress`**, the *namespace owner*: a small container on the
+  egress network — `[anon.egress].network`, which must be **internal** —
+  with the gateway as its DNS and `NET_ADMIN` as its only privilege, spent
+  once on `ip route replace default via <gateway>`; then it sleeps. It is
+  the provider's, running no tenant code.
+- **`toon-<id>`**, the workload, joins that namespace (`--network
+  container:`). It has no network of its own — never the default bridge,
+  never the provider's network — so its routing table is the owner's: the
+  egress subnet on-link and everything else via the gateway. It holds no
+  `NET_ADMIN`, so it can neither remove that route nor add one. A workload
+  that crashes and is restarted comes back *into* the same namespace, route
+  intact; a container on any non-internal network would instead get a
+  default route through the host back every time its namespace was made.
+- **`toon-<id>-ingress`**, the *forwarder*: Docker publishes no ports for a
+  container that is on internal networks only, so this one holds them — on
+  the provider's ordinary network with the lease's SSH forward and every
+  TCP port **published on the host at the same numbers a public lease would
+  use**, and on the egress network beside the owner, forwarding each to the
+  workload's container port (BusyBox `nc`, one listener per port, the owner
+  resolved by name per connection). The per-lease `.anyone` address is
+  forwarded to those host ports as for any lease. UDP ports are not
+  forwarded: a hidden-service address cannot carry them. Nothing on the
+  egress network can route *through* the forwarder.
+- The lease's data volume, as before.
+
+A `docker` lease that is hidden gets the same treatment: its `toon-<id>-net`
+is created `--internal`, and the `dind` sidecar is on the egress network too
+with the gateway as its DNS and its default route (set by its own command,
+first thing, before the daemon starts), so nested pulls and everything a
+nested container does leave through `anon` as §4.4 requires; the owner is
+on the lease's network as well, so the workload still finds the sidecar as
+`docker`.
+
+Both sidecars run one image, `alpine:3.20` pinned by digest
+(`toon_provider::docker::HIDDEN_SIDECAR_IMAGE`); pre-pull it or the first
+hidden lease pays for it. `ip route`, `ip addr` and a dial are how a tenant
+can check the claim from inside: a direct clearnet dial fails, a dial to the
+gateway succeeds, and no route names the default bridge.
+
+**What the egress network must be.** The operator makes it; the provider
+only attaches to it and never removes it. It is a Docker bridge network
+created **`--internal`** (compose: `internal: true`) with a fixed subnet,
+and the `anon` daemon is attached to it at the fixed address that is
+`[anon.egress].gateway`, running a **transparent egress** there: `TransPort`
+and `DNSPort` bound on that address, with the daemon's container holding
+`NET_ADMIN` and redirecting, in its own `nat PREROUTING`, every TCP
+connection arriving from the network's subnet to the `TransPort` and every
+port-53 query (UDP and TCP) to the `DNSPort` — and accepting nothing else
+from that subnet, so its control and SOCKS ports face the provider only.
+The daemon's own way out to the Anyone network is another, ordinary network
+of its own. A host with `br_netfilter` loaded (`bridge-nf-call-iptables =
+1`) runs bridged frames through Docker's isolation of internal networks,
+which drops anything not addressed within the subnet — every transparently
+proxied packet, that is — and needs `-i <egress bridge> -o <egress bridge>
+-j ACCEPT` in `DOCKER-USER`; the reference host has no `br_netfilter`. The
+sandbox's `hs` profile (infra/sandbox) is the worked example: compose
+network `hs-egress` (`toon-sandbox_hs-egress` on the host daemon) on
+`10.203.0.0/24`, the daemon at `10.203.0.2`, which is what
+`provider.example.toml` shows.
 
 ## Routes and the connector
 
@@ -528,7 +774,9 @@ eviction (`src/docker.rs` has the full account):
   the lease's egress. Nested images are the host's architecture; no
   emulation is offered.
 - **`toon-<id>-net`**, the bridge network the pair shares. The workload's
-  SSH forward and published ports are on the host as for any lease.
+  SSH forward and published ports are on the host as for any lease. On a
+  [Hidden Provider](#workload-egress-on-a-hidden-provider) the network is
+  internal and the pair's only way out is the `anon` gateway.
 
 **Accounting as one unit.** Both containers are created under one per-lease
 cgroup parent (`toon-<id>.slice` with the systemd cgroup driver; an absolute
@@ -794,8 +1042,8 @@ The provider publishes these events to every relay in its Relay Set (spec
 
 | Event | Class | Carries |
 |---|---|---|
-| **Provider Profile** | replaceable | `ilp_address`, `connector_url`, `connector_seal_key`, `relays`, `settlement[]`, `isolation`, `hidden`, `host`, `liveness_cadence_s` |
-| **Listing**, one per tier | addressable, `d` = listing name | content `{version, resources, arch, lease_interval_s, price, capabilities}`; tags `a` (the Profile), `L`, `l isolation:…`, `l arch:…`, `l gpu:…`, one `t` per capability, optional `g` |
+| **Provider Profile** | replaceable | `ilp_address`, `connector_url`, `connector_seal_key`, `relays`, `settlement[]`, `isolation`, `hidden`, `host` (absent when hidden), `liveness_cadence_s` |
+| **Listing**, one per tier | addressable, `d` = listing name | content `{version, resources, arch, lease_interval_s, price, capabilities}`; tags `a` (the Profile), `L`, `l isolation:…`, `l arch:…`, `l hidden:true` (on a [Hidden Provider](#hidden-provider) only), `l gpu:…`, one `t` per capability, optional `g` |
 | **Liveness** | replaceable | `{ "available": { "<listing>": n } }` with `n` = capacity − live leases, and `["expiration", now + 5 × cadence]` (ADR 0007) |
 | **Eviction Notice**, one per eviction | regular | `{ "workload_id", "reason", "message" }`; tag `x` = the workload id. See [Eviction](#eviction). |
 | **Takeover**, one per workload this provider claims | addressable, `d` = workload id | `{ "workload_id", "primary" }`, signed by this provider as a Warm Standby — and published to the **primary's** Relay Set, not this provider's. See [Watching the primary](#watching-the-primary). |
@@ -909,8 +1157,9 @@ error code in validation order, one Profile, Listing, Liveness, Eviction
 Notice and Takeover each, the two roles a Standby Set gives (`spawn.primary`,
 `spawn.standby` and a `status` for each), the `status` of a standby that
 won a Takeover and of one that lost (`status.won`, `status.lost` — driven
-through the real watchdog over the fake Directory), and the route table a
-Listing generates. Everything is produced
+through the real watchdog over the fake Directory), a Hidden Provider's
+Profile and Listing (`directory.profile.hidden`, `directory.listing.hidden`),
+and the route table a Listing generates. Everything is produced
 over fixed test-only keys, a fixed clock and BIP-340 signatures with all-zero
 auxiliary randomness, so the bytes are reproducible and a tenant can re-derive
 every id and signature (TOON_Network #16).
@@ -943,7 +1192,8 @@ CI job here that clones it and runs that diff.
 ```sh
 cargo build
 cargo test                 # no Docker daemon needed
-cargo test -- --ignored    # the Docker backend, and a registry-entry spawn, against a real daemon
+cargo test -- --ignored    # the Docker backend and a registry-entry spawn against a real daemon,
+                           # and the anon control port against a real one (see Hidden Provider)
 cargo clippy --all-targets
 cargo run -- --config provider.toml
 ```

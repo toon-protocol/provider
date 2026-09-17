@@ -23,6 +23,9 @@ import { createServer } from 'node:http';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ToonClient } from '@toon-protocol/client';
+import { createHiddenServiceTransport } from '@toon-protocol/client/hidden-service';
+import { lookup } from 'node:dns/promises';
+import { isNearUrl, isRpcTarget, isTrue, proxyFor, startupRefusal } from './proxy.mjs';
 
 const PORT = Number(process.env.PORT ?? 8081);
 const BIND = process.env.BIND_ADDR ?? '0.0.0.0';
@@ -35,6 +38,24 @@ const CHANNEL_STORE = process.env.TOON_CHANNEL_STORE ?? '/var/lib/toon-publisher
 const DEPOSIT = BigInt(process.env.TOON_DEPOSIT ?? '10000000'); // 10 USDC at 6dp
 const TIMEOUT_MS = Number(process.env.TOON_TIMEOUT_MS ?? 60_000);
 
+// Hiding this process's own hop (spec §10, ADR 0008). The provider app sends
+// the proxy IN each publish request — it is the process that knows whether it
+// is hidden — and these two are the operator's side of the same fact:
+// TOON_SOCKS_PROXY is the default for requests that name none, and TOON_HIDDEN
+// says this publisher sits beside a hidden provider, where running without a
+// proxy is a refusal to start rather than a quiet leak.
+const SOCKS_PROXY = process.env.TOON_SOCKS_PROXY;
+const HIDDEN = isTrue(process.env.TOON_HIDDEN);
+
+// Whether the chain RPC is near enough to dial directly: loopback, a private
+// range, or a name resolving only to those — what a hidden provider's own
+// settlement RPC has to be (ADR 0008), and what `anon` can build no circuit
+// to. Resolved once, on the first proxied request, because it is a fact about
+// the deployment and not about the publication. Anywhere else, the RPC leaves
+// this host like everything else and rides the proxy with it.
+let rpcIsNear = null;
+const rpcNear = () => (rpcIsNear ??= isNearUrl(RPC_URL, lookup));
+
 // A connector's self-description advertises the endpoint a client should dial,
 // and the client dials THAT, not the URL it was configured with — one free GET
 // is the whole of bootstrapping. When the advertised address is one this
@@ -45,8 +66,8 @@ const TIMEOUT_MS = Number(process.env.TOON_TIMEOUT_MS ?? 60_000);
 //   TOON_ENDPOINT_REWRITE='{"http://127.0.0.1:3200":"http://relay-connector:3000"}'
 const ENDPOINT_REWRITE = Object.entries(JSON.parse(process.env.TOON_ENDPOINT_REWRITE ?? '{}'));
 
-/** `fetch`, with every advertised prefix in ENDPOINT_REWRITE swapped. */
-const rewritingFetch = (input, init) => {
+/** The URL a request really goes to: every advertised prefix swapped. */
+const rewrite = (input) => {
   let url = typeof input === 'string' ? input : input?.url ?? String(input);
   for (const [from, to] of ENDPOINT_REWRITE) {
     if (url.startsWith(from)) {
@@ -54,8 +75,33 @@ const rewritingFetch = (input, init) => {
       break;
     }
   }
-  return fetch(url, init);
+  return url;
 };
+
+/**
+ * The `fetch` this process pays through, and how to shut it down.
+ *
+ * With no proxy it is the global one, rewritten — exactly what this process
+ * did before hidden providers existed. With one it is the client library's
+ * SOCKS5h carriage, and it applies to EVERY host, not only `.anyone` ones: a
+ * hidden provider whose payer reached a clearnet hub directly would have named
+ * this host to the hub, whatever the connector's address looked like. The
+ * chain RPC is the one exception, and `isRpcTarget` says why.
+ */
+function carriageThrough(socksProxy) {
+  if (socksProxy === undefined) {
+    return { fetch: (input, init) => fetch(rewrite(input), init), close: async () => {} };
+  }
+  const transport = createHiddenServiceTransport(socksProxy);
+  return {
+    fetch: async (input, init) => {
+      const url = rewrite(input);
+      if (isRpcTarget(url, RPC_URL) && (await rpcNear())) return fetch(url, init);
+      return transport.fetch(url, init);
+    },
+    close: () => transport.close(),
+  };
+}
 
 // Relay READ url -> the paid ILP destination that writes to it. The provider
 // knows relays by the URL it publishes and a tenant reads; only this process
@@ -65,6 +111,11 @@ const WRITE_ROUTES = JSON.parse(process.env.RELAY_WRITE_ROUTES ?? '{}');
 
 if (!MNEMONIC) {
   console.error('[publisher] TOON_MNEMONIC is required: this process pays for every relay write.');
+  process.exit(1);
+}
+const refusal = startupRefusal({ hidden: HIDDEN, socksProxy: SOCKS_PROXY });
+if (refusal !== null) {
+  console.error(`[publisher] ${refusal}`);
   process.exit(1);
 }
 for (const [relay, destination] of Object.entries(WRITE_ROUTES)) {
@@ -77,12 +128,29 @@ for (const [relay, destination] of Object.entries(WRITE_ROUTES)) {
   }
 }
 
-/** One client, created once, shared by every publication. */
-let clientPromise = null;
+/**
+ * One client, created once and shared by every publication — but keyed by the
+ * proxy it dials through.
+ *
+ * Keyed rather than global because the route is a property of the PUBLICATION:
+ * a provider that becomes hidden (or stops being) says so in its next request,
+ * and a channel opened over the old route would keep paying over it. In
+ * practice the key never changes after the first request, so this is one
+ * client for the life of the process, as before. Publications are serialized
+ * (`serialize`), so nothing is in flight while it is swapped.
+ */
+let current = null;
 
-async function client() {
-  if (!clientPromise) {
-    clientPromise = (async () => {
+async function client(socksProxy) {
+  if (current !== null && current.proxy !== socksProxy) {
+    const stale = current;
+    current = null;
+    await stale.carriage.close().catch(() => {});
+  }
+  if (current === null) {
+    const carriage = carriageThrough(socksProxy);
+    const entry = { proxy: socksProxy, carriage, promise: null };
+    entry.promise = (async () => {
       mkdirSync(dirname(CHANNEL_STORE), { recursive: true });
       const c = await ToonClient.create({
         connector: CONNECTOR,
@@ -97,22 +165,30 @@ async function client() {
         // packets a minute, already serialized below. BTP's ordered socket
         // buys nothing here and would bypass the endpoint rewrite.
         transport: 'http',
-        fetch: rewritingFetch,
+        // The carriage, never `socksProxy:` — the library's own option
+        // refuses a proxy beside a clearnet connector as pointless
+        // misdirection, and for a hidden PROVIDER (as opposed to a tenant
+        // dialling a hidden connector) covering the clearnet hop is the whole
+        // point.
+        fetch: carriage.fetch,
       });
       const opened = await c.channel.open({ deposit: DEPOSIT });
       console.log(
         `[publisher] paying ${CONNECTOR} from ${c.identity?.solanaPublicKey ?? '(unknown)'} ` +
-          `on channel ${opened.channelId ?? '(id unreported)'}`,
+          `on channel ${opened.channelId ?? '(id unreported)'}` +
+          (socksProxy === undefined ? '' : ` through ${socksProxy}`),
       );
       return c;
-    })().catch((e) => {
+    })().catch(async (e) => {
       // Do not cache a failed bring-up: the validator or the hub may simply
       // not be up yet, and the next publication should try again.
-      clientPromise = null;
+      if (current === entry) current = null;
+      await carriage.close().catch(() => {});
       throw e;
     });
+    current = entry;
   }
-  return clientPromise;
+  return current.promise;
 }
 
 // A channel claim carries a strictly increasing nonce per channel, so two
@@ -131,13 +207,13 @@ function serialize(work) {
 }
 
 /** Buy one write of `event` to one relay. Returns null on success. */
-async function writeTo(relay, event) {
+async function writeTo(relay, event, socksProxy) {
   const destination = WRITE_ROUTES[relay];
   if (!destination) {
     return `no paid write route configured for ${relay} (set RELAY_WRITE_ROUTES)`;
   }
 
-  const c = await client();
+  const c = await client(socksProxy);
   const answer = await c.send(destination, {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ event }),
@@ -152,11 +228,11 @@ async function writeTo(relay, event) {
   return null;
 }
 
-async function publish({ event, relays }) {
+async function publish({ event, relays, proxy }) {
   const report = { accepted: [], failed: {} };
   for (const relay of relays ?? []) {
     try {
-      const why = await writeTo(relay, event);
+      const why = await writeTo(relay, event, proxy);
       if (why === null) {
         report.accepted.push(relay);
       } else {
@@ -202,9 +278,18 @@ const server = createServer((req, res) => {
       return answer(400, { error: `body is not JSON: ${e.message}` });
     }
     if (!request?.event?.id || !request?.event?.sig) {
-      return answer(400, { error: 'body must be { event, relays }' });
+      return answer(400, { error: 'body must be { event, relays, proxy? }' });
     }
-    serialize(() => publish(request)).then(
+    // The route this publication takes, decided before anything is paid for:
+    // a request that names a proxy this process cannot honour must not be
+    // answered by quietly going direct.
+    let proxy;
+    try {
+      proxy = proxyFor(request, SOCKS_PROXY);
+    } catch (e) {
+      return answer(400, { error: e.message });
+    }
+    serialize(() => publish({ ...request, proxy })).then(
       (report) => answer(200, report),
       // The publication could not be ATTEMPTED — no channel, no hub. That is
       // an error, not a per-relay refusal, and the provider logs it and
@@ -215,5 +300,10 @@ const server = createServer((req, res) => {
 });
 
 server.listen(PORT, BIND, () => {
-  console.log(`[publisher] listening on ${BIND}:${PORT}; write routes ${JSON.stringify(WRITE_ROUTES)}`);
+  console.log(
+    `[publisher] listening on ${BIND}:${PORT}; write routes ${JSON.stringify(WRITE_ROUTES)}; ` +
+      (SOCKS_PROXY === undefined
+        ? 'dialling directly unless a request names a proxy'
+        : `dialling through ${SOCKS_PROXY}`),
+  );
 });

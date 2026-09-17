@@ -36,6 +36,7 @@ fn lease(id: u32, expires_at: u64) -> LeaseRecord {
         template: None,
         ssh_port: 40000,
         ports: vec![],
+        hidden_address: None,
     }
 }
 

@@ -1,6 +1,13 @@
 // Ending a lease: the expiry sweep, and the one path every ending goes
 // through.
 //
+// THE one path: `end_lease` is the door for all three endings — the sweep's
+// Expiry, a tenant's Termination and an operator's Eviction — and
+// `destroy_workload` below is the single place a lease's workload and its
+// `.anyone` address are torn down. The sweep used to mark its leases ended
+// inline, beside that door rather than through it, which was two copies of
+// the same rule free to drift on what an ending means.
+//
 // There is no grace period. A lease whose `expires_at` has passed bought no
 // further Lease Interval, and an unpaid workload must not keep running
 // (ADR 0003). A Termination ends a lease the same way, just sooner.
@@ -20,6 +27,7 @@
 use anyhow::Result;
 use tracing::{error, info, warn};
 
+use super::lease_address;
 use super::persistence::{persist_leases, LeaseEnd, LeaseState};
 use super::ProviderService;
 use crate::compute::ContainerStatus;
@@ -46,33 +54,14 @@ impl ProviderService {
     pub async fn sweep_expired_leases(&self, now: u64) {
         let state = &self.state;
 
-        // One pass under the lock decides everything; the backend calls
-        // happen after it, so a sweep never holds the table against the HTTP
-        // handlers while a daemon takes its time.
+        // The retries and the forgetting FIRST: whatever an earlier ending
+        // could not destroy — a container that would not stop, an address
+        // the daemon would not drop — and the ended records whose retention
+        // has run out. Before the endings below, so that a lease this sweep
+        // ends is tried once here and retried by the NEXT sweep, rather than
+        // twice in a row by this one.
         let pending: Vec<u32> = {
             let mut leases = state.leases.lock().await;
-
-            for lease in leases.values_mut() {
-                if lease.state.is_live() && lease.expires_at <= now {
-                    let has_workload = lease.state.has_workload();
-                    if has_workload {
-                        info!("lease {} expired; destroying its workload", lease.id);
-                    } else {
-                        // A reservation that nobody paid another interval
-                        // for: the capacity is released and the backend is
-                        // never asked anything, because nothing was ever
-                        // started here (spec §6.7, §7).
-                        info!("reservation {} expired; releasing its capacity", lease.id);
-                    }
-                    lease.state = LeaseState::Ended(LeaseEnd::Expiry);
-                    lease.ended_at = Some(now);
-                    // Nothing to destroy is destroyed already: this keeps
-                    // the lease out of the pass below and out of every later
-                    // sweep's retry.
-                    lease.destroyed = !has_workload;
-                }
-            }
-
             let retention = state.config.ended_retention_s;
             leases.retain(|id, lease| {
                 if lease.state.is_live() {
@@ -99,6 +88,26 @@ impl ProviderService {
 
         for id in pending {
             destroy_workload(state, id).await;
+        }
+
+        // Then the endings themselves. WHICH leases are over is decided
+        // under the lock; ending them is not, so a sweep never holds the
+        // table against the HTTP handlers while a daemon takes its time.
+        let expired: Vec<u32> = {
+            let leases = state.leases.lock().await;
+            leases
+                .values()
+                .filter(|lease| lease.state.is_live() && lease.expires_at <= now)
+                .map(|lease| lease.id)
+                .collect()
+        };
+        // Through the SAME door a Termination and an Eviction go through, so
+        // that what an ending does is written once: the state, the instant,
+        // the workload and the address (spec §6.6, §6.7). `end_lease`
+        // re-checks liveness under the lock, so a lease a tenant terminated
+        // between the pass above and here is not ended twice.
+        for id in expired {
+            end_lease(state, id, LeaseEnd::Expiry, now).await;
         }
     }
 }
@@ -132,24 +141,48 @@ pub(crate) async fn end_lease(state: &AppState, id: u32, end: LeaseEnd, now: u64
         persist_leases(&leases, &state.config.lease_state_path);
         has_workload
     };
-    // A reservation runs nothing, so ending one asks the backend for
-    // nothing: the capacity it held is released by the record's own ending
-    // (spec §6.6, §6.7).
+    // A reservation runs nothing and was never given an address, so ending
+    // one asks neither the backend nor the daemon for anything: the capacity
+    // it held is released by the record's own ending (spec §6.6, §6.7).
     if has_workload {
         destroy_workload(state, id).await;
     }
     true
 }
 
-/// Stop the workload and delete it. Records the success in the lease table,
-/// so a failure is retried by every later sweep until the backend confirms
-/// the workload is gone: an ended lease that left a container running would
-/// otherwise run for free forever.
+/// Tear down everything a lease held: stop and delete its workload, and
+/// destroy the `.anyone` address it was reachable at, if it had one.
+///
+/// THE single teardown path — `end_lease` above is its only caller besides
+/// the sweep's retry — so a lease's ending means the same thing however it
+/// ended. The success is recorded in the lease table, and a lease is not
+/// `destroyed` until BOTH are gone: a failure of either is retried by every
+/// later sweep, because an ended lease that left a container running would
+/// run for free forever, and one that left an address standing would keep
+/// answering for a workload that no longer exists.
 async fn destroy_workload(state: &AppState, id: u32) {
+    let container_gone = destroy_container(state, id).await;
+    // Asked for even when the container would not go: the two are
+    // independent. An address the daemon confirmed gone comes off the
+    // record, so a retry asks only about what is left; the backend is
+    // idempotent and simply answers that the container is already absent.
+    let address_gone = lease_address::destroy_recorded(state, id).await;
+    if container_gone && address_gone {
+        let mut leases = state.leases.lock().await;
+        if let Some(lease) = leases.get_mut(&id) {
+            lease.destroyed = true;
+            persist_leases(&leases, &state.config.lease_state_path);
+        }
+    }
+}
+
+/// Stop the workload and delete it; `true` once the backend has no trace of
+/// it left.
+async fn destroy_container(state: &AppState, id: u32) -> bool {
     if let Err(e) = state.backend.stop_container(id).await {
         warn!("stop failed for {} ({}), deleting anyway", id, e);
     }
-    let gone = match state.backend.delete_container(id).await {
+    match state.backend.delete_container(id).await {
         Ok(_) => {
             info!("workload {} destroyed", id);
             true
@@ -170,13 +203,6 @@ async fn destroy_workload(state: &AppState, id: u32) {
                     false
                 }
             }
-        }
-    };
-    if gone {
-        let mut leases = state.leases.lock().await;
-        if let Some(lease) = leases.get_mut(&id) {
-            lease.destroyed = true;
-            persist_leases(&leases, &state.config.lease_state_path);
         }
     }
 }

@@ -92,6 +92,39 @@ pub struct ContainerConfig {
     /// the one struct it is handed.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Where this workload's traffic may leave, on a Hidden Provider (spec
+    /// §10): the internal network it is attached to instead of the default
+    /// bridge, and the `anon` gateway that is that network's only way out.
+    /// `None` is today's networking — a provider that is not hidden. Copied
+    /// here from the `HiddenService` port the way `capabilities` is copied
+    /// from the listing, so the backend decides from the one struct it is
+    /// handed. Carried from Milestone 4's first ticket; the Docker backend
+    /// acts on it from M4-4 (TOON_Network #41).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<EgressPolicy>,
+}
+
+/// The egress policy of a hidden workload (spec §10, ADR 0008): every
+/// packet it sends leaves through `anon` or not at all.
+///
+/// Two names, because that is all a backend needs to enforce it: WHICH
+/// network to attach the workload to — one with no route to the host's
+/// default bridge — and WHO on that network is the transparent egress. The
+/// gateway is an IP address rather than a name so the backend can point the
+/// workload's DNS at it too (a resolver the image cannot bypass); the exact
+/// mechanism — `anon`'s `TransPort` and `DNSPort`, or a sidecar — is the
+/// backend's choice (M4-4). It is also the shape of the `[anon.egress]`
+/// config table, so the operator writes exactly what the backend receives.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressPolicy {
+    /// The internal network a hidden workload is attached to, by name
+    /// (a Docker network for the Docker backend), instead of the default
+    /// bridge.
+    pub network: String,
+    /// The IP address, on that network, of the `anon` transparent-egress
+    /// gateway: the workload's only route out and its DNS.
+    pub gateway: String,
 }
 
 #[async_trait]

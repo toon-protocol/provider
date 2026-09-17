@@ -11,8 +11,18 @@ provider_name = "Example Provider"
 ilp_address = "g.acme"
 
 # Where tenants reach workloads. Ports are exposed as public_ip:host_port;
-# there are no hostnames and no TLS.
+# there are no hostnames and no TLS. Required unless `hidden = true` below,
+# and refused beside it: a Hidden Provider publishes no host at all.
 public_ip = "203.0.113.7"
+
+# The Hidden Provider declaration (spec §10, ADR 0008). `true` publishes
+# `hidden: true` and NO `host` in the Profile and the `hidden:true` label on
+# every Listing. It is a CLAIM nobody outside can verify, so the app refuses
+# to start unless every hiding condition is configured: no public_ip, a
+# connector_url at an .anyone host, and every key of the [anon] table at
+# the end of this file. Payments stay public on chain either way — hiding
+# hides where this provider is, not that it was paid.
+hidden = false
 
 # Signs everything this provider publishes, and is the identity a Lease
 # Request is addressed to. Hex or nsec1….
@@ -195,3 +205,72 @@ deny_references = []
 # Test/ops escape hatch: fetch every manifest from this base URL instead of
 # the registry named in the reference. Leave unset in production.
 # registry_url_override = "http://localhost:5000"
+
+# ── Hidden Provider (spec §10, ADR 0008) ─────────────────────────────────────
+# Everything a Hidden Provider needs from its `anon` daemon. Ignored unless
+# `hidden = true`; with it, EACH key below is a hiding condition and a missing
+# one is a startup refusal naming it. The values are the sandbox's `hs`
+# profile's (infra/sandbox), where the daemon is the `anon-hs` service.
+#
+# [anon]
+# # The SOCKS5 endpoint this provider's OWN outbound leaves through — relay
+# # reads, image fetches, the publish request. `socks5h`, never `socks5`: the
+# # `h` makes the PROXY resolve every name, so no lookup leaves this host.
+# # A directory publisher on this host or its own private network is dialled
+# # directly (that packet crosses nothing anyone outside can watch, and anon
+# # reaches no such address); either way the publish request carries this URL,
+# # for the publisher's own hop to the connector. Its host is resolved once at
+# # startup, and a provider that cannot resolve it refuses to start.
+# socks_proxy = "socks5h://anon-hs:9050"
+#
+# # The settlement RPC this provider's connector settles against. A Hidden
+# # Provider runs its own: the host MUST be loopback, a private range
+# # (RFC 1918, ULA, link-local) or a name resolving ONLY to such addresses —
+# # a public RPC provider is refused at load, because an unproxied read of one
+# # links this host's network location to its on-chain identity. A name that
+# # does not resolve where the config is loaded (a compose service name such
+# # as `anvil`, rendered on the host by `toon-provider routes`) is accepted
+# # with a warning; the RUNNING provider checks it again and refuses to start
+# # if it still does not resolve there.
+# settlement_rpc_url = "http://anvil:8545"
+#
+# # The host the daemon forwards a per-lease address's ports to: where this
+# # provider's SSH forwards and published ports are, AS THE DAEMON SEES THEM.
+# # Default 127.0.0.1 (a daemon on this host's network); inside compose, the
+# # address the provider's host daemon is reachable at from the anon container.
+# # forward_host = "127.0.0.1"
+#
+# # The daemon's control port, over which the provider creates one .anyone
+# # address per lease (ADD_ONION) and destroys it when the lease ends.
+# # Authenticate with the daemon's cookie file (CookieAuthentication 1) OR a
+# # password (HashedControlPassword) — exactly one.
+# #
+# # The daemon's own anonrc must carry `ControlPort <port>` (it is `0` by
+# # default), and for a cookie, `CookieAuthentication 1` with a
+# # `CookieAuthFile` the file below IS — the same bytes, which in compose
+# # means the daemon's data directory shared with this container, mounted
+# # read-only, and a `CookieAuthFileGroupReadable 1` if the two run as
+# # different users. The provider connects at startup and refuses to start
+# # naming `addr` if it cannot authenticate.
+# [anon.control]
+# addr = "anon-hs:9051"
+# cookie_file = "/var/lib/anon/control_auth_cookie"
+# # password = "..."
+#
+# # The egress policy of every hidden workload (README, "Workload egress on a
+# # Hidden Provider"): an INTERNAL Docker network — `docker network create
+# # --internal`, or `internal: true` in compose — that the anon daemon is
+# # attached to at this fixed address, running a transparent egress there
+# # (TransPort + DNSPort, with every TCP connection and every DNS query from
+# # the network redirected to them). Every hidden workload is attached to
+# # that network and nothing else, with this gateway as its only route out
+# # and as its DNS. An IP address, not a name: the workload's resolver IS
+# # the gateway. Direct egress is dropped by the kernel — no route, and the
+# # host forwards nothing off an internal network — not by anything the
+# # image could ignore. The network is the operator's: it must exist before
+# # the first hidden lease, and it is never removed. The values are the
+# # sandbox's: compose project `toon-sandbox`, network `hs-egress` on
+# # 10.203.0.0/24, the daemon at .2.
+# [anon.egress]
+# network = "toon-sandbox_hs-egress"
+# gateway = "10.203.0.2"

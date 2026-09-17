@@ -71,6 +71,7 @@ fn live_lease(id: u32, listing: &str, version: u32) -> LeaseRecord {
         template: None,
         ssh_port: 40000,
         ports: vec![],
+        hidden_address: None,
     }
 }
 
