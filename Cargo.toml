@@ -39,6 +39,9 @@ axum = "0.7"
 # already brings rustls in for its relay sockets, so this adds no second TLS
 # stack.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# The URL type reqwest already speaks, named directly so the config gate can
+# tell an IP-literal host from a name (`url::Host`) without re-parsing it.
+url = "2"
 
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"

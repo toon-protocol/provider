@@ -20,16 +20,23 @@ use nostr_sdk::{EventBuilder, Keys, Kind, PublicKey, Tag, TagKind, Timestamp};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use super::{FakeBackend, FakeClock, FakeDirectory};
+use super::{FakeBackend, FakeClock, FakeDirectory, FakeHiddenService};
+use toon_provider::compute::EgressPolicy;
 use toon_provider::nostr::kinds::K_LEASE_REQUEST;
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, Resources, SpawnContent};
 use toon_provider::provider::ImagePolicyConfig;
-use toon_provider::{router, Clock, Listing, ProviderConfig, ProviderService};
+use toon_provider::{
+    router, AnonConfig, AnonControl, Clock, Listing, ProviderConfig, ProviderService,
+};
 use wiremock::MockServer;
 
 pub const NOW: u64 = 1_700_000_000;
 pub const INTERVAL: u64 = 3600;
 pub const PUBLIC_IP: &str = "203.0.113.7";
+/// Where a hidden harness's connector is: a synthetic 56-character `.anyone`
+/// host, the shape the `anon` daemon writes (`hidden_config`).
+pub const HIDDEN_CONNECTOR_URL: &str =
+    "http://hiddenfixturehiddenfixturehiddenfixturehiddenfixturehidde.anyone/ilp";
 pub const SSH_KEY: &str =
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@example";
 
@@ -49,6 +56,10 @@ pub struct Harness {
     /// So a test can read back what the provider published — an Eviction
     /// Notice, chiefly — without paying a relay.
     pub directory: Arc<FakeDirectory>,
+    /// The `HiddenService` every harness installs, hidden or not: a test on
+    /// a hidden provider reads back the addresses created and destroyed,
+    /// and one on a public provider asserts it was never touched.
+    pub hidden_service: Arc<FakeHiddenService>,
     pub provider: PublicKey,
     pub state_path: String,
     pub provider_key: String,
@@ -143,7 +154,7 @@ pub fn config_for(
     image_policy: ImagePolicyConfig,
 ) -> ProviderConfig {
     ProviderConfig {
-        public_ip: PUBLIC_IP.to_string(),
+        public_ip: Some(PUBLIC_IP.to_string()),
         nostr_private_key: provider_key.to_string(),
         listings,
         workload_id_range_start: 1000,
@@ -159,6 +170,34 @@ pub fn config_for(
     }
 }
 
+/// `config` as a Hidden Provider (spec §10): `hidden = true`, no
+/// `public_ip`, the connector at an `.anyone` host, and every `[anon]` key
+/// the gate requires, with the settlement RPC on loopback so nothing is
+/// resolved. What a test takes to `harness_from` to drive the hidden
+/// lifecycle against the fake `HiddenService`.
+pub fn hidden_config(config: ProviderConfig) -> ProviderConfig {
+    ProviderConfig {
+        hidden: true,
+        public_ip: None,
+        connector_url: HIDDEN_CONNECTOR_URL.to_string(),
+        anon: AnonConfig {
+            control: Some(AnonControl {
+                addr: "anon-hs:9051".to_string(),
+                cookie_file: Some("/var/lib/anon/control_auth_cookie".to_string()),
+                password: None,
+            }),
+            socks_proxy: Some("socks5h://anon-hs:9050".to_string()),
+            egress: Some(EgressPolicy {
+                network: super::FAKE_EGRESS_NETWORK.to_string(),
+                gateway: super::FAKE_EGRESS_GATEWAY.to_string(),
+            }),
+            settlement_rpc_url: Some("http://127.0.0.1:8545".to_string()),
+            ..AnonConfig::default()
+        },
+        ..config
+    }
+}
+
 /// The provider process over exactly `config`, with the fakes a test reads
 /// back from.
 pub fn harness_from(
@@ -170,13 +209,15 @@ pub fn harness_from(
 ) -> Harness {
     let provider_key = config.nostr_private_key.clone();
     let state_path = config.lease_state_path.clone();
+    let hidden_service = FakeHiddenService::new();
     let service = ProviderService::with_backend_clock_and_directory(
         config,
         backend.clone(),
         clock.clone(),
         directory.clone(),
     )
-    .unwrap();
+    .unwrap()
+    .with_hidden_service(hidden_service.clone());
     let provider = Keys::parse(&provider_key).unwrap().public_key();
     Harness {
         app: router(service.app_state()),
@@ -184,6 +225,7 @@ pub fn harness_from(
         backend,
         clock,
         directory,
+        hidden_service,
         provider,
         state_path,
         provider_key,

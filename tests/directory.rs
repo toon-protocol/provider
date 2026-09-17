@@ -93,7 +93,7 @@ fn settlement() -> Vec<Settlement> {
 
 fn config(listings: Vec<Listing>, provider_key: &str, state_path: String) -> ProviderConfig {
     ProviderConfig {
-        public_ip: PUBLIC_IP.to_string(),
+        public_ip: Some(PUBLIC_IP.to_string()),
         nostr_private_key: provider_key.to_string(),
         ilp_address: "g.acme".to_string(),
         relay_set: vec![
@@ -198,7 +198,7 @@ async fn the_profile_carries_everything_a_tenant_needs_to_pay_this_provider() {
     );
     assert_eq!(content.settlement, settlement());
     assert_eq!(content.isolation, "shared-kernel");
-    assert!(!content.hidden, "Milestone 1 has no Hidden Provider");
+    assert!(!content.hidden, "a provider that did not set hidden = true");
     assert_eq!(content.host.as_deref(), Some(PUBLIC_IP));
     assert_eq!(content.liveness_cadence_s, CADENCE);
 

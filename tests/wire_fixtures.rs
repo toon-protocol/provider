@@ -34,9 +34,11 @@ use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use common::harness::post;
+use common::harness::{hidden_config, post, HIDDEN_CONNECTOR_URL};
 use common::{sha256_hex, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory};
-use toon_provider::nostr::directory_events::{takeover_event, ProfileContent, Settlement};
+use toon_provider::nostr::directory_events::{
+    takeover_event, ProfileContent, Settlement, HIDDEN_LABEL,
+};
 use toon_provider::nostr::image_events::{
     blob_record_event, image_entry_event, template_event, BlobPart, BlobRecordContent, BlobSource,
     EntryBlob, ImageEntryContent, TemplateContent, TemplateImage,
@@ -384,7 +386,7 @@ fn config(
     ProviderConfig {
         provider_name: PROVIDER_NAME.to_string(),
         ilp_address: ILP_ADDRESS.to_string(),
-        public_ip: PUBLIC_IP.to_string(),
+        public_ip: Some(PUBLIC_IP.to_string()),
         nostr_private_key: PROVIDER_SECRET.to_string(),
         relay_set: vec![RELAY.to_string()],
         connector_url: CONNECTOR_URL.to_string(),
@@ -469,6 +471,17 @@ impl Fixture {
 }
 
 async fn fixture_provider(policy: ImagePolicyConfig, registry: MockServer) -> Fixture {
+    fixture_provider_configured(policy, registry, |config| config).await
+}
+
+/// `fixture_provider` with the config changed on its way in — how the
+/// Hidden Provider fixtures are made: the same keys, listings and world,
+/// with `hidden = true` and everything spec §10 requires beside it.
+async fn fixture_provider_configured(
+    policy: ImagePolicyConfig,
+    registry: MockServer,
+    adjust: impl FnOnce(ProviderConfig) -> ProviderConfig,
+) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let state_path = dir
         .keep()
@@ -489,10 +502,10 @@ async fn fixture_provider(policy: ImagePolicyConfig, registry: MockServer) -> Fi
     mount_image_bytes(&gateway, &registry).await;
     let clock = FakeClock::at(NOW);
     let service = ProviderService::with_backend_clock_and_directory(
-        ProviderConfig {
+        adjust(ProviderConfig {
             gateway_url_pattern: Some(format!("{}/raw/{{txid}}", gateway.uri())),
             ..config(state_path, Some(registry.uri()), policy)
-        },
+        }),
         FakeBackend::new(),
         clock.clone(),
         directory.clone(),
@@ -834,6 +847,74 @@ async fn one_directory_event_per_kind() {
              workload — here the fixture provider — and never the primary itself.",
             "K_TAKEOVER",
             &takeover,
+        ),
+    );
+}
+
+/// The Hidden Provider's two directory shapes (spec §4.1, §4.2, §10;
+/// TOON_Network #38): the same fixture provider — same key, same listings,
+/// same relay — configured with `hidden = true`, its connector at an
+/// `.anyone` host and every `[anon]` key the startup gate requires. What
+/// changes on the wire is exactly two things: the Profile says `hidden:
+/// true` and carries no `host` key at all, and every Listing carries the
+/// `hidden:true` label. Nothing else in either event moves.
+#[tokio::test]
+async fn a_hidden_providers_profile_and_listing() {
+    let f = fixture_provider_configured(
+        ImagePolicyConfig::default(),
+        stub_registry().await,
+        hidden_config,
+    )
+    .await;
+    f.service.publish_directory().await.unwrap();
+
+    let profiles = f.directory.of_kind(K_PROFILE);
+    assert_eq!(profiles.len(), 1);
+    let profile = with_reproducible_sig(&profiles[0], &f.provider);
+    let content: ProfileContent = serde_json::from_str(&profile.content).unwrap();
+    assert!(content.hidden);
+    assert_eq!(content.host, None);
+    assert_eq!(content.connector_url, HIDDEN_CONNECTOR_URL);
+    golden(
+        "directory.profile.hidden.json",
+        event_fixture(
+            "directory",
+            "profile.hidden",
+            "The Provider Profile of a HIDDEN PROVIDER (spec §4.1, §10): `hidden: true`, NO \
+             `host` key at all, and a `connector_url` at an `.anyone` host — the only way the \
+             connector is reached. Everything else is `directory.profile`'s: same key, same \
+             sealing key, same Relay Set, same settlement. `hidden` is a self-assertion that \
+             nothing verifies, and it hides where the provider is, not that it was paid: \
+             payments stay public on chain (ADR 0008).",
+            "K_PROFILE",
+            &profile,
+        ),
+    );
+
+    let listings = f.directory.of_kind(K_LISTING);
+    assert_eq!(listings.len(), 3);
+    for event in &listings {
+        assert!(
+            event
+                .tags
+                .iter()
+                .any(|t| t.clone().to_vec() == ["l", HIDDEN_LABEL, TOON_LABEL]),
+            "every Listing of a hidden provider carries the label"
+        );
+    }
+    golden(
+        "directory.listing.hidden.json",
+        event_fixture(
+            "directory",
+            "listing.hidden",
+            "The `basic` Listing of the HIDDEN PROVIDER of `directory.profile.hidden` (spec \
+             §4.2, §10): `directory.listing` plus one tag, `[\"l\", \"hidden:true\", \
+             \"toon.network\"]`, beside the isolation and arch labels, so a tenant can filter \
+             for or against hidden compute by tag alone (`#l = hidden:true`). Present on every \
+             Listing of a hidden provider and on no Listing of any other; never `hidden:false`. \
+             Content is unchanged, and so are the routes it generates.",
+            "K_LISTING",
+            &with_reproducible_sig(&listings[0], &f.provider),
         ),
     );
 }

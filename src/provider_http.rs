@@ -32,6 +32,7 @@ use tracing::info;
 use crate::clock::Clock;
 use crate::compute::ComputeBackend;
 use crate::directory::{ConnectorDirectory, Directory, NullDirectory};
+use crate::hidden_service::HiddenService;
 use crate::nostr::lease_request::AcceptedRequests;
 use crate::nostr::wire::{ErrorCode, ErrorResponse, EvictRequest};
 use crate::provider::routes::{
@@ -57,6 +58,14 @@ pub struct AppState {
     /// ticket — Eviction Notices go. The second of the provider's two I/O
     /// ports; a test swaps it for a fake and reads back what was published.
     pub directory: Arc<dyn Directory>,
+    /// A Hidden Provider's window onto its `anon` daemon: the per-lease
+    /// `.anyone` addresses and the egress policy (spec §10). The third
+    /// port, and the only optional one — `None` on a provider that is not
+    /// hidden, which never touches it. A test installs a fake with
+    /// `with_hidden_service`; the real adapter that drives the daemon's
+    /// control port is selected from `[anon.control]` from M4-3
+    /// (TOON_Network #40), so until then no config installs one.
+    pub hidden_service: Option<Arc<dyn HiddenService>>,
     pub leases: Arc<Mutex<HashMap<u32, LeaseRecord>>>,
     pub accepted_requests: Arc<AcceptedRequests>,
     /// What this provider refuses to run, and the client that resolves an
@@ -97,6 +106,7 @@ impl AppState {
             clock,
             keys,
             directory,
+            hidden_service: None,
             leases: Arc::new(Mutex::new(HashMap::new())),
             accepted_requests: Arc::new(AcceptedRequests::new()),
             image_policy,
@@ -110,6 +120,16 @@ impl AppState {
     /// publisher.
     pub fn with_directory(mut self, directory: Arc<dyn Directory>) -> Self {
         self.directory = directory;
+        self
+    }
+
+    /// Install the `HiddenService` this state creates per-lease addresses
+    /// through — a fake in tests, the `anon` control-port adapter in a
+    /// running hidden provider. Shaped like `with_directory` for the same
+    /// reason: the constructor stays as it is, and a test needs no config
+    /// that names a live daemon.
+    pub fn with_hidden_service(mut self, hidden_service: Arc<dyn HiddenService>) -> Self {
+        self.hidden_service = Some(hidden_service);
         self
     }
 }
