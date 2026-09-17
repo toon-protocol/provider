@@ -29,6 +29,7 @@ use nostr_sdk::Keys;
 use tokio::sync::Mutex;
 use tracing::info;
 
+use crate::anon_control::AnonControlService;
 use crate::clock::Clock;
 use crate::compute::ComputeBackend;
 use crate::directory::{ConnectorDirectory, Directory, NullDirectory};
@@ -93,6 +94,7 @@ impl AppState {
         let keys = Keys::parse(&config.nostr_private_key)
             .context("nostr_private_key must be a hex or nsec1 secret key")?;
         let directory = directory_from_config(&config)?;
+        let hidden_service = hidden_service_from_config(&config)?;
         let image_policy = Arc::new(ImagePolicy::from_config(&config.image_policy));
         let cache = BlobCache::open(config.blob_cache_dir(), config.blob_cache_max_bytes)?;
         let fetcher = Arc::new(BlobFetcher::new(
@@ -106,7 +108,7 @@ impl AppState {
             clock,
             keys,
             directory,
-            hidden_service: None,
+            hidden_service,
             leases: Arc::new(Mutex::new(HashMap::new())),
             accepted_requests: Arc::new(AcceptedRequests::new()),
             image_policy,
@@ -146,6 +148,23 @@ fn directory_from_config(config: &ProviderConfig) -> Result<Arc<dyn Directory>> 
         )?)),
         None => Ok(Arc::new(NullDirectory::new(config.relay_set.clone()))),
     }
+}
+
+/// The `HiddenService` a config describes: the `anon` control-port adapter
+/// on a Hidden Provider, and none at all on a provider that is not hidden —
+/// which has no daemon, no per-lease addresses and no egress policy, and
+/// never touches the port.
+///
+/// It opens no connection: the daemon is proved reachable once at startup
+/// (`anon_control::refuse_unreachable_control`, from `ProviderService::run`),
+/// so that `toon-provider routes` and every test that builds an `AppState`
+/// need no daemon, and so a provider is still constructible while its
+/// sidecar is coming up.
+fn hidden_service_from_config(config: &ProviderConfig) -> Result<Option<Arc<dyn HiddenService>>> {
+    if !config.hidden {
+        return Ok(None);
+    }
+    Ok(Some(Arc::new(AnonControlService::from_config(config)?)))
 }
 
 /// The app's routes. Separate from `serve` so tests can drive it in-process,
