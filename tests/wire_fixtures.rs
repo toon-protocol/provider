@@ -35,7 +35,10 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::harness::{hidden_config, post, HIDDEN_CONNECTOR_URL};
-use common::{sha256_hex, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory};
+use common::{
+    sha256_hex, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory,
+    FakeHiddenService,
+};
 use toon_provider::nostr::directory_events::{
     takeover_event, ProfileContent, Settlement, HIDDEN_LABEL,
 };
@@ -510,7 +513,11 @@ async fn fixture_provider_configured(
         clock.clone(),
         directory.clone(),
     )
-    .unwrap();
+    .unwrap()
+    // Installed on every fixture provider, hidden or not: a hidden one's
+    // leases get their `.anyone` addresses from it, and a public one's
+    // fixtures show that it was never asked (`spawn.ok` carries an IP).
+    .with_hidden_service(FakeHiddenService::new());
     Fixture {
         app: router(service.app_state()),
         service,
@@ -917,6 +924,80 @@ async fn a_hidden_providers_profile_and_listing() {
             &with_reproducible_sig(&listings[0], &f.provider),
         ),
     );
+}
+
+/// The Hidden Provider's LEASE (spec §6.2, §6.5, §10; TOON_Network #39):
+/// the same paid spawn `spawn.ok` shows, on the same listing, for the same
+/// workload, bought from the same fixture provider configured with
+/// `hidden = true`. One thing changes, and it is the whole point: `access`
+/// carries the lease's OWN `.anyone` address in place of the provider's IP,
+/// and `status` answers the same one. The ports do not move — a tenant
+/// dials `ssh_port` and each `host_port` on the address exactly as it would
+/// on an IP — and no IP appears anywhere in either answer.
+///
+/// The address here is the fake `HiddenService`'s, derived from the
+/// workload id so the fixture is reproducible; a real one is 56 base32
+/// characters the daemon chooses.
+#[tokio::test]
+async fn a_hidden_providers_lease_is_reached_at_its_own_anyone_address() {
+    let f = fixture_provider_configured(
+        ImagePolicyConfig::default(),
+        stub_registry().await,
+        hidden_config,
+    )
+    .await;
+    let aa = 0xaa;
+    let host = FakeHiddenService::address_for(&workload_id(aa));
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "spawn",
+            "ok.hidden",
+            "The paid spawn of `spawn.ok`, on a HIDDEN PROVIDER (spec §6.2, §10): the same \
+             request, the same listing and the same workload id, answered with the lease's \
+             OWN `.anyone` address as `access.host` instead of an IP. The provider published \
+             no host (`directory.profile.hidden`), so this address — created for this lease \
+             before its workload started, mapping its SSH forward and every port it published \
+             — is the only way to reach it; a tenant dials it through a `socks5h://` proxy, on \
+             the SAME `ssh_port` and `host_port`s a public provider would have given. It is \
+             destroyed when the lease ends, and re-established at the same host if the \
+             provider restarts. No IP appears anywhere in the answer.",
+        ),
+        &route("basic.v1.spawn"),
+        "/listings/basic/v1/spawn",
+        envelope(&f.spawn_request(aa, TTL)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["access"]["host"], host);
+    assert!(toon_provider::is_anyone_host(&host));
+    // The ports are `spawn.ok`'s, unchanged: hiding moves the host, not the
+    // numbers a tenant dials.
+    assert_eq!(response["access"]["ssh_port"], 40000);
+    assert_eq!(response["access"]["ports"][0]["host_port"], 41000);
+    golden("spawn.ok.hidden.json", doc);
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "status",
+            "running.hidden",
+            "Status of that hidden lease (spec §6.5, §10): `status.running` with the same \
+             `.anyone` host its spawn answered. A provider restarted on its lease table \
+             re-establishes each live lease's address from the key it stored, so this answer \
+             does not change across a restart; a lease whose key was not kept is given a fresh \
+             address, and this is where its tenant reads it.",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.about_request(&f.tenant, "status", aa, TTL)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["state"], "running");
+    assert_eq!(response["access"]["host"], host);
+    golden("status.running.hidden.json", doc);
 }
 
 #[tokio::test]
