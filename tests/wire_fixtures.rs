@@ -43,13 +43,14 @@ use common::{
 use toon_provider::nostr::directory_events::{
     takeover_event, ProfileContent, Settlement, HIDDEN_LABEL,
 };
+use toon_provider::nostr::gateway_grant::{gateway_grant_event, GrantContent};
 use toon_provider::nostr::image_events::{
     blob_record_event, image_entry_event, template_event, BlobPart, BlobRecordContent, BlobSource,
     EntryBlob, ImageEntryContent, TemplateContent, TemplateImage,
 };
 use toon_provider::nostr::kinds::{
-    K_BLOB, K_EVICTION, K_IMAGE, K_LEASE_REQUEST, K_LISTING, K_LIVENESS, K_PROFILE, K_TAKEOVER,
-    K_TEMPLATE, TOON_LABEL,
+    K_BLOB, K_EVICTION, K_GATEWAY_GRANT, K_IMAGE, K_LEASE_REQUEST, K_LISTING, K_LIVENESS,
+    K_PROFILE, K_TAKEOVER, K_TEMPLATE, TOON_LABEL,
 };
 use toon_provider::nostr::wire::{
     EvictionReason, ImageRef, PortRequest, Protocol, RegistryEntryRef, Resources, SpawnContent,
@@ -84,6 +85,11 @@ const PRIMARY_SECRET: &str = "55555555555555555555555555555555555555555555555555
 /// stands beside when IT is the primary. It signs nothing here either; it is
 /// index 1 of the set `spawn.primary` forms.
 const STANDBY_SECRET: &str = "6666666666666666666666666666666666666666666666666666666666666666";
+/// The WORKLOAD GATEWAY (spec §3.1.3, §6.5): the key a tenant grants, and
+/// the key that signs the granted `status` requests here. Never a provider
+/// and never the tenant — that is the whole point of a grant — so it gets a
+/// key of its own.
+const GATEWAY_SECRET: &str = "7777777777777777777777777777777777777777777777777777777777777777";
 
 const PROVIDER_NAME: &str = "Fixture Provider";
 const ILP_ADDRESS: &str = "g.fixture";
@@ -354,6 +360,36 @@ fn about(seed: u8) -> Value {
     json!({ "workload_id": workload_id(seed) })
 }
 
+/// The HTTP port of `spawn_content`'s one published port: which of a spawn's
+/// ports a gateway forwards to is exactly what a grant says (spec §3.1.3).
+const GRANT_HTTP_PORT: u16 = 443;
+/// How long past `NOW` a fixture grant is good for. Longer than a Lease
+/// Request's 60 s on purpose: a grant is meant to be reused for as long as
+/// the tenant trusts the gateway, and a request that carries one is still
+/// bound by its own window (§6.1).
+const GRANT_TTL: u64 = 86_400;
+
+/// The Gateway Grant a tenant signs for a standalone lease on the fixture
+/// provider: one gateway, one workload, a `standby_set` of one member (§7).
+fn grant_content(gateway: &Keys, seed: u8, expires_at: u64) -> GrantContent {
+    GrantContent {
+        workload_id: workload_id(seed),
+        gateway: gateway.public_key().to_hex(),
+        http_port: GRANT_HTTP_PORT,
+        standby_set: vec![keys(PROVIDER_SECRET).public_key().to_hex()],
+        expires_at,
+        name: None,
+    }
+}
+
+/// That grant, signed by `tenant` with reproducible auxiliary randomness.
+fn gateway_grant(content: &GrantContent, tenant: &Keys) -> Event {
+    with_reproducible_sig(
+        &gateway_grant_event(content, tenant, NOW).expect("a grant builds"),
+        tenant,
+    )
+}
+
 // ── the provider's side: a fixed configuration over faked I/O ────────────────
 
 fn listing(
@@ -468,6 +504,23 @@ impl Fixture {
             &[self.provider_pubkey()],
             op,
             &about(seed),
+            NOW,
+            NOW + ttl,
+        )
+    }
+
+    /// A `status` signed by a WORKLOAD GATEWAY, carrying the tenant's grant
+    /// in its content (spec §6.5). The gateway signs for itself: nothing of
+    /// the tenant's is here but the grant it published. `ttl` distinguishes
+    /// two such requests the same way `about_request`'s does.
+    fn granted_request(&self, gateway: &Keys, seed: u8, grant: &Event, ttl: u64) -> Event {
+        let mut content = about(seed);
+        content["grant"] = event_json(grant);
+        lease_request(
+            gateway,
+            &[self.provider_pubkey()],
+            "status",
+            &content,
             NOW,
             NOW + ttl,
         )
@@ -606,6 +659,7 @@ fn constants_and_test_keys() {
             "publisher": key(&keys(PUBLISHER_SECRET)),
             "primary_provider": key(&keys(PRIMARY_SECRET)),
             "standby_provider": key(&keys(STANDBY_SECRET)),
+            "gateway": key(&keys(GATEWAY_SECRET)),
             "kinds": {
                 "K_PROFILE": K_PROFILE,
                 "K_LISTING": K_LISTING,
@@ -616,6 +670,7 @@ fn constants_and_test_keys() {
                 "K_IMAGE": K_IMAGE,
                 "K_BLOB": K_BLOB,
                 "K_TEMPLATE": K_TEMPLATE,
+                "K_GATEWAY_GRANT": K_GATEWAY_GRANT,
             },
             "standby_price": STANDBY_PRICE,
             "label": TOON_LABEL,
@@ -1110,6 +1165,90 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
     assert_eq!(status, StatusCode::OK, "{}", response);
     assert_eq!(response["state"], "running");
     golden("status.running.json", doc);
+    let tenants_answer = response;
+
+    // The same status, asked by a WORKLOAD GATEWAY the tenant granted.
+    let gateway = keys(GATEWAY_SECRET);
+    let grant = gateway_grant(&grant_content(&gateway, aa, NOW + GRANT_TTL), &f.tenant);
+    golden(
+        "gateway_grant.json",
+        event_fixture(
+            "gateway_grant",
+            "grant",
+            "The Gateway Grant (spec §3.1.3): a TENANT-signed, addressable event that lets ONE \
+             Workload Gateway read ONE workload's lease state until it expires. `d` is the \
+             workload id, so republishing under the same id — a new `expires_at`, a different \
+             `gateway` — REPLACES the grant: renewal and rotation are the same act as \
+             publishing. The `p` tag names the gateway, so a gateway finds every grant naming \
+             it with one relay filter, and `L toon.network` is the label every published TOON \
+             Network event carries. `http_port` and `standby_set` are for the GATEWAY — which \
+             of the spawn's ports is the HTTP one, and which providers to ask — and a provider \
+             reads neither. It is carried inside the `status` request below; a provider never \
+             fetches one from a relay and never stores one.",
+            "K_GATEWAY_GRANT",
+            &grant,
+        ),
+    );
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "status",
+            "granted",
+            "Status of the same running lease, signed by the GATEWAY rather than the tenant \
+             and carrying `gateway_grant` as the content's `grant` (spec §6.5). The answer is \
+             byte-for-byte what the tenant was told in `status.running` — `role`, `state`, \
+             `expires_at`, `access`, and `template` and `takeover` where there are any — \
+             because a grant delegates reading this lease and changes nothing about what \
+             reading it says. The request is an ordinary Lease Request in every other way: \
+             the gateway's own signature, one `p` tag for this provider, `op=status`, and the \
+             same 60 s window and replay rule as any other (§6.1). The grant itself is not a \
+             replay concern — it is meant to be reused — and it is verified out of this \
+             request alone, so a Hidden Provider answers one without opening anything (§10).",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.granted_request(&gateway, aa, &grant, TTL)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(
+        response, tenants_answer,
+        "a granted gateway is answered exactly what the tenant is answered"
+    );
+    golden("status.granted.json", doc);
+
+    // And the refusal that keeps a grant a delegation rather than a bearer
+    // credential: one signed by somebody who does not hold this lease.
+    let stolen = gateway_grant(
+        &grant_content(&gateway, aa, NOW + GRANT_TTL),
+        &f.other_tenant,
+    );
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "error",
+            "bad_grant",
+            "A `status` signed by the gateway, carrying a grant for this workload that names \
+             this gateway and has not expired — but signed by somebody who is not this \
+             lease's tenant, so it delegates nothing here (spec §6.5). Every other defect is \
+             the same code and the same shape: an `id` or `sig` that does not verify, a `d` or \
+             a content `workload_id` that is not the request's, a `gateway` that is not the \
+             request's signer, and `now > expires_at`. One code on purpose — a gateway learns \
+             that its grant does not apply and nothing about the lease — and distinct from \
+             `not_tenant`, which is still what a signer carrying no grant at all is told.",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.granted_request(&gateway, aa, &stolen, TTL + 1)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{}", response);
+    assert_eq!(error_of(&response), "bad_grant");
+    golden(
+        "error.bad_grant.json",
+        with_validation_step(doc, "§6.5: a grant MUST be signed by the lease's tenant"),
+    );
 
     // Extend.
     let (status, response, doc) = exchange(

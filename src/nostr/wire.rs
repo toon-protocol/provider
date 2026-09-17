@@ -180,10 +180,23 @@ pub struct SpawnContent {
 }
 
 /// Content of a Lease Request with `op = status` or `op = terminate`.
+///
+/// `grant` is read by `status` ALONE (spec §6.5): it is how a Workload
+/// Gateway that is not the tenant signs for itself and still gets an answer.
+/// `terminate` parses it and ignores it — a grant delegates reading a lease
+/// and nothing more, so a gateway's termination is still `not_tenant` — and
+/// it is a field of this content and of no other, so a `grant` on `spawn`,
+/// `extend`, `standby.extend` or `availability` stays the `invalid_request`
+/// any unknown field is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkloadContent {
     pub workload_id: String,
+    /// The whole signed Gateway Grant event (`K_GATEWAY_GRANT`, §3.1.3), as
+    /// JSON. Verified out of this request and nowhere else: the provider
+    /// never reads a grant from a relay and never stores one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant: Option<nostr_sdk::Event>,
 }
 
 /// Body of `.extend`: no signature, any payer may extend any lease (ADR 0005).
@@ -513,6 +526,12 @@ pub enum ErrorCode {
     NotRunning,
     BadSignature,
     StaleRequest,
+    /// A `status` carried a Gateway Grant that does not admit its signer
+    /// (spec §6.5): unsigned or mis-signed, signed by someone who is not
+    /// this lease's tenant, about another workload, naming another gateway,
+    /// or expired. Distinct from `NotTenant`, which is what a signer with no
+    /// grant at all still hears, so the two refusals stay tellable apart.
+    BadGrant,
 }
 
 /// Every error answer, on free and paid routes alike. On a paid route it is
