@@ -268,6 +268,7 @@ fn every_error_code_serialises_as_the_spec_writes_it() {
         (ErrorCode::NotRunning, "not_running"),
         (ErrorCode::BadSignature, "bad_signature"),
         (ErrorCode::StaleRequest, "stale_request"),
+        (ErrorCode::BadGrant, "bad_grant"),
     ];
     for (code, text) in expected {
         let value = serde_json::to_value(ErrorResponse::new(code, "why")).unwrap();
@@ -286,11 +287,15 @@ fn extend_status_and_terminate_shapes_round_trip() {
         serde_json::from_str(&serde_json::to_string(&extend).unwrap()).unwrap();
     assert_eq!(back, extend);
 
+    // No `grant`: the field is optional and absent, never `null`, so the
+    // body a tenant signs is the one it has always signed (spec §6.5).
     let content = WorkloadContent {
         workload_id: "ab".repeat(32),
+        grant: None,
     };
-    let back: WorkloadContent =
-        serde_json::from_str(&serde_json::to_string(&content).unwrap()).unwrap();
+    let rendered = serde_json::to_string(&content).unwrap();
+    assert!(!rendered.contains("grant"), "{}", rendered);
+    let back: WorkloadContent = serde_json::from_str(&rendered).unwrap();
     assert_eq!(back, content);
 
     let response = ExtendResponse {

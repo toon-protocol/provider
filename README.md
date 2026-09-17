@@ -823,7 +823,19 @@ spawned on another listing version: a lease keeps the price it started at
 `{ "request": <Lease Request> }` with `op` = `status` or `terminate` and the
 content `{ "workload_id": "…" }`. The request is validated exactly as a
 spawn's is, replay included, and **the signer must be the lease's tenant** —
-anyone else is refused `not_tenant`.
+anyone else is refused `not_tenant`. The one exception is `status` carrying a
+**Gateway Grant**: the content may add `"grant": <kind 30438 event>`, a
+delegation the tenant signed and published that lets **one** Workload
+Gateway read this lease (spec §3.1.3, §6.5). The provider verifies it out of
+the request alone — its `id` and `sig`, that the lease's tenant signed it,
+that its `d` and `workload_id` are the request's, that its `gateway` is the
+request's signer, and `now <= expires_at` — and refuses any failure
+`bad_grant`, one code for all of them; it never reads a grant from a relay
+and never stores one. `terminate` parses the field and ignores it. A tenant
+signs and publishes a grant with the [grant tool](tools/grant/README.md);
+because the grant is addressable on the workload id, publishing it again
+with a later expiry renews it and with another gateway rotates it, and there
+is no revocation before expiry other than respawning under a new workload id.
 
 Status answers:
 
@@ -1197,6 +1209,11 @@ cargo test -- --ignored    # the Docker backend and a registry-entry spawn again
 cargo clippy --all-targets
 cargo run -- --config provider.toml
 ```
+
+Two Node tools live beside the app under `tools/`, each with its own
+`npm install` and `npm test`: the [directory publisher](tools/publisher/README.md),
+the provider's payer for relay writes, and the [grant tool](tools/grant/README.md),
+the tenant-side command that signs and publishes a Gateway Grant.
 
 ## License
 

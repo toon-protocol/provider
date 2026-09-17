@@ -1,0 +1,51 @@
+{
+  "fixture": {
+    "case": "granted",
+    "description": "Status of the same running lease, signed by the GATEWAY rather than the tenant and carrying `gateway_grant` as the content's `grant` (spec §6.5). The answer is byte-for-byte what the tenant was told in `status.running` — `role`, `state`, `expires_at`, `access`, and `template` and `takeover` where there are any — because a grant delegates reading this lease and changes nothing about what reading it says. The request is an ordinary Lease Request in every other way: the gateway's own signature, one `p` tag for this provider, `op=status`, and the same 60 s window and replay rule as any other (§6.1). The grant itself is not a replay concern — it is meant to be reused — and it is verified out of this request alone, so a Hidden Provider answers one without opening anything (§10).",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "status"
+  },
+  "http_path": "/status",
+  "request_body": {
+    "request": {
+      "content": "{\"grant\":{\"content\":\"{\\\"workload_id\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"gateway\\\":\\\"7962d45b38e8bcf82fa8efa8432a01f20c9a53e24c7d3f11df197cb8e70926da\\\",\\\"http_port\\\":443,\\\"standby_set\\\":[\\\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\\\"],\\\"expires_at\\\":1700086400}\",\"created_at\":1700000000,\"id\":\"4f2ccaab8a2883cccf9a97cf2c1de03348903364e1feb635ee3d9d0d68025470\",\"kind\":30438,\"pubkey\":\"4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa\",\"sig\":\"fb28023a15601d0b6cf2345a6aa30e3e79b0b7c856171f39ef67a295b37e886c09a5e9efd83abefc98abb5751a91f46f6e735b7e18ef456fd55eb9d9f7c448ae\",\"tags\":[[\"d\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],[\"p\",\"7962d45b38e8bcf82fa8efa8432a01f20c9a53e24c7d3f11df197cb8e70926da\"],[\"L\",\"toon.network\"]]},\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "created_at": 1700000000,
+      "id": "b3fb6f48009289afc52a41521c5a4fc9b1abc2aa5f6dfe1837e450d11e078415",
+      "kind": 4432,
+      "pubkey": "7962d45b38e8bcf82fa8efa8432a01f20c9a53e24c7d3f11df197cb8e70926da",
+      "sig": "147cb31109404936dc386beb89aeef932f9821896ab7e5a6ecb364a4f75cdb2cf64b0dcc07f1e019d3d08cb5300f0a59ce8ce9586fd78d755f0ebcce3a05df87",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "status"
+        ],
+        [
+          "expiration",
+          "1700000060"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "access": {
+      "host": "203.0.113.7",
+      "ports": [
+        {
+          "container_port": 443,
+          "host_port": 41000
+        }
+      ],
+      "ssh_port": 40000
+    },
+    "expires_at": 1700003600,
+    "role": "standalone",
+    "state": "running",
+    "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "response_status": 200,
+  "route": "g.fixture.status"
+}

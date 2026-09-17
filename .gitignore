@@ -6,3 +6,6 @@
 /leases.json
 
 .DS_Store
+
+# Node tooling under tools/
+node_modules/

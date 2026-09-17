@@ -44,6 +44,15 @@ pub const K_TEMPLATE: u16 = 30_436;
 /// TOON Network block (spec §3.1.2) but never published by a provider.
 pub const K_DEPLOYMENT: u16 = 30_437;
 
+/// Gateway Grant: a TENANT-signed delegation that lets ONE Workload Gateway
+/// read ONE workload's lease state on the free `status` route, until it
+/// expires (spec §3.1.3, §6.5). Addressable with `d` = the workload id, so
+/// renewing or rotating is republishing; it carries a `["p", "<gateway>"]`
+/// tag so a gateway finds the grants naming it with one relay filter. The
+/// provider only ever reads one, and only out of the request that carried
+/// it (`nostr::gateway_grant`).
+pub const K_GATEWAY_GRANT: u16 = 30_438;
+
 /// Lease Request: a tenant-signed event carried inside request bodies. It is
 /// a regular kind that is NEVER PUBLISHED — the provider validates it and
 /// must not forward it to any relay.
@@ -73,6 +82,7 @@ mod tests {
             K_BLOB,
             K_TEMPLATE,
             K_DEPLOYMENT,
+            K_GATEWAY_GRANT,
         ] {
             assert!((30_000..=39_999).contains(&addressable));
         }
@@ -92,6 +102,7 @@ mod tests {
             K_BLOB,
             K_TEMPLATE,
             K_DEPLOYMENT,
+            K_GATEWAY_GRANT,
             K_LEASE_REQUEST,
             K_EVICTION,
         ];
