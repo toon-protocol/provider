@@ -119,6 +119,62 @@ parts:
   `http://127.0.0.1:8090`): the loopback-only operator endpoint `toon-provider
   evict` talks to. See [Eviction](#eviction) — **this port must never be
   exposed off the host the provider runs on.**
+- `public_ip`: the host a lease's access details name. Required unless the
+  provider is hidden, and refused beside `hidden = true`.
+- `hidden` and `[anon]`: the Hidden Provider declaration and everything it
+  needs from its `anon` daemon — see [Hidden Provider](#hidden-provider).
+
+## Hidden Provider
+
+A provider that sets `hidden = true` (spec §10, ADR 0008) publishes a
+Profile with `hidden: true` and **no `host`**, and every Listing it
+publishes carries `["l", "hidden:true", "toon.network"]` beside its
+isolation and arch labels, so a tenant can filter for or against hidden
+compute by tag alone. The flag is a **self-assertion**: nothing outside the
+provider verifies it, and it hides where the provider is, not that it was
+paid — payments stay public on chain.
+
+Because it is a claim, the app refuses to start — and `load_config`
+refuses to load, so `toon-provider routes` refuses too — unless every
+hiding condition is configured. Each missing one is its own refusal naming
+it:
+
+| Condition (ADR 0008) | Config | Refused when |
+|---|---|---|
+| No published host | `public_ip` absent | `public_ip` is set beside `hidden = true` |
+| Connector reachable only at `.anyone` | `connector_url` | its host does not end in `.anyone` |
+| Per-lease `.anyone` addresses | `[anon.control]` — `addr`, and `cookie_file` **or** `password` | missing, not `host:port`, neither or both authentications |
+| The provider's own outbound through `anon` | `anon.socks_proxy` | missing, or not `socks5h://<host>:<port>` |
+| All workload egress through `anon`, direct egress dropped | `[anon.egress]` — `network`, `gateway` | missing, or `gateway` not an IP address |
+| Its own settlement RPC | `anon.settlement_rpc_url` | missing, or its host is public (below) |
+
+**The settlement RPC rule.** The URL's host must be loopback, a private
+range (RFC 1918 `10/8`, `172.16/12`, `192.168/16`; link-local; IPv6 `::1`,
+ULA `fc00::/7`, `fe80::/10`), or a hostname whose DNS resolution yields
+**only** such addresses; `localhost` is loopback by definition. A public
+address anywhere in the answer — `https://api.mainnet-beta.solana.com`
+resolved, or `8.8.8.8` written down — is refused, because an unproxied read
+of a public RPC links the operator's network location to its on-chain
+identity. A hostname that **does not resolve where the config is loaded** is
+accepted **with a warning** at load: the sandbox's chain hostnames (`anvil`,
+`solana-validator`) resolve only inside its compose network, and an operator
+rendering the route table on the host with `toon-provider routes` must not
+be told a config is invalid that is valid where it runs. The **running**
+provider checks the name again at startup and refuses to start if it still
+does not resolve there — a hidden provider that cannot show its RPC is
+self-hosted does not publish `hidden: true`. Without `hidden = true` none of
+the `[anon]` keys is required and the RPC is not gated; keys that are
+present are still checked for shape, so a typo fails where it was written.
+
+What the config does not (yet) do: the per-lease `.anyone` addresses, the
+`anon` egress network and the proxied outbound land in the later Milestone
+4 tickets against the shapes defined here — the `HiddenService` port
+(`src/hidden_service.rs`: `create_address`, `destroy_address`,
+`egress_for`), the `egress` field on `ContainerConfig`, and `[anon]`. Until
+the per-lease addresses land, a spawn on a hidden provider is refused
+`invalid_request` with a message saying so, and `availability` answers the
+same for free first, so nobody pays for an address the provider cannot yet
+give; the Profile, the Listings and Liveness are published as usual.
 
 ## Routes and the connector
 
@@ -794,8 +850,8 @@ The provider publishes these events to every relay in its Relay Set (spec
 
 | Event | Class | Carries |
 |---|---|---|
-| **Provider Profile** | replaceable | `ilp_address`, `connector_url`, `connector_seal_key`, `relays`, `settlement[]`, `isolation`, `hidden`, `host`, `liveness_cadence_s` |
-| **Listing**, one per tier | addressable, `d` = listing name | content `{version, resources, arch, lease_interval_s, price, capabilities}`; tags `a` (the Profile), `L`, `l isolation:…`, `l arch:…`, `l gpu:…`, one `t` per capability, optional `g` |
+| **Provider Profile** | replaceable | `ilp_address`, `connector_url`, `connector_seal_key`, `relays`, `settlement[]`, `isolation`, `hidden`, `host` (absent when hidden), `liveness_cadence_s` |
+| **Listing**, one per tier | addressable, `d` = listing name | content `{version, resources, arch, lease_interval_s, price, capabilities}`; tags `a` (the Profile), `L`, `l isolation:…`, `l arch:…`, `l hidden:true` (on a [Hidden Provider](#hidden-provider) only), `l gpu:…`, one `t` per capability, optional `g` |
 | **Liveness** | replaceable | `{ "available": { "<listing>": n } }` with `n` = capacity − live leases, and `["expiration", now + 5 × cadence]` (ADR 0007) |
 | **Eviction Notice**, one per eviction | regular | `{ "workload_id", "reason", "message" }`; tag `x` = the workload id. See [Eviction](#eviction). |
 | **Takeover**, one per workload this provider claims | addressable, `d` = workload id | `{ "workload_id", "primary" }`, signed by this provider as a Warm Standby — and published to the **primary's** Relay Set, not this provider's. See [Watching the primary](#watching-the-primary). |
@@ -909,8 +965,9 @@ error code in validation order, one Profile, Listing, Liveness, Eviction
 Notice and Takeover each, the two roles a Standby Set gives (`spawn.primary`,
 `spawn.standby` and a `status` for each), the `status` of a standby that
 won a Takeover and of one that lost (`status.won`, `status.lost` — driven
-through the real watchdog over the fake Directory), and the route table a
-Listing generates. Everything is produced
+through the real watchdog over the fake Directory), a Hidden Provider's
+Profile and Listing (`directory.profile.hidden`, `directory.listing.hidden`),
+and the route table a Listing generates. Everything is produced
 over fixed test-only keys, a fixed clock and BIP-340 signatures with all-zero
 auxiliary randomness, so the bytes are reproducible and a tenant can re-derive
 every id and signature (TOON_Network #16).
