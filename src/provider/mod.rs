@@ -21,7 +21,10 @@
 // announced a Takeover — settle the race, and start the workload if it won.
 // `image_policy` is the rule both `spawn` and `availability` apply, so the
 // two can never disagree; `fetcher` (over `oci` and the TOON store gateway)
-// is how every image byte they read arrives, verified.
+// is how every image byte they read arrives, verified. `lease_address` is
+// the one place any of them talks to the `HiddenService` port: a hidden
+// lease's own `.anyone` address, made with its workload, destroyed with it,
+// and re-established after a restart (spec §10).
 
 mod availability;
 pub mod blob_cache;
@@ -29,6 +32,7 @@ mod cleanup;
 mod config;
 pub mod fetcher;
 pub mod image_policy;
+mod lease_address;
 mod lifecycle;
 pub mod oci;
 pub mod oci_layout;
@@ -226,10 +230,20 @@ impl ProviderService {
             expired,
         );
 
-        let mut lock = self.state.leases.lock().await;
-        *lock = restored;
-        // Write back now so dropped entries don't linger until the next sweep.
-        persist_leases(&lock, &self.state.config.lease_state_path);
+        {
+            let mut lock = self.state.leases.lock().await;
+            *lock = restored;
+            // Write back now so dropped entries don't linger until the next sweep.
+            persist_leases(&lock, &self.state.config.lease_state_path);
+        }
+
+        // And, on a Hidden Provider, give every live lease its `.anyone`
+        // address back. An address made over the daemon's control port does
+        // not outlive the daemon, and a tenant was handed that host at its
+        // spawn: without this a restart would leave every paid lease
+        // unreachable, or reachable only at an address nobody was told
+        // (spec §10).
+        lease_address::restore_all(&self.state).await;
     }
 
     /// Run the provider until one of its loops exits.

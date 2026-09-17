@@ -355,18 +355,26 @@ async fn start_won(state: &AppState, id: u32) {
         ssh_port,
         ports: &ports,
     };
-    if let Err(e) = fetch_and_start(state, &image, &resolved, launch).await {
-        warn!(
-            "lease {}: {} could not be started ({}); trying again on the next step",
-            id, content.workload_id, e.message
-        );
-        return;
-    }
+    // The address a hidden lease is reached at is made here too, by the same
+    // call a spawn makes it with: a reservation had none — nothing ran
+    // behind it — and the winner's start is where the lease first has
+    // somewhere to reach (spec §10, §7.1 step 4).
+    let address = match fetch_and_start(state, &image, &resolved, launch).await {
+        Ok(address) => address,
+        Err(e) => {
+            warn!(
+                "lease {}: {} could not be started ({}); trying again on the next step",
+                id, content.workload_id, e.message
+            );
+            return;
+        }
+    };
 
     let mut leases = state.leases.lock().await;
     match leases.get_mut(&id) {
         Some(lease) if lease.state == LeaseState::Reserved => {
             lease.state = LeaseState::Running;
+            lease.hidden_address = address;
             // What a Takeover would start has been started; a running lease
             // keeps nothing of the sort (`LeaseRecord::reserved_spawn`).
             lease.reserved_spawn = None;
@@ -390,6 +398,9 @@ async fn start_won(state: &AppState, id: u32) {
             if let Err(e) = state.backend.delete_container(id).await {
                 warn!("lease {}: could not clean up its workload: {}", id, e);
             }
+            // The ending found no address on the record — it was made a
+            // moment ago and never got there — so this one is ours.
+            super::lease_address::destroy_unrecorded(state, &content.workload_id).await;
         }
     }
 }

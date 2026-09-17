@@ -389,9 +389,9 @@ impl ProviderConfig {
     /// The host a lease's access details name, on a provider that is NOT
     /// hidden: its `public_ip`, which `validate` requires there. `None` on
     /// a Hidden Provider, which publishes no host: each of its leases
-    /// carries a `.anyone` address of its own instead (M4-2, TOON_Network
-    /// #39), and until that lands it starts no lease at all
-    /// (`spawn::refuse_until_per_lease_addresses`).
+    /// carries a `.anyone` address of its own instead, and that address is
+    /// what its `access.host` answers (`LeaseRecord::access_host`, spec
+    /// §10).
     pub fn access_host(&self) -> Option<&str> {
         self.public_ip.as_deref()
     }
@@ -1160,6 +1160,7 @@ mod tests {
             template: None,
             ssh_port: 40000,
             ports: vec![],
+            hidden_address: None,
         }
     }
 
