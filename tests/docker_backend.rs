@@ -378,8 +378,13 @@ const GATEWAY_PORT: u16 = 9040;
 /// on its own subnet, so the ignored tests can run at once.
 struct EgressNet {
     policy: EgressPolicy,
+    subnet: String,
     stub: String,
 }
+
+/// The default bridge's subnet on a stock daemon: what no hidden
+/// namespace may have a route into.
+const DEFAULT_BRIDGE_SUBNET: &str = "172.17.";
 
 impl EgressNet {
     fn create(id: u32) -> Self {
@@ -414,6 +419,7 @@ impl EgressNet {
         ]);
         Self {
             policy: EgressPolicy { network, gateway },
+            subnet,
             stub,
         }
     }
@@ -462,7 +468,6 @@ fn dial_published(port: u16) -> Option<String> {
 fn assert_confined(container: &str, net: &EgressNet, what: &str) {
     let (ok, routes) = exec(container, &["ip", "-4", "route"]);
     assert!(ok, "{}: ip route", what);
-    let subnet = net.policy.gateway.trim_end_matches(".2");
     let lines: Vec<&str> = routes.lines().collect();
     assert!(
         lines
@@ -475,13 +480,13 @@ fn assert_confined(container: &str, net: &EgressNet, what: &str) {
     assert!(
         lines
             .iter()
-            .any(|l| l.starts_with(&format!("{}.0/24 dev ", subnet))),
+            .any(|l| l.starts_with(&format!("{} dev ", net.subnet))),
         "{}: the egress subnet is on-link: {}",
         what,
         routes
     );
     assert!(
-        !routes.contains("172.17."),
+        !routes.contains(DEFAULT_BRIDGE_SUBNET),
         "{}: no route via the default bridge: {}",
         what,
         routes

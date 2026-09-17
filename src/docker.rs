@@ -288,11 +288,14 @@ fn egress_route_command(policy: &EgressPolicy) -> String {
 /// On a hidden lease the daemon's egress route comes first, before anything
 /// could be pulled: the sidecar is on internal networks only, so until then
 /// it has no route at all, and being privileged it needs no helper to set
-/// one. A route that cannot be set fails the command, and the lease.
+/// one. A route that cannot be set exits the command, and so fails the
+/// lease. `|| exit 1;`, not `&&`: `&&` binds tighter than the `&` that
+/// backgrounds the daemon, and would background the whole list — leaving
+/// `$!` naming a subshell rather than the daemon the trap must reach.
 fn sidecar_command(egress: Option<&EgressPolicy>) -> String {
     let socket = format!("{}/{}", SIDECAR_SOCKET_DIR, SOCKET_FILE);
     let route = egress
-        .map(|policy| format!("{} && ", egress_route_command(policy)))
+        .map(|policy| format!("{} || exit 1; ", egress_route_command(policy)))
         .unwrap_or_default();
     format!(
         "{route}dockerd-entrypoint.sh dockerd --host=unix://{socket} --bip={bip} \
@@ -799,8 +802,8 @@ impl DockerBackend {
     /// forwarder — removed. Best-effort and idempotent: it runs on every
     /// delete, on a failed build, and before a re-spawn at an id whose last
     /// lease may have left pieces behind. The data volume is not touched
-    /// here. The workload must already be gone: its namespace is the
-    /// owner's.
+    /// here. Callers remove the workload first where one exists, since a
+    /// hidden workload's namespace is the owner's.
     async fn remove_lease_extras(&self, id: u32) {
         let had_sidecar = self.running(&sidecar_name(id)).await.is_some();
         self.remove_lease_extras_after(id, had_sidecar).await;
@@ -955,23 +958,38 @@ impl DockerBackend {
         Ok(())
     }
 
-    /// Waits until the owner's namespace has its default route — the one
-    /// thing its command does — giving up if the owner exits (the route
-    /// could not be set: a gateway that is not on the egress network, say)
-    /// or the timeout passes. Nothing joins the namespace before this
-    /// answers, so no workload ever runs in one without the route.
+    /// The gateway an owner was made for: its resolver, which `owner_args`
+    /// set to exactly that. Read back rather than remembered, since this
+    /// backend keeps no state and a restart knows only the id.
+    async fn owner_gateway(&self, id: u32) -> Result<String> {
+        self.docker_ok(
+            &[
+                "inspect".into(),
+                "-f".into(),
+                "{{index .HostConfig.Dns 0}}".into(),
+                egress_name(id),
+            ],
+            "reading the egress namespace's gateway",
+        )
+        .await
+    }
+
+    /// Waits until the owner's namespace has its default route via the
+    /// gateway — the one thing its command does — giving up if the owner
+    /// exits (the route could not be set: a gateway that is not on the
+    /// egress network, say) or the timeout passes. Nothing joins the
+    /// namespace before this answers, so no workload ever runs in one
+    /// without the route.
     async fn wait_for_route(&self, id: u32) -> Result<()> {
         let owner = egress_name(id);
+        let via = format!("default via {} ", self.owner_gateway(id).await?);
         let deadline = Instant::now() + ROUTE_READY_TIMEOUT;
         loop {
             let probe = self
                 .docker(&["exec", &owner, "ip", "-4", "route", "show", "default"])
                 .await?;
-            if probe.status.success() {
-                let route = String::from_utf8_lossy(&probe.stdout);
-                if route.contains("default via ") {
-                    return Ok(());
-                }
+            if probe.status.success() && String::from_utf8_lossy(&probe.stdout).contains(&via) {
+                return Ok(());
             }
             if self.running(&owner).await != Some(true) {
                 let logs = self.docker(&["logs", "--tail", "20", &owner]).await?;
@@ -1019,6 +1037,19 @@ impl DockerBackend {
             self.apply_unit_limits(layout, config).await?;
         }
         if let Some(policy) = &config.egress {
+            let udp: Vec<u16> = config
+                .ports
+                .iter()
+                .filter(|p| !p.protocol.eq_ignore_ascii_case("tcp"))
+                .map(|p| p.host_port)
+                .collect();
+            if !udp.is_empty() {
+                warn!(
+                    "lease {} publishes UDP host ports {:?} that a hidden-service address cannot \
+                     carry; they are not forwarded",
+                    id, udp
+                );
+            }
             self.docker_ok(
                 &Self::owner_args(config, policy),
                 "starting the egress namespace",
@@ -1328,18 +1359,14 @@ mod tests {
     fn flag_values<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
         args.iter()
             .enumerate()
-            .filter(|(i, a)| *i > 0 && args[i - 1] == flag && a.as_str() != flag)
+            .filter(|(i, _)| *i > 0 && args[i - 1] == flag)
             .map(|(_, a)| a.as_str())
             .collect()
     }
 
     /// The `-v` values of an argv, in order.
     fn mounts(args: &[String]) -> Vec<&str> {
-        args.iter()
-            .enumerate()
-            .filter(|(i, _)| *i > 0 && args[i - 1] == "-v")
-            .map(|(_, a)| a.as_str())
-            .collect()
+        flag_values(args, "-v")
     }
 
     fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
@@ -1710,10 +1737,13 @@ mod tests {
         assert_eq!(flag_value(&sidecar, "--dns"), Some("172.30.0.2"));
         let command = sidecar.last().unwrap();
         assert!(
-            command.starts_with("ip route replace default via 172.30.0.2 && dockerd-entrypoint.sh"),
-            "{}",
+            command.starts_with(
+                "ip route replace default via 172.30.0.2 || exit 1; dockerd-entrypoint.sh"
+            ),
+            "the route is a statement of its own, so `&` still backgrounds only the daemon: {}",
             command
         );
+        assert!(command.contains("dockerd-entrypoint.sh dockerd") && command.contains("& pid=$!;"));
         assert!(command.contains("--host=unix:///toon/run/docker.sock"));
 
         // The public sidecar has none of it.
