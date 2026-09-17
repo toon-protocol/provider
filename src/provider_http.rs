@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -36,6 +36,7 @@ use crate::directory::{ConnectorDirectory, Directory, NullDirectory};
 use crate::hidden_service::HiddenService;
 use crate::nostr::lease_request::AcceptedRequests;
 use crate::nostr::wire::{ErrorCode, ErrorResponse, EvictRequest};
+use crate::outbound_proxy::OutboundProxy;
 use crate::provider::routes::{
     AVAILABILITY_PATH, EXTEND_PATTERN, SPAWN_PATTERN, STANDBY_EXTEND_PATTERN, STANDBY_PATTERN,
     STATUS_PATH, TERMINATE_PATH,
@@ -93,15 +94,20 @@ impl AppState {
         config.validate()?;
         let keys = Keys::parse(&config.nostr_private_key)
             .context("nostr_private_key must be a hex or nsec1 secret key")?;
-        let directory = directory_from_config(&config)?;
+        let proxy = outbound_proxy_from_config(&config)?;
+        let directory = directory_from_config(&config, proxy.as_ref())?;
         let hidden_service = hidden_service_from_config(&config)?;
         let image_policy = Arc::new(ImagePolicy::from_config(&config.image_policy));
         let cache = BlobCache::open(config.blob_cache_dir(), config.blob_cache_max_bytes)?;
-        let fetcher = Arc::new(BlobFetcher::new(
+        let fetcher = BlobFetcher::new(
             config.gateway_url_pattern.clone(),
             config.image_policy.registry_url_override.clone(),
             cache,
-        ));
+        );
+        let fetcher = Arc::new(match &proxy {
+            Some(proxy) => fetcher.with_proxy(proxy)?,
+            None => fetcher,
+        });
         Ok(Self {
             config: Arc::new(config),
             backend,
@@ -136,17 +142,64 @@ impl AppState {
     }
 }
 
+/// Where this provider's OWN outbound goes: the `anon` SOCKS port when it is
+/// hidden, and nowhere — direct, exactly as before — when it is not (spec
+/// §10, TOON_Network #42).
+///
+/// Read only under `hidden = true`, though `anon.socks_proxy` is a key any
+/// config may carry: a provider that publishes no `hidden: true` claims
+/// nothing about where its packets come from, and silently routing it
+/// through a daemon it happened to name would change what it does without
+/// changing what it says.
+///
+/// The proxy's own name is resolved here, once, at startup — see
+/// `OutboundProxy`. A daemon that cannot be resolved is a refusal to start
+/// and not a warning: a hidden provider whose proxy is unreachable would
+/// otherwise carry on publishing from its real address.
+fn outbound_proxy_from_config(config: &ProviderConfig) -> Result<Option<OutboundProxy>> {
+    if !config.hidden {
+        return Ok(None);
+    }
+    match &config.anon.socks_proxy {
+        Some(url) => Ok(Some(OutboundProxy::resolve(url)?)),
+        // Unreachable through `validate`, which requires the key under
+        // `hidden = true`; an `Ok(None)` here would be a provider that is
+        // hidden everywhere but on its own socket.
+        None => bail!(
+            "hidden = true, so anon.socks_proxy must be set: this provider's own relay reads, \
+             image fetches and Directory writes have nowhere to leave through (spec §10)"
+        ),
+    }
+}
+
 /// The Directory a config describes: the real one when it names a directory
 /// publisher, and one that publishes nothing when it does not. A provider
 /// with no `publish_url` still serves every route — it is simply not in the
 /// directory.
-fn directory_from_config(config: &ProviderConfig) -> Result<Arc<dyn Directory>> {
+///
+/// `proxy` is `Some` only on a Hidden Provider, and then EVERY relay read
+/// goes out through it — a publisher-less one included, because watching a
+/// primary and resolving an image are reads that name this host to a relay
+/// operator just as a publication would.
+fn directory_from_config(
+    config: &ProviderConfig,
+    proxy: Option<&OutboundProxy>,
+) -> Result<Arc<dyn Directory>> {
     match &config.publish_url {
-        Some(url) => Ok(Arc::new(ConnectorDirectory::new(
-            url.clone(),
-            config.relay_set.clone(),
-        )?)),
-        None => Ok(Arc::new(NullDirectory::new(config.relay_set.clone()))),
+        Some(url) => {
+            let mut directory = ConnectorDirectory::new(url.clone(), config.relay_set.clone())?;
+            if let Some(proxy) = proxy {
+                directory = directory.with_proxy(proxy)?;
+            }
+            Ok(Arc::new(directory))
+        }
+        None => {
+            let mut directory = NullDirectory::new(config.relay_set.clone());
+            if let Some(proxy) = proxy {
+                directory = directory.with_proxy(proxy);
+            }
+            Ok(Arc::new(directory))
+        }
     }
 }
 

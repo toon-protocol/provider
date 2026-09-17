@@ -52,6 +52,7 @@ use super::oci::{OciClient, OciEndpoint};
 use crate::directory::Directory;
 use crate::nostr::image_events::{BlobRecord, BlobRecordContent, BlobSource, ImageEntry};
 use crate::nostr::wire::{ErrorCode, ErrorResponse};
+use crate::outbound_proxy::{http_client, OutboundProxy};
 
 /// The placeholder a `gateway_url_pattern` must contain, replaced by the
 /// transaction id of the part or record being read.
@@ -327,6 +328,10 @@ impl BlobSources {
     }
 }
 
+/// How long one image fetch may take: a gateway read, a registry pull, or the
+/// token exchange between them.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// One provider-wide fetcher, shared by `availability` and every spawn
 /// (`AppState`). Holds the HTTP client, the registry client, the gateway
 /// pattern and the cache of verified blobs.
@@ -350,16 +355,30 @@ impl BlobFetcher {
         registry_url_override: Option<String>,
         cache: BlobCache,
     ) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("reqwest client with a timeout builds");
+        let http = http_client(None, FETCH_TIMEOUT, "image fetches")
+            .expect("a client with a timeout and no proxy builds");
         Self {
             oci: OciClient::new(http.clone(), registry_url_override),
             http,
             gateway_url_pattern,
             cache,
         }
+    }
+
+    /// The same fetcher, with every byte it pulls leaving through `proxy`:
+    /// the TOON store gateway, the upstream OCI registries, and the
+    /// anonymous pull-token exchange a registry challenges with — which is a
+    /// request to a THIRD host (the registry's auth realm) and would
+    /// otherwise be the one image fetch that named this provider (spec §10).
+    ///
+    /// One client for all three, so no source can be added later that
+    /// quietly goes direct. `socks5h`, so the registry's and the realm's
+    /// names are resolved by the proxy.
+    pub fn with_proxy(mut self, proxy: &OutboundProxy) -> Result<Self> {
+        let http = http_client(Some(proxy), FETCH_TIMEOUT, "image fetches")?;
+        self.oci = self.oci.with_client(http.clone());
+        self.http = http;
+        Ok(self)
     }
 
     /// The cache every verified blob lands in — where a spawn reads them

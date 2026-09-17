@@ -258,10 +258,45 @@ prints why and passes, exactly as the Docker-only tests do on a machine with
 no Docker. The sandbox's `hs` profile daemon has `ControlSocket 0` and no
 `ControlPort` today, so nothing there answers it yet.
 
-What the config does not (yet) do: the `anon` egress network and the
-proxied outbound land in the later Milestone 4 tickets against the shapes
-defined here — `HiddenService::egress_for`, the `egress` field on
-`ContainerConfig`, and `[anon]`.
+### The provider's own outbound
+
+Hiding the workloads is not enough if the process itself dials from its real
+address. With `hidden = true` **every connection this provider opens for
+itself** leaves through `anon.socks_proxy`:
+
+| What | Through |
+|---|---|
+| Relay websockets — Liveness watching, Profile lookups, Takeover and Blob Record queries | the nostr client's SOCKS connection mode, for **every** relay and not only `.anyone` ones |
+| The TOON store gateway, upstream OCI registries, and the **anonymous pull-token exchange** a registry's 401 sends it to | one proxied HTTP client, shared by all three |
+| The publish request to the directory publisher | the same proxy — unless the publisher is on this host or its own private network, which is dialled directly |
+
+The scheme is `socks5h`, never `socks5`, and a config that says otherwise is
+refused at startup naming the key: the trailing `h` is what makes the *proxy*
+resolve the destination's name. Under plain `socks5` this host resolves a
+relay's — or an `.anyone` address's — name first, and that lookup is exactly
+what hiding is for. The proxy's own host is the one name resolved here, once,
+at startup; a proxy that does not resolve there is a refusal to start, because
+a hidden provider that cannot reach its daemon must not carry on publishing
+from its real address.
+
+A **near publisher** is the one direct dial, and it hides nothing: a publisher
+on loopback, or one container over on a private network (the sandbox's
+`directory-publisher-hs`), is reached by a packet that crosses nothing anyone
+outside can watch, and `anon` builds no circuit to such an address in any
+case. The test is the one the settlement RPC uses — loopback, a private or
+link-local range, or a name resolving only to those — so an operator has one
+notion of "near" to hold. The hop that does leave is the publisher's own, to
+the connector that sells the relay write, so every publish request from a
+hidden provider **carries the proxy** (`"proxy": "socks5h://…"` beside `event`
+and `relays`), near publisher or not, and the publisher dials through it for
+any host.
+See [`tools/publisher/README.md`](tools/publisher/README.md). A provider that
+is not hidden sends no `proxy` field and opens every connection directly,
+exactly as before.
+
+What the config does not (yet) do: the `anon` egress network lands in the
+later Milestone 4 ticket against the shapes defined here —
+`HiddenService::egress_for` and the `egress` field on `ContainerConfig`.
 
 ## Routes and the connector
 

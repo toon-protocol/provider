@@ -4,6 +4,7 @@
 
 pub mod harness;
 pub mod relay;
+pub mod socks;
 pub mod store;
 
 use std::collections::HashMap;

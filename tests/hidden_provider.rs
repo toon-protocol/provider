@@ -12,14 +12,16 @@
 
 mod common;
 
+use common::socks::SocksStub;
+
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use common::harness::{
-    config_for, error_of, harness, harness_from, hidden_config, listing, post, spawn,
-    spawn_content, Harness, RequestSpec, HIDDEN_CONNECTOR_URL, INTERVAL, NOW, PUBLIC_IP,
+    config_for, error_of, harness, harness_from, hidden_config, listing, post, socks_proxy_of,
+    spawn, spawn_content, Harness, RequestSpec, HIDDEN_CONNECTOR_URL, INTERVAL, NOW, PUBLIC_IP,
 };
 use common::{
     has_tag, stub_registry, BackendCall, FakeBackend, FakeClock, FakeDirectory, FakeHiddenService,
@@ -63,13 +65,23 @@ async fn hidden_harness_on(
     adjust: impl FnOnce(ProviderConfig) -> ProviderConfig,
 ) -> Harness {
     let registry = stub_registry().await;
-    let config = adjust(hidden_config(config_for(
-        listings,
-        provider_key,
-        state_path,
-        &registry,
-        ImagePolicyConfig::default(),
-    )));
+    // A hidden provider's own outbound — the image fetch a spawn makes
+    // against the stub registry included — leaves through `anon.socks_proxy`
+    // (spec §10), so a hidden harness needs a proxy that answers. The stub
+    // dials an IP literal as given, which is what the registry override is.
+    // Leaked on purpose: its accept loop must outlive this function, and the
+    // process it serves is dropped with the test.
+    let socks = Box::leak(Box::new(SocksStub::start(&[]).await));
+    let config = adjust(socks_proxy_of(
+        hidden_config(config_for(
+            listings,
+            provider_key,
+            state_path,
+            &registry,
+            ImagePolicyConfig::default(),
+        )),
+        &socks.url(),
+    ));
     harness_from(config, backend, FakeClock::at(NOW), directory, registry)
 }
 
