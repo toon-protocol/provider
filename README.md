@@ -199,11 +199,12 @@ container that would not stop is retried. A primary that stopped its own
 workload under the self-stop rule keeps its address — stopping is not
 ending.
 
-A provider configured `hidden = true` with no `[anon.control]` connection
-can give no lease an address, so it starts none: a spawn is refused
-`no_capacity`, and `availability` answers the same for free first, so
-nobody pays to find out. The Profile, the Listings and Liveness are
-published as usual either way.
+A running Hidden Provider always has a daemon to ask: the config gate
+refuses `hidden = true` without `[anon.control]`, and startup refuses a
+control port it cannot authenticate to. The `no_capacity` refusal a spawn
+and `availability` answer when the service is somehow absent is a guard,
+not a state an operator can reach. The Profile, the Listings and Liveness
+are published as usual either way.
 
 **Driving the daemon.** `src/anon_control.rs` is the real `HiddenService`:
 it speaks the daemon's control protocol over `[anon.control].addr`, which is

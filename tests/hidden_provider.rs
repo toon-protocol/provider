@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use common::harness::{
-    config_for, digest, error_of, harness, harness_from, hidden_config, listing, post, spawn,
+    config_for, error_of, harness, harness_from, hidden_config, listing, post, spawn,
     spawn_content, Harness, RequestSpec, HIDDEN_CONNECTOR_URL, INTERVAL, NOW, PUBLIC_IP,
 };
 use common::{
@@ -30,7 +30,7 @@ use toon_provider::nostr::kinds::{K_LISTING, K_PROFILE, TOON_LABEL};
 use toon_provider::nostr::wire::{EvictionReason, SpawnContent};
 use toon_provider::provider::{persisted_leases, ImagePolicyConfig};
 use toon_provider::LivenessState::Absent;
-use toon_provider::{operator_router, LeaseRecord, Listing, ProviderConfig, ProviderService};
+use toon_provider::{operator_router, LeaseRecord, Listing, ProviderConfig};
 
 /// A fresh Hidden Provider selling `listings`, on a lease table of its own.
 async fn hidden_harness(listings: Vec<Listing>) -> Harness {
@@ -735,99 +735,6 @@ fn profile_of(primary: &Keys) -> nostr_sdk::Event {
     .custom_created_at(Timestamp::from(NOW - 1000))
     .sign_with_keys(primary)
     .unwrap()
-}
-
-// ── a Hidden Provider with nothing to make addresses on ─────────────────
-
-#[tokio::test]
-async fn a_hidden_provider_with_no_daemon_starts_no_lease_and_says_so_for_free() {
-    // Spec §9: a refusal a paid spawn would buy is answered on
-    // `availability` first, so nobody pays for an address the provider
-    // cannot give.
-    let h = hidden_harness_without_a_daemon().await;
-    let (status, body) = post(
-        &h.app,
-        "/availability",
-        json!({
-            "listing": "basic",
-            "version": 1,
-            "image": { "reference": "docker.io/library/alpine", "digest": digest() },
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{}", body);
-    assert_eq!(body["would_run"], false);
-    assert_eq!(error_of(&body), "no_capacity");
-
-    let content = spawn_content(1);
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
-    assert_eq!(status, StatusCode::CONFLICT, "{}", body);
-    assert_eq!(error_of(&body), "no_capacity");
-    assert!(h.backend.calls().is_empty(), "{:?}", h.backend.calls());
-
-    // A version this provider does not sell is still that refusal: the
-    // check sits behind step 2, not in front of every answer.
-    let (_, body) = post(
-        &h.app,
-        "/availability",
-        json!({
-            "listing": "basic",
-            "version": 2,
-            "image": { "reference": "docker.io/library/alpine", "digest": digest() },
-        }),
-    )
-    .await;
-    assert_eq!(error_of(&body), "wrong_listing_version");
-}
-
-/// A Hidden Provider built WITHOUT a `HiddenService` — the one harness that
-/// installs none, since until M4-3 selects the real adapter a misconfigured
-/// provider is what an operator would get.
-async fn hidden_harness_without_a_daemon() -> Harness {
-    let dir = tempfile::tempdir().unwrap();
-    let state_path = dir
-        .keep()
-        .join("leases.json")
-        .to_string_lossy()
-        .into_owned();
-    let registry = stub_registry().await;
-    let keys = Keys::generate();
-    let backend = FakeBackend::new();
-    let clock = FakeClock::at(NOW);
-    let directory = FakeDirectory::new();
-    let config = hidden_config(config_for(
-        vec![listing("basic", 1, 2)],
-        &keys.secret_key().to_secret_hex(),
-        &state_path,
-        &registry,
-        ImagePolicyConfig::default(),
-    ));
-    // `harness_from` is not used here for the one reason this harness
-    // exists: it installs a `HiddenService`, and the whole point is a
-    // hidden provider that has none. Every OTHER fake is the one the
-    // service holds, so `h.clock` and `h.directory` mean what they do
-    // everywhere else.
-    let service = ProviderService::with_backend_clock_and_directory(
-        config,
-        backend.clone(),
-        clock.clone(),
-        directory.clone(),
-    )
-    .unwrap();
-    Harness {
-        app: toon_provider::router(service.app_state()),
-        service,
-        backend,
-        clock,
-        directory,
-        // Never installed, so never asked: a test that reads it sees an
-        // untouched fake, which is the assertion.
-        hidden_service: FakeHiddenService::new(),
-        provider: keys.public_key(),
-        state_path,
-        provider_key: keys.secret_key().to_secret_hex(),
-        _registry: registry,
-    }
 }
 
 #[tokio::test]
