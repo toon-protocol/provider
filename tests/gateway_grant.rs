@@ -384,3 +384,59 @@ async fn a_hidden_providers_granted_status_names_the_anyone_host_and_dials_nothi
         "verifying a grant opened no connection"
     );
 }
+
+/// The wire fixture's grant — the exact bytes the tenant-side grant tool
+/// (`tools/grant`) is proven to reproduce, id and signature included —
+/// driven through this provider: accepted while it is in force, and
+/// `bad_grant` the second after its `expires_at`.
+///
+/// The tool's own tests prove the bytes (`tools/grant/grant.test.mjs`);
+/// this proves the bytes against the provider, over the fixture's own keys
+/// and clock, so "a provider accepts what the tool produced and refuses it
+/// once it has expired" is one claim checked end to end rather than two
+/// halves each assuming the other.
+#[tokio::test]
+async fn the_fixture_grant_a_tenant_tool_reproduces_is_accepted_until_it_expires() {
+    let h = harness().await;
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/wire/gateway_grant.json")).unwrap();
+    let grant_json = fixture["event"].clone();
+    let expires_at = fixture["content"]["expires_at"].as_u64().unwrap();
+
+    // The keys the fixture was signed for, read from the same constants the
+    // tool's tests read; the workload id (`aa` × 32) is the one its `d`
+    // tag names.
+    let constants: Value =
+        serde_json::from_str(include_str!("fixtures/wire/constants.json")).unwrap();
+    let tenant = Keys::parse(constants["tenant"]["secret_key"].as_str().unwrap()).unwrap();
+    let gateway = Keys::parse(constants["gateway"]["secret_key"].as_str().unwrap()).unwrap();
+    assert_eq!(grant_json["pubkey"], json!(tenant.public_key().to_hex()));
+    assert_eq!(grant_json["tags"][0], json!(["d", workload_id(0xaa)]));
+    assert_eq!(
+        grant_json["tags"][1],
+        json!(["p", gateway.public_key().to_hex()])
+    );
+
+    let spec = RequestSpec {
+        tenant: Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap(),
+        ..RequestSpec::spawn(&h, &spawn_content(0xaa))
+    };
+    let (status, body) = spawn(&h, spec.sign()).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+
+    let (status, tenants_answer) = status_with(&h, &tenant, 0xaa, None).await;
+    assert_eq!(status, StatusCode::OK, "{}", tenants_answer);
+    let (status, gateways_answer) = status_with(&h, &gateway, 0xaa, Some(grant_json.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{}", gateways_answer);
+    assert_eq!(gateways_answer, tenants_answer);
+
+    h.clock.set(expires_at + 1);
+    let (status, body) = status_with(&h, &gateway, 0xaa, Some(grant_json)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{}", body);
+    assert_eq!(error_of(&body), "bad_grant");
+    assert!(
+        body["message"].as_str().unwrap().contains("expired"),
+        "the refusal names the expiry: {}",
+        body
+    );
+}

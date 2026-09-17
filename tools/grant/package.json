@@ -1,0 +1,21 @@
+{
+  "name": "toon-gateway-grant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Signs and publishes a Gateway Grant from a tenant's own key, so the tenant never hands that key to a Workload Gateway",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "publish.mjs",
+  "bin": {
+    "toon-grant": "publish.mjs"
+  },
+  "scripts": {
+    "start": "node publish.mjs",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@noble/curves": "^2.0.0",
+    "@toon-protocol/client": "^3.0.0",
+    "nostr-tools": "^2.25.1"
+  }
+}
