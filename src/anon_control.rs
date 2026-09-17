@@ -201,7 +201,19 @@ impl AnonControlService {
             io: BufReader::new(stream),
             addr: self.addr.clone(),
         };
-        let methods = auth_methods(&control.send("PROTOCOLINFO 1").await?);
+        // The one command the control protocol answers BEFORE anyone has
+        // authenticated, which is why it can be asked at all here.
+        let protocolinfo = control.send("PROTOCOLINFO 1").await?;
+        if protocolinfo.code != 250 {
+            bail!(
+                "the anon control port at {} refused PROTOCOLINFO, so it cannot be asked how to \
+                 authenticate: {} {}",
+                self.addr,
+                protocolinfo.code,
+                protocolinfo.text(),
+            );
+        }
+        let methods = auth_methods(&protocolinfo);
         if !methods.iter().any(|m| m == self.auth.method()) {
             bail!(
                 "the anon control port at {} does not offer {} authentication, which is what \
@@ -244,17 +256,26 @@ impl AnonControlService {
         Ok(control)
     }
 
+    /// The workload id → service id map, locked. A poisoned lock here is a
+    /// panic in a previous lease's address handling, which nothing can
+    /// recover from sensibly.
+    fn services(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+        self.services.lock().expect("hidden-service map poisoned")
+    }
+
     /// `ADD_ONION <key spec> Flags=Detach Port=…` — one line, one mapping
     /// per lease port — and the `ServiceID=` the daemon answers. Shared by
     /// `create_address` (`NEW:ED25519-V3`) and `restore_address` (the
     /// stored key), because the two differ in nothing but that word and in
-    /// which of the reply's fields matters.
+    /// which of the reply's fields matters. A restored address carries no
+    /// key — the daemon answers `PrivateKey=` only for one it just made —
+    /// so `restore_address` reads the host and drops the rest.
     async fn add_onion(
         &self,
         workload_id: &str,
         key_spec: &str,
         ports: &[AddressPort],
-    ) -> Result<(String, Option<String>)> {
+    ) -> Result<HiddenAddress> {
         if ports.is_empty() {
             bail!(
                 "lease {} asked for an address with no ports; the anon daemon has nothing to \
@@ -268,18 +289,33 @@ impl AnonControlService {
                 command,
                 " Port={},{}",
                 port.virtual_port,
-                target(&self.forward_host, port.host_port)
+                forward_target(&self.forward_host, port.host_port)
             );
         }
         let mut control = self.connect().await?;
         let reply = control.send(&command).await?;
         if reply.code != 250 {
             bail!(
-                "the anon daemon at {} refused to add lease {}'s address: {} {}",
+                "the anon daemon at {} refused to add lease {}'s address: {} {}{}",
                 self.addr,
                 workload_id,
                 reply.code,
                 reply.text(),
+                // The one refusal an operator can act on, and the one a
+                // provider restart can hit on its own: the daemon did NOT
+                // restart with this provider, so it still serves the key the
+                // lease record kept — and there is no way to ask it which
+                // detached service that is, because only the key derives the
+                // address and the daemon never says it twice. Restarting the
+                // daemon drops every detached service and lets every lease be
+                // restored; the leases are unreachable until it does.
+                if reply.text().to_lowercase().contains("collision") {
+                    ". The daemon already serves this key — it did not restart with this \
+                     provider — and will not say under which address. Restart the anon daemon \
+                     to let every live lease be restored from its stored key"
+                } else {
+                    ""
+                },
             );
         }
         let service_id = reply.field("ServiceID").with_context(|| {
@@ -300,11 +336,11 @@ impl AnonControlService {
                 service_id,
             );
         }
-        self.services
-            .lock()
-            .expect("hidden-service map poisoned")
-            .insert(workload_id.to_string(), service_id);
-        Ok((host, reply.field("PrivateKey")))
+        self.services().insert(workload_id.to_string(), service_id);
+        Ok(HiddenAddress {
+            host,
+            key: reply.field("PrivateKey"),
+        })
     }
 }
 
@@ -315,10 +351,10 @@ impl HiddenService for AnonControlService {
         workload_id: &str,
         ports: &[AddressPort],
     ) -> Result<HiddenAddress> {
-        let (host, key) = self
+        let address = self
             .add_onion(workload_id, &format!("NEW:{}", KEY_TYPE), ports)
             .await?;
-        if key.is_none() {
+        if address.key.is_none() {
             // Not fatal — the address works — but the lease would then have
             // nothing to restore from, and a restart would move the tenant's
             // host without either side being told why.
@@ -328,8 +364,8 @@ impl HiddenService for AnonControlService {
                 self.addr, workload_id
             );
         }
-        debug!("lease {} has the address {}", workload_id, host);
-        Ok(HiddenAddress { host, key })
+        debug!("lease {} has the address {}", workload_id, address.host);
+        Ok(address)
     }
 
     async fn restore_address(
@@ -354,7 +390,7 @@ impl HiddenService for AnonControlService {
                     workload_id, KEY_TYPE
                 )
             })?;
-        refuse_control_characters("the stored address key", key)?;
+        refuse_control_characters(&format!("lease {}'s stored address key", workload_id), key)?;
         if blob.contains(' ') || key_type.contains(' ') {
             bail!(
                 "lease {}'s stored address key contains a space, which the anon daemon's \
@@ -362,18 +398,13 @@ impl HiddenService for AnonControlService {
                 workload_id
             );
         }
-        let (host, _) = self.add_onion(workload_id, key, ports).await?;
+        let host = self.add_onion(workload_id, key, ports).await?.host;
         info!("lease {} is reachable again at {}", workload_id, host);
         Ok(host)
     }
 
     async fn destroy_address(&self, workload_id: &str) -> Result<()> {
-        let service_id = self
-            .services
-            .lock()
-            .expect("hidden-service map poisoned")
-            .get(workload_id)
-            .cloned();
+        let service_id = self.services().get(workload_id).cloned();
         let Some(service_id) = service_id else {
             // Idempotent by the port's contract (spec §6.7): a lease ending
             // twice, or ending after a restart that never restored its
@@ -404,10 +435,7 @@ impl HiddenService for AnonControlService {
                 reply.text(),
             );
         }
-        self.services
-            .lock()
-            .expect("hidden-service map poisoned")
-            .remove(workload_id);
+        self.services().remove(workload_id);
         debug!("lease {}'s address {} is gone", workload_id, service_id);
         Ok(())
     }
@@ -426,6 +454,14 @@ impl HiddenService for AnonControlService {
 ///
 /// A provider that is not hidden has no daemon to check and this does
 /// nothing.
+///
+/// It builds a throwaway adapter rather than preflighting the one
+/// `AppState` holds, because that one is behind `dyn HiddenService` and
+/// this check must not become a method on the port: the port is what the
+/// lease lifecycle asks for addresses, and a fake of it has no daemon to
+/// prove. The two are built from the same config and the check creates
+/// nothing, so what it proves — the endpoint answers and the credentials
+/// work — holds for the adapter that will serve the leases.
 pub async fn refuse_unreachable_control(config: &ProviderConfig) -> Result<()> {
     if !config.hidden {
         return Ok(());
@@ -454,7 +490,13 @@ impl Control {
                     redact(command)
                 )
             })?;
-        self.io.get_mut().flush().await.ok();
+        self.io.get_mut().flush().await.with_context(|| {
+            format!(
+                "cannot flush the anon control port at {} (command {:?})",
+                self.addr,
+                redact(command)
+            )
+        })?;
         self.read_reply(command).await
     }
 
@@ -466,24 +508,26 @@ impl Control {
         let mut lines = Vec::new();
         loop {
             let line = self.read_line(command).await?;
-            if line.len() < 4 {
+            // Every byte of the prefix is checked ASCII before the line is
+            // split on it: the four bytes are indices into a `String`, and
+            // a reply whose first bytes were part of a multi-byte character
+            // would otherwise panic on a character boundary rather than be
+            // refused as the malformed reply it is.
+            let head = line.as_bytes();
+            if head.len() < 4 || !head[..3].iter().all(u8::is_ascii_digit) || !head[3].is_ascii() {
                 bail!(
                     "the anon control port at {} answered {:?}, which is not a control reply \
-                     (command {:?})",
+                     (`<3 digits><separator><text>`) (command {:?})",
                     self.addr,
                     line,
                     redact(command)
                 );
             }
-            let (code, rest) = line.split_at(3);
-            let code: u16 = code.parse().with_context(|| {
-                format!(
-                    "the anon control port at {} answered {:?}, which starts with no status code",
-                    self.addr, line
-                )
-            })?;
-            let separator = rest.as_bytes()[0];
-            lines.push(rest[1..].to_string());
+            let code: u16 = line[..3]
+                .parse()
+                .expect("three ascii digits are a u16 status code");
+            let separator = head[3];
+            lines.push(line[4..].to_string());
             match separator {
                 b'-' => continue,
                 b' ' => return Ok(Reply { code, lines }),
@@ -570,7 +614,7 @@ fn auth_methods(reply: &Reply) -> Vec<String> {
 /// `host:port` as the control protocol's `Port=` target, with a bare IPv6
 /// address bracketed — `[::1]:9000`, which is the only spelling the daemon
 /// parses.
-fn target(host: &str, port: u16) -> String {
+fn forward_target(host: &str, port: u16) -> String {
     if host.contains(':') && !host.starts_with('[') {
         format!("[{}]:{}", host, port)
     } else {
@@ -661,10 +705,13 @@ mod tests {
 
     #[test]
     fn a_forward_target_brackets_a_bare_ipv6_address() {
-        assert_eq!(target("127.0.0.1", 40000), "127.0.0.1:40000");
-        assert_eq!(target("toon-provider", 40000), "toon-provider:40000");
-        assert_eq!(target("::1", 40000), "[::1]:40000");
-        assert_eq!(target("[::1]", 40000), "[::1]:40000");
+        assert_eq!(forward_target("127.0.0.1", 40000), "127.0.0.1:40000");
+        assert_eq!(
+            forward_target("toon-provider", 40000),
+            "toon-provider:40000"
+        );
+        assert_eq!(forward_target("::1", 40000), "[::1]:40000");
+        assert_eq!(forward_target("[::1]", 40000), "[::1]:40000");
     }
 
     #[test]

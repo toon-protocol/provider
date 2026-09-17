@@ -235,6 +235,42 @@ fn service(control: AnonControl) -> AnonControlService {
     AnonControlService::from_config(&hidden_config(control)).expect("build the adapter")
 }
 
+/// The pair almost every test below wants: a stub daemon that authenticates
+/// with the cookie, scripted with the `ADD_ONION`/`DEL_ONION` replies it
+/// should give in order, and the adapter pointed at it. The cookie file on
+/// disk lives exactly as long as the pair does.
+struct Daemon {
+    stub: StubControl,
+    service: AnonControlService,
+    _cookie: tempfile::NamedTempFile,
+}
+
+impl Daemon {
+    async fn cookie(onion: impl IntoIterator<Item = Vec<String>>) -> Self {
+        let cookie = cookie_file();
+        let stub = StubControl::start(Script {
+            protocolinfo: cookie_protocolinfo(),
+            accepts: COOKIE_HEX.to_string(),
+            onion: VecDeque::from_iter(onion),
+        })
+        .await;
+        let service = service(cookie_control(&stub.addr, &cookie));
+        Self {
+            stub,
+            service,
+            _cookie: cookie,
+        }
+    }
+
+    fn commands(&self) -> Vec<String> {
+        self.stub.commands()
+    }
+
+    fn addr(&self) -> &str {
+        &self.stub.addr
+    }
+}
+
 fn ports() -> Vec<AddressPort> {
     vec![AddressPort::same(40000), AddressPort::same(41000)]
 }
@@ -254,16 +290,10 @@ fn created() -> Vec<String> {
 
 #[tokio::test]
 async fn create_address_authenticates_with_the_cookie_and_maps_every_lease_port() {
-    let cookie = cookie_file();
-    let stub = StubControl::start(Script {
-        protocolinfo: cookie_protocolinfo(),
-        accepts: COOKIE_HEX.to_string(),
-        onion: VecDeque::from([created()]),
-    })
-    .await;
-    let service = service(cookie_control(&stub.addr, &cookie));
+    let daemon = Daemon::cookie([created()]).await;
 
-    let address = service
+    let address = daemon
+        .service
         .create_address(WORKLOAD, &ports())
         .await
         .expect("create the address");
@@ -271,7 +301,7 @@ async fn create_address_authenticates_with_the_cookie_and_maps_every_lease_port(
     assert_eq!(address.host, format!("{}.anyone", SERVICE_ID));
     assert_eq!(address.key.as_deref(), Some(PRIVATE_KEY));
     assert_eq!(
-        stub.commands(),
+        daemon.commands(),
         vec![
             "PROTOCOLINFO 1".to_string(),
             format!("AUTHENTICATE {}", COOKIE_HEX),
@@ -294,6 +324,8 @@ async fn a_lease_port_forwarded_elsewhere_is_mapped_apart() {
         onion: VecDeque::from([created()]),
     })
     .await;
+    // The daemon does not share this host's network: `anon.forward_host` is
+    // where it sees the provider's published ports.
     let mut config = hidden_config(cookie_control(&stub.addr, &cookie));
     config.anon.forward_host = "toon-provider".to_string();
     let service = AnonControlService::from_config(&config).expect("build the adapter");
@@ -317,45 +349,57 @@ async fn a_lease_port_forwarded_elsewhere_is_mapped_apart() {
 
 #[tokio::test]
 async fn a_refused_add_onion_is_an_error_and_leaves_no_address_to_destroy() {
-    let cookie = cookie_file();
-    let stub = StubControl::start(Script {
-        protocolinfo: cookie_protocolinfo(),
-        accepts: COOKIE_HEX.to_string(),
-        onion: VecDeque::from([lines(&["512 Invalid 'Port' argument"])]),
-    })
-    .await;
-    let service = service(cookie_control(&stub.addr, &cookie));
+    let daemon = Daemon::cookie([lines(&["512 Invalid 'Port' argument"])]).await;
 
-    let refusal = service
+    let refusal = daemon
+        .service
         .create_address(WORKLOAD, &ports())
         .await
         .expect_err("the daemon refused");
     let refusal = format!("{:#}", refusal);
-    assert!(refusal.contains(&stub.addr), "{}", refusal);
+    assert!(refusal.contains(daemon.addr()), "{}", refusal);
     assert!(refusal.contains("512"), "{}", refusal);
     assert!(refusal.contains("Invalid 'Port' argument"), "{}", refusal);
 
     // Nothing was created, so the lease's ending has nothing to delete and
     // asks the daemon nothing.
-    service
+    daemon
+        .service
         .destroy_address(WORKLOAD)
         .await
         .expect("destroying nothing is not an error");
-    assert_eq!(stub.commands().len(), 3, "{:?}", stub.commands());
+    assert_eq!(daemon.commands().len(), 3, "{:?}", daemon.commands());
+}
+
+#[tokio::test]
+async fn an_address_the_daemon_still_serves_says_what_to_do_about_it() {
+    // A provider restarted while its daemon kept running: the daemon still
+    // holds the detached service the stored key derives, and only the key
+    // derives the address, so nothing can ask it which one that is.
+    let daemon = Daemon::cookie([lines(&["550 Onion address collision"])]).await;
+
+    let refusal = format!(
+        "{:#}",
+        daemon
+            .service
+            .restore_address(WORKLOAD, PRIVATE_KEY, &ports())
+            .await
+            .expect_err("the daemon already serves this key")
+    );
+    assert!(refusal.contains("550"), "{}", refusal);
+    assert!(
+        refusal.contains("Restart the anon daemon"),
+        "the one thing an operator can do about it: {}",
+        refusal
+    );
 }
 
 #[tokio::test]
 async fn an_add_onion_with_no_service_id_is_an_error() {
-    let cookie = cookie_file();
-    let stub = StubControl::start(Script {
-        protocolinfo: cookie_protocolinfo(),
-        accepts: COOKIE_HEX.to_string(),
-        onion: VecDeque::from([lines(&["250 OK"])]),
-    })
-    .await;
-    let service = service(cookie_control(&stub.addr, &cookie));
+    let daemon = Daemon::cookie([lines(&["250 OK"])]).await;
 
-    let refusal = service
+    let refusal = daemon
+        .service
         .create_address(WORKLOAD, &ports())
         .await
         .expect_err("no ServiceID");
@@ -368,67 +412,58 @@ async fn an_add_onion_with_no_service_id_is_an_error() {
 
 #[tokio::test]
 async fn an_address_with_no_ports_is_refused_before_the_daemon_is_asked() {
-    let cookie = cookie_file();
-    let stub = StubControl::start(Script {
-        protocolinfo: cookie_protocolinfo(),
-        accepts: COOKIE_HEX.to_string(),
-        onion: VecDeque::new(),
-    })
-    .await;
-    let service = service(cookie_control(&stub.addr, &cookie));
+    let daemon = Daemon::cookie([]).await;
 
-    service
+    daemon
+        .service
         .create_address(WORKLOAD, &[])
         .await
         .expect_err("no ports");
-    assert!(stub.commands().is_empty(), "{:?}", stub.commands());
+    assert!(daemon.commands().is_empty(), "{:?}", daemon.commands());
 }
 
 // ── destroying it ────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn destroy_address_deletes_the_service_create_made() {
-    let cookie = cookie_file();
-    let stub = StubControl::start(Script {
-        protocolinfo: cookie_protocolinfo(),
-        accepts: COOKIE_HEX.to_string(),
-        onion: VecDeque::from([created(), lines(&["250 OK"])]),
-    })
-    .await;
-    let service = service(cookie_control(&stub.addr, &cookie));
+    let daemon = Daemon::cookie([created(), lines(&["250 OK"])]).await;
 
-    service
+    daemon
+        .service
         .create_address(WORKLOAD, &ports())
         .await
         .expect("create");
-    service.destroy_address(WORKLOAD).await.expect("destroy");
+    daemon
+        .service
+        .destroy_address(WORKLOAD)
+        .await
+        .expect("destroy");
 
     assert_eq!(
-        stub.commands().last().unwrap(),
+        daemon.commands().last().unwrap(),
         &format!("DEL_ONION {}", SERVICE_ID)
     );
     // And it is gone from this process too: a second ending asks nothing.
-    let sent = stub.commands().len();
-    service.destroy_address(WORKLOAD).await.expect("idempotent");
-    assert_eq!(stub.commands().len(), sent);
+    let sent = daemon.commands().len();
+    daemon
+        .service
+        .destroy_address(WORKLOAD)
+        .await
+        .expect("idempotent");
+    assert_eq!(daemon.commands().len(), sent);
 }
 
 #[tokio::test]
 async fn an_address_the_daemon_has_already_forgotten_is_destroyed_anyway() {
-    let cookie = cookie_file();
-    let stub = StubControl::start(Script {
-        protocolinfo: cookie_protocolinfo(),
-        accepts: COOKIE_HEX.to_string(),
-        onion: VecDeque::from([created(), lines(&["552 Unknown Onion Service ID"])]),
-    })
-    .await;
-    let service = service(cookie_control(&stub.addr, &cookie));
+    let daemon = Daemon::cookie([created(), lines(&["552 Unknown Onion Service ID"])]).await;
 
-    service
+    daemon
+        .service
         .create_address(WORKLOAD, &ports())
         .await
         .expect("create");
-    service
+    daemon
+        .service
         .destroy_address(WORKLOAD)
         .await
         .expect("552 is the address being gone, which is what was asked for");
@@ -436,81 +471,70 @@ async fn an_address_the_daemon_has_already_forgotten_is_destroyed_anyway() {
 
 #[tokio::test]
 async fn a_daemon_that_refuses_to_delete_leaves_the_address_to_try_again() {
-    let cookie = cookie_file();
-    let stub = StubControl::start(Script {
-        protocolinfo: cookie_protocolinfo(),
-        accepts: COOKIE_HEX.to_string(),
-        onion: VecDeque::from([
-            created(),
-            lines(&["550 Unspecified Anon error"]),
-            lines(&["250 OK"]),
-        ]),
-    })
+    let daemon = Daemon::cookie([
+        created(),
+        lines(&["550 Unspecified Anon error"]),
+        lines(&["250 OK"]),
+    ])
     .await;
-    let service = service(cookie_control(&stub.addr, &cookie));
 
-    service
+    daemon
+        .service
         .create_address(WORKLOAD, &ports())
         .await
         .expect("create");
-    let refusal = service
+    let refusal = daemon
+        .service
         .destroy_address(WORKLOAD)
         .await
         .expect_err("the daemon still holds the address");
     assert!(format!("{:#}", refusal).contains("550"), "{:#}", refusal);
 
     // The id is still known, so a later sweep can and does try again.
-    service.destroy_address(WORKLOAD).await.expect("second try");
+    daemon
+        .service
+        .destroy_address(WORKLOAD)
+        .await
+        .expect("second try");
     assert_eq!(
-        stub.commands().last().unwrap(),
+        daemon.commands().last().unwrap(),
         &format!("DEL_ONION {}", SERVICE_ID)
     );
 }
 
 #[tokio::test]
 async fn destroying_an_address_this_process_never_made_asks_the_daemon_nothing() {
-    let cookie = cookie_file();
-    let stub = StubControl::start(Script {
-        protocolinfo: cookie_protocolinfo(),
-        accepts: COOKIE_HEX.to_string(),
-        onion: VecDeque::new(),
-    })
-    .await;
-    let service = service(cookie_control(&stub.addr, &cookie));
+    let daemon = Daemon::cookie([]).await;
 
-    service
+    daemon
+        .service
         .destroy_address("a lease this process never heard of")
         .await
         .expect("idempotent");
-    assert!(stub.commands().is_empty(), "{:?}", stub.commands());
+    assert!(daemon.commands().is_empty(), "{:?}", daemon.commands());
 }
 
 // ── restoring one after a restart ────────────────────────────────────────
 
 #[tokio::test]
 async fn restore_address_re_adds_the_stored_key_and_answers_the_same_host() {
-    let cookie = cookie_file();
-    let stub = StubControl::start(Script {
-        protocolinfo: cookie_protocolinfo(),
-        accepts: COOKIE_HEX.to_string(),
-        // A restored key is not a new one, so the daemon answers no
-        // PrivateKey — only the id, which is the same one it gave before.
-        onion: VecDeque::from([
-            lines(&[&format!("250-ServiceID={}", SERVICE_ID), "250 OK"]),
-            lines(&["250 OK"]),
-        ]),
-    })
+    // A restored key is not a new one, so the daemon answers no PrivateKey
+    // — only the id, which is the same one it gave before.
+    let daemon = Daemon::cookie([
+        lines(&[&format!("250-ServiceID={}", SERVICE_ID), "250 OK"]),
+        lines(&["250 OK"]),
+    ])
     .await;
-    let service = service(cookie_control(&stub.addr, &cookie));
 
-    let host = service
+    let host = daemon
+        .service
         .restore_address(WORKLOAD, PRIVATE_KEY, &ports())
         .await
         .expect("restore");
 
     assert_eq!(host, format!("{}.anyone", SERVICE_ID));
     assert_eq!(
-        stub.commands().last().unwrap(),
+        daemon.commands().last().unwrap(),
         &format!(
             "ADD_ONION {} Flags=Detach Port=40000,127.0.0.1:40000 Port=41000,127.0.0.1:41000",
             PRIVATE_KEY
@@ -519,23 +543,20 @@ async fn restore_address_re_adds_the_stored_key_and_answers_the_same_host() {
 
     // And the restart has re-learned what `DEL_ONION` needs: the id is not
     // in the lease record, only the key is.
-    service.destroy_address(WORKLOAD).await.expect("destroy");
+    daemon
+        .service
+        .destroy_address(WORKLOAD)
+        .await
+        .expect("destroy");
     assert_eq!(
-        stub.commands().last().unwrap(),
+        daemon.commands().last().unwrap(),
         &format!("DEL_ONION {}", SERVICE_ID)
     );
 }
 
 #[tokio::test]
 async fn a_stored_key_that_is_not_a_daemon_key_is_refused_before_anything_is_sent() {
-    let cookie = cookie_file();
-    let stub = StubControl::start(Script {
-        protocolinfo: cookie_protocolinfo(),
-        accepts: COOKIE_HEX.to_string(),
-        onion: VecDeque::new(),
-    })
-    .await;
-    let service = service(cookie_control(&stub.addr, &cookie));
+    let daemon = Daemon::cookie([]).await;
 
     for key in [
         "",
@@ -545,38 +566,38 @@ async fn a_stored_key_that_is_not_a_daemon_key_is_refused_before_anything_is_sen
         "ED25519-V3:blob with a space",
         "ED25519-V3:blob\r\nDEL_ONION somethingelse",
     ] {
-        service
+        daemon
+            .service
             .restore_address(WORKLOAD, key, &ports())
             .await
             .unwrap_err();
     }
-    assert!(stub.commands().is_empty(), "{:?}", stub.commands());
+    assert!(daemon.commands().is_empty(), "{:?}", daemon.commands());
 }
 
 #[tokio::test]
 async fn each_lease_keeps_its_own_address() {
-    let cookie = cookie_file();
-    let stub = StubControl::start(Script {
-        protocolinfo: cookie_protocolinfo(),
-        accepts: COOKIE_HEX.to_string(),
-        onion: VecDeque::from([
-            created(),
-            lines(&[&format!("250-ServiceID={}", OTHER_SERVICE_ID), "250 OK"]),
-            lines(&["250 OK"]),
-        ]),
-    })
+    let daemon = Daemon::cookie([
+        created(),
+        lines(&[&format!("250-ServiceID={}", OTHER_SERVICE_ID), "250 OK"]),
+        lines(&["250 OK"]),
+    ])
     .await;
-    let service = service(cookie_control(&stub.addr, &cookie));
 
-    service.create_address("aa", &ports()).await.expect("first");
-    service
+    daemon
+        .service
+        .create_address("aa", &ports())
+        .await
+        .expect("first");
+    daemon
+        .service
         .restore_address("bb", PRIVATE_KEY, &ports())
         .await
         .expect("second");
-    service.destroy_address("bb").await.expect("destroy");
+    daemon.service.destroy_address("bb").await.expect("destroy");
 
     assert_eq!(
-        stub.commands().last().unwrap(),
+        daemon.commands().last().unwrap(),
         &format!("DEL_ONION {}", OTHER_SERVICE_ID),
         "the second lease's address, not the first's"
     );
@@ -725,6 +746,8 @@ async fn the_startup_check_passes_on_a_daemon_that_answers() {
     })
     .await;
 
+    // Through `refuse_unreachable_control`, which is what
+    // `ProviderService::run` calls, rather than the adapter's `preflight`.
     refuse_unreachable_control(&hidden_config(cookie_control(&stub.addr, &cookie)))
         .await
         .expect("the daemon answers and accepts the cookie");
@@ -780,6 +803,75 @@ fn egress_for_answers_the_configured_policy() {
 
     assert_eq!(egress.network, "toon-hidden-egress");
     assert_eq!(egress.gateway, "172.30.0.2");
+}
+
+#[tokio::test]
+async fn a_daemon_that_refuses_protocolinfo_says_so_rather_than_naming_methods() {
+    let cookie = cookie_file();
+    let stub = StubControl::start(Script {
+        protocolinfo: lines(&["513 Unrecognized key in PROTOCOLINFO"]),
+        accepts: COOKIE_HEX.to_string(),
+        onion: VecDeque::new(),
+    })
+    .await;
+
+    let refusal = format!(
+        "{:#}",
+        service(cookie_control(&stub.addr, &cookie))
+            .preflight()
+            .await
+            .expect_err("PROTOCOLINFO refused")
+    );
+    assert!(refusal.contains("refused PROTOCOLINFO"), "{}", refusal);
+    assert!(refusal.contains("513"), "{}", refusal);
+}
+
+#[tokio::test]
+async fn something_that_is_not_a_control_reply_is_refused_and_never_panics() {
+    // Not `<3 digits><separator><text>`: too short, no status code, and —
+    // the case that would index into the middle of a character rather than
+    // refuse — a line starting with a multi-byte one.
+    for answer in ["OK", "25 OK", "…50 OK"] {
+        let cookie = cookie_file();
+        let stub = StubControl::start(Script {
+            protocolinfo: lines(&[answer]),
+            accepts: COOKIE_HEX.to_string(),
+            onion: VecDeque::new(),
+        })
+        .await;
+
+        let refusal = format!(
+            "{:#}",
+            service(cookie_control(&stub.addr, &cookie))
+                .preflight()
+                .await
+                .expect_err("not a control reply")
+        );
+        assert!(
+            refusal.contains("is not a control reply"),
+            "{:?}: {}",
+            answer,
+            refusal
+        );
+    }
+
+    // A status code with a separator that is none of the three is its own
+    // refusal, because it names a different fault.
+    let cookie = cookie_file();
+    let stub = StubControl::start(Script {
+        protocolinfo: lines(&["2501OK"]),
+        accepts: COOKIE_HEX.to_string(),
+        onion: VecDeque::new(),
+    })
+    .await;
+    let refusal = format!(
+        "{:#}",
+        service(cookie_control(&stub.addr, &cookie))
+            .preflight()
+            .await
+            .expect_err("bad separator")
+    );
+    assert!(refusal.contains("separator"), "{}", refusal);
 }
 
 // ── which implementation a config gets ───────────────────────────────────
