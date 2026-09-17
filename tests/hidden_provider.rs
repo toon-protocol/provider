@@ -343,6 +343,76 @@ async fn a_live_lease_that_kept_no_key_is_given_a_fresh_address() {
     mentions_no_ip(&status);
 }
 
+#[tokio::test]
+async fn a_lease_whose_address_cannot_be_re_established_is_left_with_none() {
+    // The commonest cause is a provider that restarted while its daemon did
+    // not: the daemon is still serving the address and refuses to add the
+    // key twice. Naming the old host anyway would have the tenant dialling
+    // something this provider cannot account for, so `status` answers no
+    // `access` at all — the truth, and what tells the tenant to look.
+    let h = hidden_harness(vec![listing("basic", 1, 2)]).await;
+    let (tenant, content, _) = spawn_lease(&h, 1).await;
+    rewrite_the_stored_key(&h.state_path, "ED25519-V3:somebody-elses");
+
+    let restarted = restart(&h, vec![listing("basic", 1, 2)]).await;
+    assert_eq!(restarted.hidden_service.restored().len(), 1, "it tried");
+    assert!(
+        restarted.hidden_service.created().is_empty(),
+        "and did not paper over it with a second address beside the daemon's"
+    );
+    let status = status_of(&restarted, &tenant, &content.workload_id).await;
+    assert_eq!(status["state"], "running", "{}", status);
+    assert!(
+        status.get("access").is_none(),
+        "no host rather than a dead one: {}",
+        status
+    );
+    assert_eq!(
+        persisted(&restarted, &content.workload_id).hidden_address,
+        None,
+        "and the record stops claiming one"
+    );
+}
+
+#[tokio::test]
+async fn a_lease_dropped_at_restore_takes_its_address_with_it() {
+    // A workload that vanished from the backend while the provider was down
+    // takes its whole lease off the table — and nothing will ever ask about
+    // that lease again, so its address has to go here or it outlives every
+    // lease on the daemon.
+    let h = hidden_harness(vec![listing("basic", 1, 2)]).await;
+    let (_, content, _) = spawn_lease(&h, 1).await;
+    h.backend.vanish(1000);
+
+    let restarted = restart(&h, vec![listing("basic", 1, 2)]).await;
+    assert!(
+        persisted_leases(&restarted.state_path).is_empty(),
+        "the lease is gone"
+    );
+    assert_eq!(
+        restarted.hidden_service.destroyed(),
+        vec![content.workload_id.clone()],
+        "and so is its address"
+    );
+    assert!(restarted.hidden_service.restored().is_empty());
+}
+
+/// Rewrite the lease table with every `key` replaced by `key`, so the
+/// daemon refuses to restore from it.
+fn rewrite_the_stored_key(state_path: &str, key: &str) {
+    let mut table: serde_json::Map<String, Value> =
+        serde_json::from_slice(&std::fs::read(state_path).unwrap()).unwrap();
+    for lease in table.values_mut() {
+        if let Some(address) = lease.get_mut("hidden_address") {
+            address
+                .as_object_mut()
+                .unwrap()
+                .insert("key".into(), json!(key));
+        }
+    }
+    std::fs::write(state_path, serde_json::to_vec_pretty(&table).unwrap()).unwrap();
+}
+
 /// Rewrite the lease table with every `key` dropped, as a provider whose
 /// `HiddenService` gives none would have written it.
 fn forget_the_stored_key(state_path: &str) {
@@ -723,6 +793,8 @@ async fn hidden_harness_without_a_daemon() -> Harness {
     let registry = stub_registry().await;
     let keys = Keys::generate();
     let backend = FakeBackend::new();
+    let clock = FakeClock::at(NOW);
+    let directory = FakeDirectory::new();
     let config = hidden_config(config_for(
         vec![listing("basic", 1, 2)],
         &keys.secret_key().to_secret_hex(),
@@ -730,19 +802,26 @@ async fn hidden_harness_without_a_daemon() -> Harness {
         &registry,
         ImagePolicyConfig::default(),
     ));
+    // `harness_from` is not used here for the one reason this harness
+    // exists: it installs a `HiddenService`, and the whole point is a
+    // hidden provider that has none. Every OTHER fake is the one the
+    // service holds, so `h.clock` and `h.directory` mean what they do
+    // everywhere else.
     let service = ProviderService::with_backend_clock_and_directory(
         config,
         backend.clone(),
-        FakeClock::at(NOW),
-        FakeDirectory::new(),
+        clock.clone(),
+        directory.clone(),
     )
     .unwrap();
     Harness {
         app: toon_provider::router(service.app_state()),
         service,
         backend,
-        clock: FakeClock::at(NOW),
-        directory: FakeDirectory::new(),
+        clock,
+        directory,
+        // Never installed, so never asked: a test that reads it sees an
+        // untouched fake, which is the assertion.
         hidden_service: FakeHiddenService::new(),
         provider: keys.public_key(),
         state_path,

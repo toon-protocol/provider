@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use tracing::{error, info, warn};
 
-use super::persistence::{address_ports, persist_leases};
-use crate::hidden_service::{HiddenAddress, HiddenService};
+use super::persistence::persist_leases;
+use crate::hidden_service::{AddressPort, HiddenAddress, HiddenService};
 use crate::nostr::wire::{ErrorCode, ErrorResponse, PortAccess};
 use crate::provider_http::AppState;
 
@@ -32,6 +32,16 @@ fn daemon(state: &AppState) -> Option<&Arc<dyn HiddenService>> {
         .filter(|_| state.config.hidden)
 }
 
+/// The ports a lease's address must answer on: its SSH forward and every
+/// port it published, each on the SAME number it has on the host — a tenant
+/// dials what its access details told it, and those are the host's numbers
+/// (spec §6.2, §10).
+fn ports_of(ssh_port: u16, ports: &[PortAccess]) -> Vec<AddressPort> {
+    std::iter::once(AddressPort::same(ssh_port))
+        .chain(ports.iter().map(|port| AddressPort::same(port.host_port)))
+        .collect()
+}
+
 /// A Hidden Provider that cannot reach its `anon` daemon can start no lease:
 /// the address IS how a tenant reaches the workload, and there is nothing
 /// to fall back on — an IP is exactly what this provider promised never to
@@ -42,15 +52,19 @@ pub(super) fn refuse_without_a_daemon(state: &AppState) -> Result<(), ErrorRespo
     if !state.config.hidden || state.hidden_service.is_some() {
         return Ok(());
     }
-    error!(
-        "this provider publishes hidden = true but has no anon control connection, so it can \
-         give no lease an address and starts none"
-    );
-    Err(ErrorResponse::new(
+    Err(no_daemon())
+}
+
+/// The refusal itself, so the free answer and the paid one are the same
+/// words. Deliberately not logged: `availability` is free and unsigned, and
+/// a line per call would be a log anyone could fill. The message says what
+/// is wrong, and it reaches the operator's own `availability` too.
+fn no_daemon() -> ErrorResponse {
+    ErrorResponse::new(
         ErrorCode::NoCapacity,
         "this Hidden Provider cannot reach its anon daemon, so it can give this lease no \
          .anyone address",
-    ))
+    )
 }
 
 /// Create the `.anyone` address `workload_id`'s lease is reached at, mapping
@@ -67,11 +81,16 @@ pub(super) async fn create(
     ssh_port: u16,
     ports: &[PortAccess],
 ) -> Result<Option<HiddenAddress>, ErrorResponse> {
-    refuse_without_a_daemon(state)?;
-    let Some(daemon) = daemon(state) else {
+    if !state.config.hidden {
         return Ok(None);
+    }
+    // The same refusal `spawn` and `availability` already answered before a
+    // slot was taken (`refuse_without_a_daemon`); reached here only by a
+    // Takeover's start, which passes through no route.
+    let Some(daemon) = daemon(state) else {
+        return Err(no_daemon());
     };
-    let ports = address_ports(ssh_port, ports);
+    let ports = ports_of(ssh_port, ports);
     match daemon.create_address(workload_id, &ports).await {
         Ok(address) => {
             info!(
@@ -112,7 +131,8 @@ pub(super) async fn destroy_unrecorded(state: &AppState, workload_id: &str) {
     }
 }
 
-/// Destroy the address lease `id` holds, as part of its ending.
+/// Destroy the address lease `id` holds ON ITS RECORD, as part of its
+/// ending — the pair of `destroy_unrecorded` above.
 ///
 /// `true` when there is nothing left to destroy — a lease that never had an
 /// address, or one the daemon has now confirmed gone. The record's address
@@ -120,7 +140,7 @@ pub(super) async fn destroy_unrecorded(state: &AppState, workload_id: &str) {
 /// it in place, the lease is not recorded destroyed, and the next sweep
 /// tries again — exactly what a container that would not stop gets
 /// (`cleanup::destroy_workload`, spec §6.7).
-pub(super) async fn destroy_of_lease(state: &AppState, id: u32) -> bool {
+pub(super) async fn destroy_recorded(state: &AppState, id: u32) -> bool {
     let workload_id = {
         let leases = state.leases.lock().await;
         match leases.get(&id) {
@@ -132,7 +152,9 @@ pub(super) async fn destroy_of_lease(state: &AppState, id: u32) -> bool {
     let Some(daemon) = daemon(state) else {
         // A provider that stopped being hidden between the lease and its
         // ending has no daemon to ask, and holding the lease undestroyed
-        // forever would be worse than forgetting one address.
+        // forever would be worse than forgetting one address. The record
+        // stops claiming an address this provider can no longer account for.
+        forget_address(state, id).await;
         return true;
     };
     if let Err(e) = daemon.destroy_address(&workload_id).await {
@@ -144,13 +166,19 @@ pub(super) async fn destroy_of_lease(state: &AppState, id: u32) -> bool {
         return false;
     }
 
+    info!("the .anyone address of workload {} is gone", workload_id);
+    forget_address(state, id).await;
+    true
+}
+
+/// Take the address off lease `id`'s record: it no longer has one, and
+/// nothing should ask the daemon about it again.
+async fn forget_address(state: &AppState, id: u32) {
     let mut leases = state.leases.lock().await;
     if let Some(lease) = leases.get_mut(&id) {
-        info!("the .anyone address of workload {} is gone", workload_id);
         lease.hidden_address = None;
         persist_leases(&leases, &state.config.lease_state_path);
     }
-    true
 }
 
 /// Re-establish every live lease's address after a restart of the provider
@@ -164,30 +192,32 @@ pub(super) async fn destroy_of_lease(state: &AppState, id: u32) -> bool {
 /// address, and `status` answers that one from then on — it is all the
 /// tenant can be told, and a lease nobody can reach at all would be worse.
 ///
-/// A failure leaves the lease's stored address where it is and is logged:
-/// the next restart tries again, and the alternative — dropping the address
-/// — would lose the key the same address can only ever be restored from.
+/// A failure takes the address OFF the record and is logged with what an
+/// operator can do about it. `status` then answers the lease with no
+/// `access` at all, which is the truth — there is nowhere to reach — rather
+/// than naming a host nothing answers on, which a tenant would keep dialling.
+/// The commonest cause is a provider that restarted while its daemon did
+/// not: the daemon is still serving the key and refuses to add it twice, and
+/// restarting the daemon is the fix.
 pub(super) async fn restore_all(state: &AppState) {
-    if daemon(state).is_none() {
+    let Some(daemon) = daemon(state) else {
         return;
-    }
+    };
     // Decided under the lock, asked outside it: the daemon takes its time
     // and the HTTP app is already serving.
-    let live: Vec<(u32, String, Option<String>, Vec<_>)> = {
+    let live: Vec<Reachable> = {
         let leases = state.leases.lock().await;
         leases
             .values()
             .filter(|lease| lease.state.is_live() && lease.hidden_address.is_some())
-            .map(|lease| {
-                (
-                    lease.id,
-                    lease.workload_id.clone(),
-                    lease
-                        .hidden_address
-                        .as_ref()
-                        .and_then(|address| address.key.clone()),
-                    lease.address_ports(),
-                )
+            .map(|lease| Reachable {
+                id: lease.id,
+                workload_id: lease.workload_id.clone(),
+                key: lease
+                    .hidden_address
+                    .as_ref()
+                    .and_then(|address| address.key.clone()),
+                ports: ports_of(lease.ssh_port, &lease.ports),
             })
             .collect()
     };
@@ -197,11 +227,11 @@ pub(super) async fn restore_all(state: &AppState) {
 
     let mut restored = 0usize;
     let mut fresh = 0usize;
-    for (id, workload_id, key, ports) in live {
-        let daemon = daemon(state).expect("checked above, and the state is immutable here");
-        let address = match &key {
+    let mut lost = 0usize;
+    for lease in live {
+        let address = match &lease.key {
             Some(key) => daemon
-                .restore_address(&workload_id, key, &ports)
+                .restore_address(&lease.workload_id, key, &lease.ports)
                 .await
                 .map(|host| HiddenAddress {
                     host,
@@ -209,36 +239,93 @@ pub(super) async fn restore_all(state: &AppState) {
                 }),
             // Nothing to restore it from, so the lease gets a NEW address
             // rather than none: the tenant reads it from `status`.
-            None => daemon.create_address(&workload_id, &ports).await,
+            None => {
+                daemon
+                    .create_address(&lease.workload_id, &lease.ports)
+                    .await
+            }
         };
         match address {
             Ok(address) => {
+                if lease.key.is_some() {
+                    restored += 1;
+                } else {
+                    fresh += 1;
+                    warn!(
+                        "lease {} kept no key for its address, so workload {} is reachable at a \
+                         NEW one, {}; its tenant reads it from status",
+                        lease.id, lease.workload_id, address.host
+                    );
+                }
                 let mut leases = state.leases.lock().await;
-                if let Some(lease) = leases.get_mut(&id) {
-                    if key.is_some() {
-                        restored += 1;
-                    } else {
-                        fresh += 1;
-                        warn!(
-                            "lease {} kept no key for its address, so workload {} is reachable \
-                             at a NEW one, {}; its tenant reads it from status",
-                            id, workload_id, address.host
-                        );
-                    }
-                    lease.hidden_address = Some(address);
+                if let Some(record) = leases.get_mut(&lease.id) {
+                    record.hidden_address = Some(address);
                     persist_leases(&leases, &state.config.lease_state_path);
                 }
             }
-            Err(e) => error!(
-                "lease {}: the .anyone address of workload {} could not be re-established \
-                 ({:#}); its tenant cannot reach it until it is",
-                id, workload_id, e
-            ),
+            Err(e) => {
+                error!(
+                    "lease {}: the .anyone address of workload {} could not be \
+                     re-established ({:#}); its status now answers no access at all. If the \
+                     daemon outlived this provider it is still serving that address and \
+                     refusing to add it twice — restart the daemon, and this provider will \
+                     give the lease a fresh address.",
+                    lease.id, lease.workload_id, e
+                );
+                forget_address(state, lease.id).await;
+                lost += 1;
+            }
         }
     }
     info!(
-        "re-established {} .anyone address(es) from the lease table ({} given a fresh one)",
+        "re-established {} .anyone address(es) from the lease table ({} given a fresh one, {} \
+         lease(s) left with none)",
         restored + fresh,
-        fresh
+        fresh,
+        lost
     );
+}
+
+/// One live lease whose address has to be re-established: everything the
+/// daemon needs, read off the record under the lock so nothing is held
+/// while the daemon is asked.
+struct Reachable {
+    id: u32,
+    workload_id: String,
+    /// The key its address is derived from, when one was stored. `None`
+    /// means a fresh address.
+    key: Option<String>,
+    ports: Vec<AddressPort>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_addresss_ports_are_the_ssh_forward_then_every_published_port() {
+        let ports = ports_of(
+            40000,
+            &[
+                PortAccess {
+                    container_port: 443,
+                    host_port: 41000,
+                },
+                PortAccess {
+                    container_port: 80,
+                    host_port: 41001,
+                },
+            ],
+        );
+        assert_eq!(
+            ports,
+            vec![
+                AddressPort::same(40000),
+                AddressPort::same(41000),
+                AddressPort::same(41001)
+            ],
+            "the same number on both sides: a tenant dials what access told it"
+        );
+        assert_eq!(ports_of(40000, &[]), vec![AddressPort::same(40000)]);
+    }
 }

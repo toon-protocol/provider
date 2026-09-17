@@ -166,17 +166,49 @@ self-hosted does not publish `hidden: true`. Without `hidden = true` none of
 the `[anon]` keys is required and the RPC is not gated; keys that are
 present are still checked for shape, so a typo fails where it was written.
 
-What the config does not (yet) do: the per-lease `.anyone` addresses, the
-`anon` egress network and the proxied outbound land in the later Milestone
-4 tickets against the shapes defined here — the `HiddenService` port
-(`src/hidden_service.rs`: `create_address`, which answers the host and the
-key it was made from, `restore_address`, which brings the same host back
-from that key after a restart, `destroy_address` and `egress_for`), the
-`egress` field on `ContainerConfig`, and `[anon]`. Until
-the per-lease addresses land, a spawn on a hidden provider is refused
-`invalid_request` with a message saying so, and `availability` answers the
-same for free first, so nobody pays for an address the provider cannot yet
-give; the Profile, the Listings and Liveness are published as usual.
+### A hidden lease's own address
+
+Every lease on a Hidden Provider is reached at a `.anyone` address of its
+own. A paid spawn asks the `HiddenService` port
+(`src/hidden_service.rs`) for one that maps the lease's SSH forward and
+every port it published — before the workload starts, so a workload behind
+an address the daemon refused never runs — and `access.host` is that
+address instead of an IP. `status` answers the same one, the ports do not
+move, and a tenant dials them through its `socks5h://` proxy exactly as it
+would on an IP. A Takeover winner's start makes its address the same way
+and by the same call; a Warm Standby's reservation has none, because
+nothing is running to reach.
+
+The address and the KEY it is derived from are stored on the lease record,
+so a restart of the provider re-establishes each live lease's address
+(`restore_address`) rather than publishing a new one the tenant was never
+told about. A lease whose key the implementation could not give back is
+given a fresh address instead of being left unreachable, and `status` is
+where its tenant reads it. A restore the daemon REFUSES — most often
+because the provider restarted and the daemon did not, so it is still
+serving that address and will not add the key twice — takes the address off
+the record: `status` then answers no `access` at all, which is the truth,
+rather than a host this provider cannot account for. Restarting the daemon
+is the fix, and the next restart gives the lease a fresh address.
+
+Every ending destroys the address: expiry, termination and eviction all go
+through the same `end_lease`, and the one teardown path below it destroys
+the workload and the address together. A destroy the daemon refuses leaves
+the lease not-destroyed and the next sweep tries again, exactly as a
+container that would not stop is retried. A primary that stopped its own
+workload under the self-stop rule keeps its address — stopping is not
+ending.
+
+A provider configured `hidden = true` with no `[anon.control]` connection
+can give no lease an address, so it starts none: a spawn is refused
+`no_capacity`, and `availability` answers the same for free first, so
+nobody pays to find out. The Profile, the Listings and Liveness are
+published as usual either way.
+
+What the config does not (yet) do: the `anon` egress network and the
+proxied outbound land in the later Milestone 4 tickets against the shapes
+defined here — `HiddenService::egress_for`, the `egress` field on
+`ContainerConfig`, and `[anon]`.
 
 ## Routes and the connector
 

@@ -163,8 +163,10 @@ pub(crate) async fn end_lease(state: &AppState, id: u32, end: LeaseEnd, now: u64
 async fn destroy_workload(state: &AppState, id: u32) {
     let container_gone = destroy_container(state, id).await;
     // Asked for even when the container would not go: the two are
-    // independent, and whichever succeeded is not asked for again.
-    let address_gone = lease_address::destroy_of_lease(state, id).await;
+    // independent. An address the daemon confirmed gone comes off the
+    // record, so a retry asks only about what is left; the backend is
+    // idempotent and simply answers that the container is already absent.
+    let address_gone = lease_address::destroy_recorded(state, id).await;
     if container_gone && address_gone {
         let mut leases = state.leases.lock().await;
         if let Some(lease) = leases.get_mut(&id) {

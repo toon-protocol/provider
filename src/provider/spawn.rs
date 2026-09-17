@@ -332,7 +332,7 @@ async fn serve(
     };
 
     let mut leases = state.leases.lock().await;
-    let Some(expires_at) = mark_running(&mut leases, id, address.clone()) else {
+    let Some((expires_at, access)) = mark_running(&mut leases, id, address, &state.config) else {
         // The lease ended while it was being provisioned — its tenant
         // terminated it, or the sweep reaped it. Whoever ended it
         // destroyed a workload that did not exist yet, so this one is
@@ -356,18 +356,11 @@ async fn serve(
         workload_id: content.workload_id,
         role,
         expires_at,
-        access: Some(Access {
-            // The lease's own `.anyone` address on a Hidden Provider, and a
-            // public provider's `public_ip` — which its config requires —
-            // otherwise. Never both, and never neither: the address was
-            // just made, or `access_host` is `Some` (spec §6.2, §10).
-            host: address
-                .map(|address| address.host)
-                .or_else(|| state.config.access_host().map(str::to_string))
-                .unwrap_or_default(),
-            ssh_port,
-            ports,
-        }),
+        // Built from the RECORD, by the same rule `status` answers it with
+        // (`LeaseRecord::access_host`): the lease's own `.anyone` address on
+        // a Hidden Provider, the provider's `public_ip` otherwise. The two
+        // answers cannot drift, because there is one rule (spec §6.2, §10).
+        access: Some(access),
     })
 }
 
@@ -549,7 +542,8 @@ async fn free_workload_id(state: &AppState, leases: &HashMap<u32, LeaseRecord>) 
 }
 
 /// Promote a lease whose workload has started, record the `.anyone` address
-/// it was started behind, and answer its expiry.
+/// it was started behind, and answer its expiry and the access details the
+/// tenant reaches it at.
 ///
 /// `None` when the lease is no longer the Provisioning one this spawn
 /// inserted: a Termination or a sweep may end a lease between the insert and
@@ -560,14 +554,16 @@ fn mark_running(
     leases: &mut HashMap<u32, LeaseRecord>,
     id: u32,
     address: Option<HiddenAddress>,
-) -> Option<u64> {
+    config: &super::config::ProviderConfig,
+) -> Option<(u64, Access)> {
     let lease = leases.get_mut(&id)?;
     if lease.state != LeaseState::Provisioning {
         return None;
     }
     lease.state = LeaseState::Running;
     lease.hidden_address = address;
-    Some(lease.expires_at)
+    let host = lease.access_host(config).unwrap_or_default().to_string();
+    Some((lease.expires_at, lease.access(&host)))
 }
 
 /// The shape checks that need no listing: the workload id, the SSH key and

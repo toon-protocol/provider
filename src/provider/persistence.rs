@@ -16,7 +16,7 @@ pub use crate::nostr::wire::{LeaseEnd, LeaseState};
 use super::settle::TakeoverSettlement;
 use super::standby::StandbySet;
 use super::watchdog::TakeoverAnnouncement;
-use crate::hidden_service::{AddressPort, HiddenAddress};
+use crate::hidden_service::HiddenAddress;
 use crate::nostr::wire::{Access, PortAccess, Role, SpawnContent};
 
 /// How many live (`Provisioning`, `Reserved` or `Running`) leases of
@@ -183,22 +183,6 @@ impl LeaseRecord {
             None => config.access_host(),
         }
     }
-
-    /// The ports this lease's `.anyone` address must answer on: its SSH
-    /// forward and every port it published, each on the same number it has
-    /// on the host, because a tenant dials what `access` told it (spec
-    /// §6.2, §10).
-    pub fn address_ports(&self) -> Vec<AddressPort> {
-        address_ports(self.ssh_port, &self.ports)
-    }
-}
-
-/// `LeaseRecord::address_ports` for a lease that is being made and has no
-/// record yet: a spawn's SSH forward and published ports.
-pub(super) fn address_ports(ssh_port: u16, ports: &[PortAccess]) -> Vec<AddressPort> {
-    std::iter::once(AddressPort::same(ssh_port))
-        .chain(ports.iter().map(|port| AddressPort::same(port.host_port)))
-        .collect()
 }
 
 /// Mirror the lease table to disk.
@@ -481,12 +465,6 @@ mod tests {
 
         let loaded = load_leases(&p);
         assert_eq!(loaded[&2000], hidden);
-        // And the ports that address must answer on are the lease's own: the
-        // SSH forward first, then every published port, each on itself.
-        assert_eq!(
-            loaded[&2000].address_ports(),
-            vec![AddressPort::same(42000), AddressPort::same(41000)]
-        );
         let _ = std::fs::remove_file(&p);
     }
 

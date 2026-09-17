@@ -201,6 +201,13 @@ impl ProviderService {
                     if let Err(e) = self.state.backend.delete_container(id).await {
                         warn!("could not clear what workload {} left behind: {}", id, e);
                     }
+                    // And, on a Hidden Provider, the address that workload
+                    // was reachable at. The record is about to be forgotten,
+                    // so no sweep will ever ask again: if it is not
+                    // destroyed here it outlives every lease (spec §10).
+                    if lease.hidden_address.is_some() {
+                        lease_address::destroy_unrecorded(&self.state, &lease.workload_id).await;
+                    }
                     dropped += 1;
                     continue;
                 }
