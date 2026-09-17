@@ -34,7 +34,8 @@ use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use common::harness::{hidden_config, post, HIDDEN_CONNECTOR_URL};
+use common::harness::{hidden_config, post, socks_proxy_of, HIDDEN_CONNECTOR_URL};
+use common::socks::SocksStub;
 use common::{
     sha256_hex, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory,
     FakeHiddenService,
@@ -940,10 +941,14 @@ async fn a_hidden_providers_profile_and_listing() {
 /// characters the daemon chooses.
 #[tokio::test]
 async fn a_hidden_providers_lease_is_reached_at_its_own_anyone_address() {
+    // A hidden provider's image fetch leaves through `anon.socks_proxy`
+    // (§10), so the stub registry is reached through a SOCKS stub that
+    // dials the registry's IP literal as given.
+    let socks = SocksStub::start(&[]).await;
     let f = fixture_provider_configured(
         ImagePolicyConfig::default(),
         stub_registry().await,
-        hidden_config,
+        |config| socks_proxy_of(hidden_config(config), &socks.url()),
     )
     .await;
     let aa = 0xaa;
