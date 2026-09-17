@@ -239,6 +239,14 @@ deny_references = []
 # # address per lease (ADD_ONION) and destroys it when the lease ends.
 # # Authenticate with the daemon's cookie file (CookieAuthentication 1) OR a
 # # password (HashedControlPassword) — exactly one.
+# #
+# # The daemon's own anonrc must carry `ControlPort <port>` (it is `0` by
+# # default), and for a cookie, `CookieAuthentication 1` with a
+# # `CookieAuthFile` the file below IS — the same bytes, which in compose
+# # means the daemon's data directory shared with this container, mounted
+# # read-only, and a `CookieAuthFileGroupReadable 1` if the two run as
+# # different users. The provider connects at startup and refuses to start
+# # naming `addr` if it cannot authenticate.
 # [anon.control]
 # addr = "anon-hs:9051"
 # cookie_file = "/var/lib/anon/control_auth_cookie"

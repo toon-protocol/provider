@@ -166,6 +166,58 @@ self-hosted does not publish `hidden: true`. Without `hidden = true` none of
 the `[anon]` keys is required and the RPC is not gated; keys that are
 present are still checked for shape, so a typo fails where it was written.
 
+**Driving the daemon.** `src/anon_control.rs` is the real `HiddenService`:
+it speaks the daemon's control protocol over `[anon.control].addr`, which is
+Tor's, because `anon` v0.4.10.2 is. Per address it sends `PROTOCOLINFO 1`,
+then `AUTHENTICATE <hex of the cookie file>` (or `AUTHENTICATE "<password>"`),
+then
+
+```
+ADD_ONION NEW:ED25519-V3 Flags=Detach Port=40000,127.0.0.1:40000 Port=41000,…
+```
+
+— one `Port=` per lease port, each mapped to `anon.forward_host` — and reads
+`250-ServiceID=` as the lease's `<id>.anyone` host and `250-PrivateKey=` as
+the key that IS that address. `Flags=Detach` is what makes the address
+outlive the control connection; without it the daemon would destroy it the
+moment the command's connection closed. `restore_address` sends the same
+command with the stored key in place of `NEW:ED25519-V3` and gets the same
+host back, which is how a restarted provider reaches its live leases where
+their tenants last found them — and how it re-learns the service id, since
+the lease record keeps the key and not the id. `destroy_address` sends
+`DEL_ONION <service id>`; a `552` (the daemon has no such service) is
+success, because the address being gone is what was asked for.
+
+A connection is opened, authenticated, used and dropped per call — detached
+services make that free, and it leaves no reconnect path to get wrong.
+Authentication is plain `COOKIE`, not `SAFECOOKIE`: the daemon offers both
+whenever `CookieAuthentication 1` is set, and anyone who can read the cookie
+file could speak either. **What the daemon's `anonrc` must carry** is
+therefore `ControlPort <port>` (it defaults to `0`) and either
+`CookieAuthentication 1` with a `CookieAuthFile` this process can read — in
+compose, the daemon's data directory mounted into the provider's container,
+plus `CookieAuthFileGroupReadable 1` when the two run as different users — or
+a `HashedControlPassword`. The provider connects and authenticates **once at
+startup**, before it serves or publishes anything, and refuses to start with
+a message naming the control endpoint if it cannot: a provider that cannot
+create addresses must not advertise itself as one that can, and finding out
+at the first paid spawn would mean refusing a tenant who has already paid.
+
+`cargo test --test anon_control` drives all of this against an in-process
+stub control port, command by command. One test in that file is `#[ignore]`
+and runs the create/restore/destroy cycle against a **real** daemon:
+
+```sh
+TOON_ANON_CONTROL=127.0.0.1:9051 \
+  TOON_ANON_COOKIE=/var/lib/anon/control_auth_cookie \
+  cargo test --test anon_control -- --ignored
+```
+
+(or `TOON_ANON_PASSWORD` instead of the cookie). With none of them set it
+prints why and passes, exactly as the Docker-only tests do on a machine with
+no Docker. The sandbox's `hs` profile daemon has `ControlSocket 0` and no
+`ControlPort` today, so nothing there answers it yet.
+
 What the config does not (yet) do: the per-lease `.anyone` addresses, the
 `anon` egress network and the proxied outbound land in the later Milestone
 4 tickets against the shapes defined here — the `HiddenService` port
@@ -1002,7 +1054,8 @@ CI job here that clones it and runs that diff.
 ```sh
 cargo build
 cargo test                 # no Docker daemon needed
-cargo test -- --ignored    # the Docker backend, and a registry-entry spawn, against a real daemon
+cargo test -- --ignored    # the Docker backend and a registry-entry spawn against a real daemon,
+                           # and the anon control port against a real one (see Hidden Provider)
 cargo clippy --all-targets
 cargo run -- --config provider.toml
 ```
