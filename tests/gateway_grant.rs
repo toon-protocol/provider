@@ -403,13 +403,19 @@ async fn the_fixture_grant_a_tenant_tool_reproduces_is_accepted_until_it_expires
     let grant_json = fixture["event"].clone();
     let expires_at = fixture["content"]["expires_at"].as_u64().unwrap();
 
-    // constants.json's tenant and gateway: the keys the fixture was signed
-    // for, and the workload id (`aa` × 32) its `d` tag names.
-    let tenant = Keys::parse(&"11".repeat(32)).unwrap();
-    let gateway = Keys::parse(&"77".repeat(32)).unwrap();
+    // The keys the fixture was signed for, read from the same constants the
+    // tool's tests read; the workload id (`aa` × 32) is the one its `d`
+    // tag names.
+    let constants: Value =
+        serde_json::from_str(include_str!("fixtures/wire/constants.json")).unwrap();
+    let tenant = Keys::parse(constants["tenant"]["secret_key"].as_str().unwrap()).unwrap();
+    let gateway = Keys::parse(constants["gateway"]["secret_key"].as_str().unwrap()).unwrap();
     assert_eq!(grant_json["pubkey"], json!(tenant.public_key().to_hex()));
     assert_eq!(grant_json["tags"][0], json!(["d", workload_id(0xaa)]));
-    assert_eq!(grant_json["tags"][1], json!(["p", gateway.public_key().to_hex()]));
+    assert_eq!(
+        grant_json["tags"][1],
+        json!(["p", gateway.public_key().to_hex()])
+    );
 
     let spec = RequestSpec {
         tenant: Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap(),
@@ -420,8 +426,7 @@ async fn the_fixture_grant_a_tenant_tool_reproduces_is_accepted_until_it_expires
 
     let (status, tenants_answer) = status_with(&h, &tenant, 0xaa, None).await;
     assert_eq!(status, StatusCode::OK, "{}", tenants_answer);
-    let (status, gateways_answer) =
-        status_with(&h, &gateway, 0xaa, Some(grant_json.clone())).await;
+    let (status, gateways_answer) = status_with(&h, &gateway, 0xaa, Some(grant_json.clone())).await;
     assert_eq!(status, StatusCode::OK, "{}", gateways_answer);
     assert_eq!(gateways_answer, tenants_answer);
 

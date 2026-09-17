@@ -3,7 +3,7 @@
 The tenant's side of a Workload Gateway: one command that signs and
 publishes a **Gateway Grant** from the tenant's own key.
 
-A [Gateway Grant](../../../TOON_Network/CONTEXT.md) is a tenant's signed,
+A [Gateway Grant](https://github.com/toon-protocol/TOON_Network/blob/main/CONTEXT.md) is a tenant's signed,
 published delegation that lets **one** Workload Gateway read **one**
 workload's lease state and access details until the grant expires (spec
 §3.1.3). The gateway carries it inside its own signed `status` request, and
@@ -35,7 +35,7 @@ node publish.mjs --workload <64 hex> --gateway <pubkey> \
 | `--ports` | Every `container_port` the spawn asked for, comma-separated, so `--http-port` can be checked against them before anything is signed. |
 | `--standby` | The Standby Set, **primary first**, one flag per member. A standalone lease's is its one provider. The gateway asks each member's `status` to find where the workload runs. |
 | `--expires-at` / `--expires-in` | When the grant stops admitting the gateway (unix seconds, or a duration from now). Exactly one of the two. |
-| `--name` | Optional: a short name the gateway may serve the workload at beside the canonical label it derives from the workload id. A single DNS label. |
+| `--name` | Optional: a short name the gateway may serve the workload at beside the canonical name it derives from the workload id. A single DNS label. |
 | `--relay` | A relay to publish to; repeatable. Default: every relay `RELAY_WRITE_ROUTES` names a paid write route for. |
 | `--key` | The tenant's Nostr secret key, hex. Or `TOON_TENANT_KEY`. |
 | `--dry-run` | Sign, print the event, and stop. Nothing is paid for and no channel is opened. |
@@ -63,15 +63,16 @@ of three is a grant a gateway watching that relay finds.
 ## What it refuses, before signing
 
 A provider checks a grant from the request that carried it and refuses
-anything wrong with it as `bad_grant` — after a gateway has already built its
-request around it (spec §6.5). A gateway acts on `http_port`, `standby_set`
-and `name` without a provider ever checking them (§3.1.3). So everything
+anything wrong with it as `bad_grant` — after a Workload Gateway has already
+built its request around it (spec §6.5). The Workload Gateway acts on
+`http_port`, `standby_set` and `name` without a provider ever checking them
+(§3.1.3). So everything
 either party would trip on is refused **here**, with a message naming the
 problem, and nothing is signed:
 
 | Refused | Because |
 |---|---|
-| an expiry already past | the provider would answer `bad_grant` to every request carrying it |
+| an expiry already past, or this very second | the provider would answer `bad_grant` to every request carrying it (its rule is `now <= expires_at`, and a grant expiring now is expired by the time a Workload Gateway has read it) |
 | an `--http-port` that is not one of `--ports` | the gateway would forward to a port the workload never asked for |
 | a gateway key, or a Standby Set member, that is not 64 lowercase hex | not a public key — or, for the gateway, a spelling its own `#p` filter would not match |
 | a `--name` that is not a single DNS label | the gateway serves `<name>.<gateway-domain>`: 1–63 lowercase letters, digits and hyphens, no leading or trailing hyphen, no dots |

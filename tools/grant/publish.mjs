@@ -11,7 +11,7 @@
 //
 //   --workload    the workload id the spawn was signed with
 //   --gateway     the Workload Gateway's Nostr public key: the ONE key the
-//                 grant admits to `status`
+//                 grant admits to `status`, and the grant's `p` tag
 //   --http-port   which of the spawn's container ports carries HTTP — the
 //                 port the gateway forwards to; must be one of --ports
 //   --ports       every `container_port` the spawn asked for, so the port
@@ -53,7 +53,7 @@ import { dirname } from 'node:path';
 import { parseArgs } from 'node:util';
 import { ToonClient } from '@toon-protocol/client';
 import { getPublicKey } from 'nostr-tools/pure';
-import { checkGrant, grantAddress, grantEvent, optionsFrom, publishGrant, signGrant } from './grant.mjs';
+import { NO_RELAY, checkGrant, grantAddress, grantEvent, optionsFrom, publishGrant, signGrant } from './grant.mjs';
 
 // The payer's configuration, name for name what tools/publisher reads, so a
 // tenant beside a sandbox provider sets one environment for both. Hidden
@@ -198,14 +198,12 @@ async function main() {
   );
 
   if (values['dry-run']) {
-    const event = signGrant(grantEvent({ ...grant, createdAt: now, now }), secretKey);
+    const event = signGrant(grantEvent(grant, now), secretKey);
     console.log(JSON.stringify({ address: grantAddress(tenant, grant.workloadId), event_id: event.id, relays, event }, null, 2));
     return 0;
   }
 
-  if (relays.length === 0) {
-    refuse('no relay to publish to: name one with --relay, or set RELAY_WRITE_ROUTES so every relay with a paid write route is used');
-  }
+  if (relays.length === 0) refuse(NO_RELAY);
   for (const relay of relays) {
     const destination = WRITE_ROUTES[relay];
     if (!destination) refuse(`no paid write route configured for ${relay} (set RELAY_WRITE_ROUTES)`);
@@ -220,7 +218,7 @@ async function main() {
 
   const client = await openClient();
   try {
-    const report = await publishGrant({ ...grant, secretKey, relays, writeTo: paidWriter(client), now: () => now, log });
+    const report = await publishGrant({ grant, secretKey, relays, writeTo: paidWriter(client), now: () => now, log });
     const { event, ...printed } = report;
     console.log(JSON.stringify({ ...printed, event }, null, 2));
     log(`kind ${event.kind} ${event.id.slice(0, 12)}…: ${report.accepted.length} accepted, ${Object.keys(report.failed).length} failed`);

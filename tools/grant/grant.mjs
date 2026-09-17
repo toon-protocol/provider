@@ -123,11 +123,18 @@ export function checkGrant({ workloadId, gateway, httpPort, ports, standbySet, e
   if (!Number.isInteger(expiresAt)) {
     return `expires_at must be unix seconds, not ${JSON.stringify(expiresAt)}`;
   }
-  if (expiresAt <= now) {
+  // The provider's rule is `now <= expires_at` (§6.5), so a grant expiring
+  // this very second is not yet expired there — and is expired by the time
+  // a gateway has read it from a relay and carried it. Neither is worth a
+  // relay write.
+  if (expiresAt < now) {
     return (
       `expires_at ${expiresAt} is already past (now ${now}): a provider refuses an expired grant as bad_grant, ` +
       'and there is no renewing one except by publishing it again with a later expiry'
     );
+  }
+  if (expiresAt === now) {
+    return `expires_at ${expiresAt} is now: the grant would be expired by the time a Workload Gateway carried it`;
   }
 
   if (name !== undefined) {
@@ -138,8 +145,10 @@ export function checkGrant({ workloadId, gateway, httpPort, ports, standbySet, e
 }
 
 /**
- * The unsigned Gateway Grant for these inputs (spec §3.1.3), refused with a
- * thrown explanation when `checkGrant` would refuse it.
+ * The unsigned Gateway Grant for `grant` (spec §3.1.3), refused with a
+ * thrown explanation when `checkGrant` would refuse it. `createdAt` is the
+ * moment of signing, in unix seconds, and is also the clock the expiry is
+ * checked against.
  *
  * The content is written in the order §3.1.3 declares its fields —
  * `workload_id, gateway, http_port, standby_set, expires_at, name?` — and
@@ -148,9 +157,10 @@ export function checkGrant({ workloadId, gateway, httpPort, ports, standbySet, e
  * copies the signed string rather than rebuilding it. A tool that sorted
  * keys would sign a different event from the one the fixtures prove.
  */
-export function grantEvent({ workloadId, gateway, httpPort, ports, standbySet, expiresAt, name, createdAt, now }) {
-  const problem = checkGrant({ workloadId, gateway, httpPort, ports, standbySet, expiresAt, name }, now);
+export function grantEvent(grant, createdAt) {
+  const problem = checkGrant(grant, createdAt);
   if (problem !== null) throw new Error(problem);
+  const { workloadId, gateway, httpPort, standbySet, expiresAt, name } = grant;
   const content = {
     workload_id: workloadId,
     gateway,
@@ -189,9 +199,13 @@ export function signGrant(unsigned, secretKey, { auxRand } = {}) {
   return { ...unsigned, pubkey, id, sig };
 }
 
+/** Said once, here, so the command can refuse it before a channel is opened. */
+export const NO_RELAY =
+  'no relay to publish to: name one with --relay, or set RELAY_WRITE_ROUTES so every relay with a paid write route is used';
+
 /**
- * Sign a grant and write it to every relay in `relays` through `writeTo`.
- * Resolves to
+ * Sign `grant` (the inputs `checkGrant` takes) and write it to every relay
+ * in `relays` through `writeTo`. Resolves to
  *   { address, event_id, tenant, grant, event, accepted: [relay…], failed: { relay: why } }
  * where `grant` is the content as signed. A relay that refused is reported
  * in `failed`, never thrown: a grant that reached one relay of three is a
@@ -207,15 +221,11 @@ export function signGrant(unsigned, secretKey, { auxRand } = {}) {
  * cut off before the expiry respawns under a new workload id (§6.5).
  */
 export async function publishGrant({
-  workloadId, gateway, httpPort, ports, standbySet, expiresAt, name,
-  secretKey, relays, writeTo,
+  grant, secretKey, relays, writeTo,
   now = () => Math.floor(Date.now() / 1000), sign = signGrant, log = () => {},
 }) {
-  const createdAt = now();
-  const unsigned = grantEvent({ workloadId, gateway, httpPort, ports, standbySet, expiresAt, name, createdAt, now: createdAt });
-  if (!Array.isArray(relays) || relays.length === 0) {
-    throw new Error('no relay to publish to: name one with --relay, or set RELAY_WRITE_ROUTES so every relay with a paid write route is used');
-  }
+  const unsigned = grantEvent(grant, now());
+  if (!Array.isArray(relays) || relays.length === 0) throw new Error(NO_RELAY);
 
   const event = sign(unsigned, secretKey);
   const report = { accepted: [], failed: {} };
@@ -235,7 +245,7 @@ export async function publishGrant({
     }
   }
   return {
-    address: grantAddress(event.pubkey, workloadId),
+    address: grantAddress(event.pubkey, grant.workloadId),
     event_id: event.id,
     tenant: event.pubkey,
     grant: JSON.parse(event.content),

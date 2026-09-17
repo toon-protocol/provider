@@ -81,7 +81,7 @@ describe('the event a grant signs', () => {
   it('is the gateway_grant wire fixture, byte for byte — id and signature included', () => {
     // Zero aux randomness is the fixture generator's rule, never the tool's:
     // a real signer draws fresh randomness (`signGrant` without `auxRand`).
-    const unsigned = grantEvent({ ...FIXTURE_INPUTS, createdAt: NOW, now: NOW });
+    const unsigned = grantEvent(FIXTURE_INPUTS, NOW);
     const event = signGrant(unsigned, TENANT_KEY, { auxRand: ZERO_AUX });
 
     assert.deepEqual(event, GRANT.event);
@@ -92,9 +92,9 @@ describe('the event a grant signs', () => {
   });
 
   it('matches the fixture field for field: kind, d, p, L and the content shape', () => {
-    const event = grantEvent({ ...FIXTURE_INPUTS, createdAt: NOW, now: NOW });
+    const event = grantEvent(FIXTURE_INPUTS, NOW);
 
-    assert.equal(event.kind, 30438);
+    assert.equal(event.kind, GRANT.event.kind);
     assert.deepEqual(event.tags, [
       ['d', FIXTURE_INPUTS.workloadId],
       ['p', FIXTURE_INPUTS.gateway],
@@ -115,7 +115,7 @@ describe('the event a grant signs', () => {
   });
 
   it('carries the short name last when one is given, and not at all otherwise', () => {
-    const named = grantEvent({ ...inputs({ name: 'blog' }), createdAt: NOW, now: NOW });
+    const named = grantEvent(inputs({ name: 'blog' }), NOW);
     assert.deepEqual(Object.keys(JSON.parse(named.content)), [
       'workload_id',
       'gateway',
@@ -126,13 +126,13 @@ describe('the event a grant signs', () => {
     ]);
     assert.equal(JSON.parse(named.content).name, 'blog');
 
-    const unnamed = grantEvent({ ...FIXTURE_INPUTS, createdAt: NOW, now: NOW });
+    const unnamed = grantEvent(FIXTURE_INPUTS, NOW);
     assert.equal('name' in JSON.parse(unnamed.content), false);
   });
 
   it('is signed by the tenant and verifies as a Nostr event', () => {
     const secretKey = generateSecretKey();
-    const event = signGrant(grantEvent({ ...FIXTURE_INPUTS, createdAt: NOW, now: NOW }), secretKey);
+    const event = signGrant(grantEvent(FIXTURE_INPUTS, NOW), secretKey);
 
     assert.equal(event.pubkey, getPublicKey(secretKey));
     assert.ok(verifyEvent(event), 'the tenant signed it');
@@ -144,7 +144,7 @@ describe('what a provider would refuse is refused here first, before anything is
     const relays = acceptingRelays();
     await assert.rejects(
       publishGrant({
-        ...inputs(overrides),
+        grant: inputs(overrides),
         secretKey: TENANT_KEY,
         relays: ['ws://relay:7100'],
         writeTo: relays.writeTo,
@@ -158,7 +158,7 @@ describe('what a provider would refuse is refused here first, before anything is
 
   it('an expiry already past, naming the expiry and the clock', async () => {
     await refusal({ expiresAt: NOW - 1 }, /expires_at 1699999999 is already past \(now 1700000000\)/);
-    await refusal({ expiresAt: NOW }, /expires_at 1700000000 is already past/);
+    await refusal({ expiresAt: NOW }, /expires_at 1700000000 is now: .*expired by the time a Workload Gateway carried it/);
     await refusal({ expiresAt: 'tomorrow' }, /expires_at must be unix seconds/);
   });
 
@@ -210,7 +210,7 @@ describe('publishing', () => {
     const secretKey = generateSecretKey();
 
     const report = await publishGrant({
-      ...inputs({ name: 'blog' }),
+      grant: inputs({ name: 'blog' }),
       secretKey,
       relays: ['ws://relay-a:7100', 'ws://relay-b:7100'],
       writeTo: relays.writeTo,
@@ -239,7 +239,7 @@ describe('publishing', () => {
       relay === 'ws://down:7100' ? 'g.toon.relay refused by g.hub: F02 no route' : null;
 
     const report = await publishGrant({
-      ...FIXTURE_INPUTS,
+      grant: FIXTURE_INPUTS,
       secretKey: TENANT_KEY,
       relays: ['ws://up:7100', 'ws://down:7100'],
       writeTo,
@@ -252,7 +252,7 @@ describe('publishing', () => {
 
   it('a writer that throws is a failed relay too, with its reason', async () => {
     const report = await publishGrant({
-      ...FIXTURE_INPUTS,
+      grant: FIXTURE_INPUTS,
       secretKey: TENANT_KEY,
       relays: ['ws://gone:7100'],
       writeTo: async () => {
@@ -267,7 +267,7 @@ describe('publishing', () => {
 
   it('refuses to publish to no relay at all rather than signing for nobody', async () => {
     await assert.rejects(
-      publishGrant({ ...FIXTURE_INPUTS, secretKey: TENANT_KEY, relays: [], writeTo: neverSigns, sign: neverSigns, now: () => NOW }),
+      publishGrant({ grant: FIXTURE_INPUTS, secretKey: TENANT_KEY, relays: [], writeTo: neverSigns, sign: neverSigns, now: () => NOW }),
       /no relay/,
     );
   });
@@ -280,14 +280,13 @@ describe('renewal and rotation are the same act as publishing', () => {
   // "renew" and no "rotate", only "publish again".
   const publishedAs = async (overrides, createdAt) => {
     const relays = acceptingRelays();
-    const report = await publishGrant({
-      ...inputs(overrides),
+    return publishGrant({
+      grant: inputs(overrides),
       secretKey: TENANT_KEY,
       relays: ['ws://relay:7100'],
       writeTo: relays.writeTo,
       now: () => createdAt,
     });
-    return report;
   };
 
   it('publishing again with a later expiry renews: same address, later expires_at', async () => {
@@ -313,14 +312,13 @@ describe('renewal and rotation are the same act as publishing', () => {
   });
 });
 
-describe('the provider side: the fixtures the provider generated over what this tool produces', () => {
+describe('the provider side, read from the fixtures the provider generated over these same bytes', () => {
   const granted = fixture('status.granted.json');
   const running = fixture('status.running.json');
   const badGrant = fixture('error.bad_grant.json');
 
   /** What this tool signs for the fixture inputs, with the fixture generator's zero aux randomness. */
-  const produced = () =>
-    signGrant(grantEvent({ ...FIXTURE_INPUTS, createdAt: NOW, now: NOW }), TENANT_KEY, { auxRand: ZERO_AUX });
+  const produced = () => signGrant(grantEvent(FIXTURE_INPUTS, NOW), TENANT_KEY, { auxRand: ZERO_AUX });
 
   it('a status request carrying exactly what this tool produced was answered 200, and with the tenant\'s own answer', () => {
     const request = granted.request_body.request;
