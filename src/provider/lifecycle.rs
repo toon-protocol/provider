@@ -7,6 +7,13 @@
 // Termination reveal or destroy, so both carry a tenant-signed Lease Request
 // and refuse anyone else with `not_tenant`.
 //
+// Status has ONE other reader: a Workload Gateway the tenant granted (spec
+// §6.5, §3.1.3). It signs for itself and carries the tenant's signed
+// Gateway Grant in the request, and the provider checks the grant out of
+// that request alone — `may_read`. Nothing else in this module reads a
+// grant: a termination by a granted gateway is `not_tenant` like anyone
+// else's, because a grant delegates reading a lease and nothing more.
+//
 // A lease is named by the tenant's own `workload_id`, never by the backend id
 // this provider keys its table on: the tenant chose that id and it is the only
 // handle it has.
@@ -19,6 +26,7 @@ use tracing::error;
 use super::cleanup::end_lease;
 use super::persistence::{persist_leases, LeaseEnd, LeaseRecord, LeaseState};
 use crate::nostr::directory_events::eviction_event;
+use crate::nostr::gateway_grant;
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
     ErrorCode, ErrorResponse, EvictResponse, EvictionReason, ExtendRequest, ExtendResponse,
@@ -212,12 +220,13 @@ async fn extend_lease(
 
 /// Serve one status on the free `<addr>.status`.
 pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, ErrorResponse> {
-    let (tenant, workload_id) = authenticate(state, body, Op::Status).await?;
+    let (signer, content) = authenticate(state, body, Op::Status).await?;
+    let now = state.clock.now();
 
     let leases = state.leases.lock().await;
-    let id = lease_id_for(&leases, &workload_id).ok_or_else(unknown_workload)?;
+    let id = lease_id_for(&leases, &content.workload_id).ok_or_else(unknown_workload)?;
     let lease = leases.get(&id).ok_or_else(unknown_workload)?;
-    check_tenant(lease, &tenant)?;
+    may_read(lease, &signer, &content, now)?;
 
     Ok(StatusResponse {
         workload_id: lease.workload_id.clone(),
@@ -255,7 +264,8 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
 /// destroyed now, and nothing is refunded (ADR 0003).
 pub async fn terminate(state: &AppState, body: &[u8]) -> Result<TerminateResponse, ErrorResponse> {
     let received = std::time::Instant::now();
-    let (tenant, workload_id) = authenticate(state, body, Op::Terminate).await?;
+    let (tenant, content) = authenticate(state, body, Op::Terminate).await?;
+    let workload_id = content.workload_id;
     let now = state.clock.now();
 
     let id = {
@@ -378,7 +388,7 @@ async fn authenticate(
     state: &AppState,
     body: &[u8],
     op: Op,
-) -> Result<(PublicKey, String), ErrorResponse> {
+) -> Result<(PublicKey, WorkloadContent), ErrorResponse> {
     let now = state.clock.now();
     let request = lease_request::accept(
         body,
@@ -389,7 +399,36 @@ async fn authenticate(
     )?;
     let content: WorkloadContent = serde_json::from_str(&request.content)
         .map_err(|e| invalid(format!("{} content: {}", op.as_str(), e)))?;
-    Ok((request.tenant, content.workload_id))
+    Ok((request.tenant, content))
+}
+
+/// Who may read this lease's status: its tenant, or a Workload Gateway the
+/// tenant granted (spec §6.5).
+///
+/// The tenant is checked FIRST and the grant only if that fails, so a grant
+/// is read at most once per request and never at all for the tenant's own —
+/// and so the two refusals stay apart: a signer carrying no grant hears
+/// `not_tenant` exactly as before, and only one that brought a grant that
+/// does not admit it hears `bad_grant`.
+///
+/// Everything the grant is checked against is already here: the lease's
+/// tenant, the workload id the request named, the key that signed the
+/// request and the clock. Nothing is fetched and nothing is kept.
+fn may_read(
+    lease: &LeaseRecord,
+    signer: &PublicKey,
+    content: &WorkloadContent,
+    now: u64,
+) -> Result<(), ErrorResponse> {
+    let refusal = match check_tenant(lease, signer) {
+        Ok(()) => return Ok(()),
+        Err(refusal) => refusal,
+    };
+    let Some(grant) = &content.grant else {
+        return Err(refusal);
+    };
+    let tenant = PublicKey::parse(&lease.tenant).map_err(|_| not_tenant())?;
+    gateway_grant::check(grant, &tenant, &content.workload_id, signer, now)
 }
 
 /// The signer must be the lease's tenant. Compared as public keys, not as

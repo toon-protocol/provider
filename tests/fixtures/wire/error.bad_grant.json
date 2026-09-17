@@ -1,0 +1,40 @@
+{
+  "fixture": {
+    "case": "bad_grant",
+    "description": "A `status` signed by the gateway, carrying a grant for this workload that names this gateway and has not expired — but signed by somebody who is not this lease's tenant, so it delegates nothing here (spec §6.5). Every other defect is the same code and the same shape: an `id` or `sig` that does not verify, a `d` or a content `workload_id` that is not the request's, a `gateway` that is not the request's signer, and `now > expires_at`. One code on purpose — a gateway learns that its grant does not apply and nothing about the lease — and distinct from `not_tenant`, which is still what a signer carrying no grant at all is told.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/status",
+  "request_body": {
+    "request": {
+      "content": "{\"grant\":{\"content\":\"{\\\"workload_id\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\",\\\"gateway\\\":\\\"7962d45b38e8bcf82fa8efa8432a01f20c9a53e24c7d3f11df197cb8e70926da\\\",\\\"http_port\\\":443,\\\"standby_set\\\":[\\\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\\\"],\\\"expires_at\\\":1700086400}\",\"created_at\":1700000000,\"id\":\"6021740868b02675ed6b9c7c94220643b0035b842a57079880bdf0f9d4bb818c\",\"kind\":30438,\"pubkey\":\"3c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1\",\"sig\":\"e1e12871b8cf6c4898329645842e3800029dacd0df1c51aafb1b034d3d5a90921101b1b0292bf360b83c709a40331a9d6a8044af252e8b9076fab019769a8f6c\",\"tags\":[[\"d\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"],[\"p\",\"7962d45b38e8bcf82fa8efa8432a01f20c9a53e24c7d3f11df197cb8e70926da\"],[\"L\",\"toon.network\"]]},\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+      "created_at": 1700000000,
+      "id": "407ab0f70e730f0fdd5b4a49e079b830c1c603285e3d2b08aed3ed1e41ec743d",
+      "kind": 4432,
+      "pubkey": "7962d45b38e8bcf82fa8efa8432a01f20c9a53e24c7d3f11df197cb8e70926da",
+      "sig": "82646738de9e1e72df4fce7cd39fde9ec92cd12dcff466d5a46f790e301417ce74c4f21930cfef11234db3b005005502251ec3f0d84ecdaca1b05eebe6e4282b",
+      "tags": [
+        [
+          "p",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
+        [
+          "op",
+          "status"
+        ],
+        [
+          "expiration",
+          "1700000061"
+        ]
+      ]
+    }
+  },
+  "response_body": {
+    "error": "bad_grant",
+    "message": "the grant was not signed by this lease's tenant, so it delegates nothing here"
+  },
+  "response_status": 403,
+  "route": "g.fixture.status",
+  "validation_step": "§6.5: a grant MUST be signed by the lease's tenant"
+}

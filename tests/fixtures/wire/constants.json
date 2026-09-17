@@ -5,9 +5,14 @@
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "constants"
   },
+  "gateway": {
+    "public_key": "7962d45b38e8bcf82fa8efa8432a01f20c9a53e24c7d3f11df197cb8e70926da",
+    "secret_key": "7777777777777777777777777777777777777777777777777777777777777777"
+  },
   "kinds": {
     "K_BLOB": 30435,
     "K_EVICTION": 4433,
+    "K_GATEWAY_GRANT": 30438,
     "K_IMAGE": 30434,
     "K_LEASE_REQUEST": 4432,
     "K_LISTING": 30432,

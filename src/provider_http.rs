@@ -432,7 +432,9 @@ fn parse_version(segment: &str) -> Option<u32> {
 /// is for tooling that reads HTTP before it reads the body.
 pub fn refuse(error: ErrorResponse) -> Response {
     let status = match error.error {
-        ErrorCode::BadSignature | ErrorCode::NotTenant => StatusCode::FORBIDDEN,
+        ErrorCode::BadSignature | ErrorCode::NotTenant | ErrorCode::BadGrant => {
+            StatusCode::FORBIDDEN
+        }
         ErrorCode::StaleRequest | ErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
         ErrorCode::WrongListingVersion | ErrorCode::UnknownWorkload => StatusCode::NOT_FOUND,
         ErrorCode::WorkloadIdTaken
