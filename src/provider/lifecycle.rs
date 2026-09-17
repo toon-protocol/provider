@@ -230,10 +230,15 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
         // is absent for a standby until Takeover; a `Stopped` primary's
         // container is off (spec §7.1). Naming a host and port that reach
         // nothing would be a lie in every one of those cases.
+        //
+        // The host is the lease's OWN `.anyone` address on a Hidden
+        // Provider — the same one its spawn answered, re-established after
+        // a restart of the provider (`lease_address::restore_all`) — and
+        // the provider's `public_ip` otherwise (spec §6.2, §10).
         access: lease
             .state
             .is_reachable()
-            .then(|| state.config.access_host())
+            .then(|| lease.access_host(&state.config))
             .flatten()
             .map(|host| lease.access(host)),
         template: lease.template.clone(),
