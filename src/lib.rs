@@ -12,6 +12,7 @@ pub mod directory;
 pub mod docker;
 pub mod hidden_service;
 pub mod nostr;
+pub mod outbound_proxy;
 pub mod provider;
 pub mod provider_http;
 pub mod reputation;
@@ -27,6 +28,7 @@ pub use docker::DockerBackend;
 pub use hidden_service::{
     is_anyone_host, AddressPort, HiddenAddress, HiddenService, ANYONE_SUFFIX,
 };
+pub use outbound_proxy::{is_loopback_url, OutboundProxy};
 pub use provider::persisted_leases;
 pub use provider::{
     load_config, render_routes, AnonConfig, AnonControl, BackendKind, LeaseEnd, LeaseRecord,

@@ -186,13 +186,31 @@ pub fn hidden_config(config: ProviderConfig) -> ProviderConfig {
                 cookie_file: Some("/var/lib/anon/control_auth_cookie".to_string()),
                 password: None,
             }),
-            socks_proxy: Some("socks5h://anon-hs:9050".to_string()),
+            // Loopback, not a daemon's name: `AppState::new` RESOLVES
+            // `anon.socks_proxy` at startup on a hidden provider
+            // (`OutboundProxy`), and a harness must not need a DNS answer to
+            // build. Nothing dials it — the tests that do point it at a
+            // `common::socks::SocksStub` with `socks_proxy_of`.
+            socks_proxy: Some("socks5h://127.0.0.1:9050".to_string()),
             egress: Some(EgressPolicy {
                 network: super::FAKE_EGRESS_NETWORK.to_string(),
                 gateway: super::FAKE_EGRESS_GATEWAY.to_string(),
             }),
             settlement_rpc_url: Some("http://127.0.0.1:8545".to_string()),
             ..AnonConfig::default()
+        },
+        ..config
+    }
+}
+
+/// `config` with its `anon.socks_proxy` pointed at `url` — a live
+/// `common::socks::SocksStub`, for the tests that watch a Hidden Provider's
+/// own outbound leave through it (spec §10).
+pub fn socks_proxy_of(config: ProviderConfig, url: &str) -> ProviderConfig {
+    ProviderConfig {
+        anon: AnonConfig {
+            socks_proxy: Some(url.to_string()),
+            ..config.anon
         },
         ..config
     }

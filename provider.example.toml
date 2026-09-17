@@ -216,6 +216,10 @@ deny_references = []
 # # The SOCKS5 endpoint this provider's OWN outbound leaves through — relay
 # # reads, image fetches, the publish request. `socks5h`, never `socks5`: the
 # # `h` makes the PROXY resolve every name, so no lookup leaves this host.
+# # A directory publisher on THIS host's loopback is dialled directly (that
+# # packet never leaves the box); either way the publish request carries this
+# # URL, for the publisher's own hop to the connector. Its host is resolved
+# # once at startup, and a provider that cannot resolve it refuses to start.
 # socks_proxy = "socks5h://anon-hs:9050"
 #
 # # The settlement RPC this provider's connector settles against. A Hidden

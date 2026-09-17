@@ -74,6 +74,14 @@ impl OciClient {
         }
     }
 
+    /// The same client, dialling on `client` instead — how a Hidden
+    /// Provider's fetcher swaps in one bound to the `anon` SOCKS port
+    /// (`BlobFetcher::with_proxy`), token exchange included.
+    pub fn with_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
     /// The raw bytes of `digest` from `registry`'s `repository`, over the
     /// endpoint the blob's kind calls for. Unverified: the caller checks
     /// them against `digest`.

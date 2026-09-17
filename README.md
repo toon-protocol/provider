@@ -166,17 +166,48 @@ self-hosted does not publish `hidden: true`. Without `hidden = true` none of
 the `[anon]` keys is required and the RPC is not gated; keys that are
 present are still checked for shape, so a typo fails where it was written.
 
-What the config does not (yet) do: the per-lease `.anyone` addresses, the
-`anon` egress network and the proxied outbound land in the later Milestone
-4 tickets against the shapes defined here — the `HiddenService` port
-(`src/hidden_service.rs`: `create_address`, which answers the host and the
-key it was made from, `restore_address`, which brings the same host back
-from that key after a restart, `destroy_address` and `egress_for`), the
-`egress` field on `ContainerConfig`, and `[anon]`. Until
-the per-lease addresses land, a spawn on a hidden provider is refused
-`invalid_request` with a message saying so, and `availability` answers the
-same for free first, so nobody pays for an address the provider cannot yet
-give; the Profile, the Listings and Liveness are published as usual.
+### The provider's own outbound
+
+Hiding the workloads is not enough if the process itself dials from its real
+address. With `hidden = true` **every connection this provider opens for
+itself** leaves through `anon.socks_proxy`:
+
+| What | Through |
+|---|---|
+| Relay websockets — Liveness watching, Profile lookups, Takeover and Blob Record queries | the nostr client's SOCKS connection mode, for **every** relay and not only `.anyone` ones |
+| The TOON store gateway, upstream OCI registries, and the **anonymous pull-token exchange** a registry's 401 sends it to | one proxied HTTP client, shared by all three |
+| The publish request to the directory publisher | the same proxy — unless the publisher is on this host's loopback, which is dialled directly |
+
+The scheme is `socks5h`, never `socks5`, and a config that says otherwise is
+refused at startup naming the key: the trailing `h` is what makes the *proxy*
+resolve the destination's name. Under plain `socks5` this host resolves a
+relay's — or an `.anyone` address's — name first, and that lookup is exactly
+what hiding is for. The proxy's own host is the one name resolved here, once,
+at startup; a proxy that does not resolve there is a refusal to start, because
+a hidden provider that cannot reach its daemon must not carry on publishing
+from its real address.
+
+A **loopback publisher** is the one direct dial, and it hides nothing: that
+packet never leaves the box, and `anon` builds no circuit back to the host it
+runs on. The hop that does leave is the publisher's own, to the connector that
+sells the relay write — so every publish request from a hidden provider
+**carries the proxy** (`"proxy": "socks5h://…"` beside `event` and `relays`),
+loopback publisher or not, and the publisher dials through it for any host.
+See [`tools/publisher/README.md`](tools/publisher/README.md). A provider that
+is not hidden sends no `proxy` field and opens every connection directly,
+exactly as before.
+
+What the config does not (yet) do: the per-lease `.anyone` addresses and the
+`anon` egress network land in the later Milestone 4 tickets against the shapes
+defined here — the `HiddenService` port (`src/hidden_service.rs`:
+`create_address`, which answers the host and the key it was made from,
+`restore_address`, which brings the same host back from that key after a
+restart, `destroy_address` and `egress_for`) and the `egress` field on
+`ContainerConfig`. Until the per-lease addresses land, a spawn on a hidden
+provider is refused `invalid_request` with a message saying so, and
+`availability` answers the same for free first, so nobody pays for an address
+the provider cannot yet give; the Profile, the Listings and Liveness are
+published as usual.
 
 ## Routes and the connector
 
