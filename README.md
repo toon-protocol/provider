@@ -255,8 +255,9 @@ TOON_ANON_CONTROL=127.0.0.1:9051 \
 
 (or `TOON_ANON_PASSWORD` instead of the cookie). With none of them set it
 prints why and passes, exactly as the Docker-only tests do on a machine with
-no Docker. The sandbox's `hs` profile daemon has `ControlSocket 0` and no
-`ControlPort` today, so nothing there answers it yet.
+no Docker. The sandbox's hidden provider daemon (`anon-hs`, under the `hs`
+profile) answers it at `172.30.1.2:9051` with the cookie the sandbox mounts
+at `/var/lib/anon/control/control_auth_cookie`; see the sandbox README §6.8.
 
 ### The provider's own outbound
 

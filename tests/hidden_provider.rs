@@ -767,7 +767,7 @@ async fn liveness_on_a_hidden_provider_still_counts_its_capacity() {
 async fn a_public_providers_workload_carries_no_egress_policy() {
     // The field exists on every `ContainerConfig`; a provider that is not
     // hidden fills nothing in, so today's networking is what the backend
-    // gets (M4-4 fills it for a hidden lease).
+    // gets; a hidden lease's is filled from `HiddenService::egress_for`.
     let h = harness().await;
     let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
@@ -823,9 +823,9 @@ async fn a_provider_that_is_not_hidden_touches_the_port_at_no_point_of_a_lease()
 
 #[tokio::test]
 async fn the_fake_hidden_service_answers_a_predictable_anyone_host_and_restores_it() {
-    // What M4-2's tests and fixtures will assert `access.host` against,
-    // and the restart story M4-3 needs: the key `create_address` answered
-    // brings back the same host through `restore_address`.
+    // What the lease tests and fixtures assert `access.host` against, and
+    // the restart story the real adapter relies on: the key `create_address`
+    // answered brings back the same host through `restore_address`.
     let workload_id = "ab".repeat(32);
     let host = FakeHiddenService::address_for(&workload_id);
     assert!(host.ends_with(".anyone"));
