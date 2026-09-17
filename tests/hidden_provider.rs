@@ -16,7 +16,7 @@ use common::harness::{
     config_for, digest, error_of, harness, harness_from, hidden_config, listing, post, spawn,
     spawn_content, RequestSpec, HIDDEN_CONNECTOR_URL, NOW, PUBLIC_IP,
 };
-use common::{stub_registry, FakeBackend, FakeClock, FakeDirectory, FakeHiddenService};
+use common::{has_tag, stub_registry, FakeBackend, FakeClock, FakeDirectory, FakeHiddenService};
 use nostr_sdk::Keys;
 use toon_provider::nostr::directory_events::{ProfileContent, HIDDEN_LABEL};
 use toon_provider::nostr::kinds::{K_LISTING, K_PROFILE, TOON_LABEL};
@@ -46,13 +46,6 @@ async fn hidden_harness(listings: Vec<Listing>) -> common::harness::Harness {
         FakeDirectory::new(),
         registry,
     )
-}
-
-fn has_tag(event: &nostr_sdk::Event, cells: &[&str]) -> bool {
-    event.tags.iter().any(|t| {
-        let slice = t.clone().to_vec();
-        slice.len() >= cells.len() && cells.iter().zip(&slice).all(|(c, s)| c == s)
-    })
 }
 
 // ── what it publishes ───────────────────────────────────────────────────
@@ -239,14 +232,42 @@ async fn a_public_providers_workload_carries_no_egress_policy() {
     assert!(h.hidden_service.created().is_empty(), "never touched");
 }
 
-#[test]
-fn the_fake_hidden_service_answers_a_predictable_anyone_host() {
-    // What M4-2's tests and fixtures will assert `access.host` against.
-    let host = FakeHiddenService::address_for(&"ab".repeat(32));
+#[tokio::test]
+async fn the_fake_hidden_service_answers_a_predictable_anyone_host_and_restores_it() {
+    // What M4-2's tests and fixtures will assert `access.host` against,
+    // and the restart story M4-3 needs: the key `create_address` answered
+    // brings back the same host through `restore_address`.
+    let workload_id = "ab".repeat(32);
+    let host = FakeHiddenService::address_for(&workload_id);
     assert!(host.ends_with(".anyone"));
     assert_eq!(host.len(), 56 + ".anyone".len());
     assert!(toon_provider::is_anyone_host(&host));
     assert_ne!(host, FakeHiddenService::address_for(&"cd".repeat(32)));
+
+    use toon_provider::{AddressPort, HiddenService};
+    let fake = FakeHiddenService::new();
+    let ports = [AddressPort::same(40000), AddressPort::same(41000)];
+    let address = fake.create_address(&workload_id, &ports).await.unwrap();
+    assert_eq!(address.host, host);
+    let key = address
+        .key
+        .expect("the fake gives a key back, as the daemon does");
+    fake.destroy_address(&workload_id).await.unwrap();
+    assert!(fake.live().is_empty());
+    assert_eq!(
+        fake.restore_address(&workload_id, &key, &ports)
+            .await
+            .unwrap(),
+        host,
+        "the same key is the same address"
+    );
+    assert!(fake
+        .restore_address(&workload_id, "ED25519-V3:somebody-elses", &ports)
+        .await
+        .is_err());
+    assert_eq!(fake.created().len(), 1);
+    assert_eq!(fake.restored().len(), 2);
+    assert_eq!(fake.destroyed(), vec![workload_id.clone()]);
     // And a hidden config the gate accepts, so the harness shape is the
     // shape an operator writes.
     hidden_config(ProviderConfig::default())

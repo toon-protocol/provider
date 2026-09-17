@@ -342,7 +342,11 @@ async fn serve(
         role,
         expires_at,
         access: Some(Access {
-            host: state.config.access_host().to_string(),
+            // A public provider's `public_ip`, which its config requires.
+            // The `None` of a hidden provider is never reached here — the
+            // placeholder above refuses its spawns — and M4-2 replaces
+            // this with the lease's own `.anyone` address.
+            host: state.config.access_host().unwrap_or_default().to_string(),
             ssh_port,
             ports,
         }),

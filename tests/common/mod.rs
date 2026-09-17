@@ -20,8 +20,15 @@ use toon_provider::compute::{
 };
 use toon_provider::nostr::kinds::{K_LIVENESS, K_PROFILE, K_TAKEOVER};
 use toon_provider::{
-    AddressPort, Clock, Directory, HiddenService, LivenessState, PublishReport, RelayLiveness,
+    AddressPort, Clock, Directory, HiddenAddress, HiddenService, LivenessState, PublishReport,
+    RelayLiveness,
 };
+
+/// True when `event` carries a tag whose cells are exactly `cells`.
+pub fn has_tag(event: &nostr_sdk::Event, cells: &[&str]) -> bool {
+    let wanted: Vec<String> = cells.iter().map(|c| c.to_string()).collect();
+    event.tags.iter().any(|t| t.clone().to_vec() == wanted)
+}
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -294,14 +301,18 @@ pub const FAKE_EGRESS_NETWORK: &str = "toon-hidden-egress";
 pub const FAKE_EGRESS_GATEWAY: &str = "172.30.0.2";
 
 /// An in-memory `HiddenService`, so a hidden provider's per-lease addresses
-/// can be created and destroyed without an `anon` daemon. It records every
-/// address created (with the ports it maps) and destroyed, in order, and
-/// answers a deterministic `.anyone` host for each workload id, so a test —
-/// and a fixture — can say exactly what `access.host` must be.
+/// can be created, restored and destroyed without an `anon` daemon. It
+/// records every address created (with the ports it maps), restored and
+/// destroyed, in order, and answers a deterministic `.anyone` host and key
+/// for each workload id, so a test — and a fixture — can say exactly what
+/// `access.host` must be, and what a lease record must carry.
 pub struct FakeHiddenService {
     /// Every `create_address`, in order: the workload id and the ports it
     /// asked for.
     created: Mutex<Vec<(String, Vec<AddressPort>)>>,
+    /// Every `restore_address`, in order: the workload id, the key handed
+    /// back, and the ports.
+    restored: Mutex<Vec<(String, String, Vec<AddressPort>)>>,
     /// Every `destroy_address`, in order, whether or not an address existed.
     destroyed: Mutex<Vec<String>>,
     /// The addresses that exist right now: workload id -> host.
@@ -320,6 +331,7 @@ impl FakeHiddenService {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             created: Mutex::default(),
+            restored: Mutex::default(),
             destroyed: Mutex::default(),
             live: Mutex::default(),
             fail_next_create: Mutex::default(),
@@ -344,8 +356,21 @@ impl FakeHiddenService {
         format!("{label}.anyone")
     }
 
+    /// The key this fake gives `workload_id`'s address, the shape the daemon
+    /// serialises (`ED25519-V3:<blob>`), deterministic like the host.
+    pub fn key_for(workload_id: &str) -> String {
+        format!(
+            "ED25519-V3:fake-{}",
+            &workload_id[..workload_id.len().min(16)]
+        )
+    }
+
     pub fn created(&self) -> Vec<(String, Vec<AddressPort>)> {
         self.created.lock().unwrap().clone()
+    }
+
+    pub fn restored(&self) -> Vec<(String, String, Vec<AddressPort>)> {
+        self.restored.lock().unwrap().clone()
     }
 
     pub fn destroyed(&self) -> Vec<String> {
@@ -372,13 +397,49 @@ impl FakeHiddenService {
 
 #[async_trait]
 impl HiddenService for FakeHiddenService {
-    async fn create_address(&self, workload_id: &str, ports: &[AddressPort]) -> Result<String> {
+    async fn create_address(
+        &self,
+        workload_id: &str,
+        ports: &[AddressPort],
+    ) -> Result<HiddenAddress> {
         self.created
             .lock()
             .unwrap()
             .push((workload_id.to_string(), ports.to_vec()));
         if let Some(why) = self.fail_next_create.lock().unwrap().take() {
             anyhow::bail!("{}", why);
+        }
+        let host = Self::address_for(workload_id);
+        self.live
+            .lock()
+            .unwrap()
+            .insert(workload_id.to_string(), host.clone());
+        Ok(HiddenAddress {
+            host,
+            key: Some(Self::key_for(workload_id)),
+        })
+    }
+
+    /// The same host `create_address` gave, for the key it gave — as the
+    /// daemon derives an address from its key. A key this fake did not make
+    /// is refused, the way a daemon refuses a malformed one.
+    async fn restore_address(
+        &self,
+        workload_id: &str,
+        key: &str,
+        ports: &[AddressPort],
+    ) -> Result<String> {
+        self.restored.lock().unwrap().push((
+            workload_id.to_string(),
+            key.to_string(),
+            ports.to_vec(),
+        ));
+        if key != Self::key_for(workload_id) {
+            anyhow::bail!(
+                "{:?} is not a key this daemon made for {}",
+                key,
+                workload_id
+            );
         }
         let host = Self::address_for(workload_id);
         self.live

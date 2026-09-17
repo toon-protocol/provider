@@ -18,7 +18,7 @@ use tower::ServiceExt;
 use common::harness::{
     error_of, harness, post, spawn, spawn_content, workload_id, Harness, RequestSpec,
 };
-use common::BackendCall;
+use common::{has_tag, BackendCall};
 use toon_provider::nostr::directory_events::EvictionContent;
 use toon_provider::nostr::kinds::{K_EVICTION, TOON_LABEL};
 use toon_provider::operator_router;
@@ -67,11 +67,6 @@ async fn evict_for(
         json!({ "workload_id": workload_id, "reason": reason, "message": message }),
     )
     .await
-}
-
-fn has_tag(event: &nostr_sdk::Event, cells: &[&str]) -> bool {
-    let wanted: Vec<String> = cells.iter().map(|c| c.to_string()).collect();
-    event.tags.iter().any(|t| t.clone().to_vec() == wanted)
 }
 
 async fn status_of(h: &Harness, tenant: &nostr_sdk::Keys, workload_id: &str) -> Value {

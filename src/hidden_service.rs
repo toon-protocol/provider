@@ -34,12 +34,18 @@ use crate::compute::EgressPolicy;
 /// writes and refuses the latter by name, and so does every TOON client.
 pub const ANYONE_SUFFIX: &str = ".anyone";
 
-/// True when `host` is a hidden-service name: something ending in
-/// `.anyone` with a label in front of it. Only the shape; nothing here can
-/// say whether the network knows the address.
+/// True when `host` is a hidden-service name: one base32 label (`[a-z2-7]`,
+/// what the daemon writes and what every TOON client's own check accepts —
+/// `check.mjs` in the spec's fixtures applies the same rule) before
+/// `.anyone`. Only the shape; nothing here can say whether the network
+/// knows the address.
 pub fn is_anyone_host(host: &str) -> bool {
-    host.strip_suffix(ANYONE_SUFFIX)
-        .is_some_and(|label| !label.is_empty() && !label.contains('.'))
+    host.strip_suffix(ANYONE_SUFFIX).is_some_and(|label| {
+        !label.is_empty()
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b))
+    })
 }
 
 /// One port of a per-lease address: the port a tenant dials on the
@@ -71,6 +77,29 @@ impl AddressPort {
     }
 }
 
+/// One per-lease address as the daemon gave it: the host a tenant dials,
+/// and the key that IS the address.
+///
+/// An `.anyone` host is derived from its service key, and an address made
+/// over the control port lives only as long as the daemon. So the key is
+/// what a provider stores with the lease (M4-2, M4-3) and hands back in
+/// `restore_address` after a restart, to be reachable at the SAME host
+/// rather than a new one; `status` then still answers what the spawn did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HiddenAddress {
+    /// `<56 base32 chars>.anyone`, no scheme, no port: what `access.host`
+    /// carries in place of an IP (spec §10).
+    pub host: String,
+    /// The service's private key as the daemon serialises it
+    /// (`ED25519-V3:<base64>` from `ADD_ONION`), opaque to everything but
+    /// the implementation that made it. `None` when the implementation has
+    /// nothing to give back — then a restart gets a fresh address, and
+    /// `status` says so by returning it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
 /// What a Hidden Provider asks of its `anon` daemon, per lease.
 ///
 /// Keyed by the tenant-chosen workload id (the 64-hex id every Lease
@@ -80,18 +109,35 @@ impl AddressPort {
 /// and the backend id is a detail of one host's daemon.
 #[async_trait]
 pub trait HiddenService: Send + Sync {
-    /// Create one `.anyone` address for `workload_id` that forwards each of
-    /// `ports` to this host, and answer the host (`<56 base32 chars>.anyone`,
-    /// no scheme, no port) — what a spawn's `access.host` then carries in
-    /// place of an IP (spec §10). The address exists until
-    /// `destroy_address`. An error is a spawn that must not run a
-    /// workload: an address the daemon could not create is a lease the
-    /// tenant could never reach.
-    async fn create_address(&self, workload_id: &str, ports: &[AddressPort]) -> Result<String>;
+    /// Create one NEW `.anyone` address for `workload_id` that forwards each
+    /// of `ports` to this host, and answer it with the key it was made from
+    /// — what a spawn's `access.host` then carries in place of an IP (spec
+    /// §10), and what the lease record keeps. The address exists until
+    /// `destroy_address`, or until the daemon restarts. An error is a spawn
+    /// that must not run a workload: an address the daemon could not create
+    /// is a lease the tenant could never reach.
+    async fn create_address(
+        &self,
+        workload_id: &str,
+        ports: &[AddressPort],
+    ) -> Result<HiddenAddress>;
 
-    /// Destroy the address `create_address` gave `workload_id`. Idempotent:
-    /// destroying an address that does not exist is not an error, so that a
-    /// lease ending can be retried until it succeeds (spec §6.7).
+    /// Re-establish the address `key` names for `workload_id`, with the
+    /// same `ports`, and answer its host — the same host `create_address`
+    /// answered, so a provider restarted on its state file reaches every
+    /// live lease where its tenant last found it (M4-2, M4-3). An error
+    /// leaves the lease without an address; the caller decides whether to
+    /// create a fresh one.
+    async fn restore_address(
+        &self,
+        workload_id: &str,
+        key: &str,
+        ports: &[AddressPort],
+    ) -> Result<String>;
+
+    /// Destroy the address `workload_id` has. Idempotent: destroying an
+    /// address that does not exist is not an error, so that a lease ending
+    /// can be retried until it succeeds (spec §6.7).
     async fn destroy_address(&self, workload_id: &str) -> Result<()>;
 
     /// The egress policy the backend attaches `workload_id`'s workload with
@@ -106,13 +152,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_anyone_host_is_one_label_before_the_suffix() {
+    fn an_anyone_host_is_one_base32_label_before_the_suffix() {
         assert!(is_anyone_host(&format!("{}.anyone", "a".repeat(56))));
-        assert!(is_anyone_host("short.anyone"));
+        assert!(is_anyone_host("short27.anyone"));
         assert!(!is_anyone_host(".anyone"), "no label");
         assert!(!is_anyone_host("c.acme.example"));
         assert!(!is_anyone_host("abc.onion"), "Tor's suffix, not Anyone's");
         assert!(!is_anyone_host("a.b.anyone"), "one label, not a subdomain");
+        assert!(!is_anyone_host("Upper.anyone"), "base32 is lowercase");
+        assert!(!is_anyone_host("digit1.anyone"), "base32 has no 0, 1, 8, 9");
+        assert!(!is_anyone_host("with-dash.anyone"));
         assert!(!is_anyone_host("anyone"));
     }
 

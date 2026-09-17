@@ -233,7 +233,9 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
         access: lease
             .state
             .is_reachable()
-            .then(|| lease.access(state.config.access_host())),
+            .then(|| state.config.access_host())
+            .flatten()
+            .map(|host| lease.access(host)),
         template: lease.template.clone(),
         // Once a Takeover has settled here, which member won — on the winner
         // beside `running`, on a loser beside `reserved` — so a tenant

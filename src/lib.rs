@@ -24,7 +24,9 @@ pub use directory::{
     ConnectorDirectory, Directory, LivenessState, NullDirectory, PublishReport, RelayLiveness,
 };
 pub use docker::DockerBackend;
-pub use hidden_service::{is_anyone_host, AddressPort, HiddenService, ANYONE_SUFFIX};
+pub use hidden_service::{
+    is_anyone_host, AddressPort, HiddenAddress, HiddenService, ANYONE_SUFFIX,
+};
 pub use provider::persisted_leases;
 pub use provider::{
     load_config, render_routes, AnonConfig, AnonControl, BackendKind, LeaseEnd, LeaseRecord,

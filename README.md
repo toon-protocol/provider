@@ -142,7 +142,7 @@ it:
 | Condition (ADR 0008) | Config | Refused when |
 |---|---|---|
 | No published host | `public_ip` absent | `public_ip` is set beside `hidden = true` |
-| Connector reachable only at `.anyone` | `connector_url` | its host does not end in `.anyone` |
+| Connector reachable only at `.anyone` | `connector_url` | its host is not one base32 label before `.anyone` (what the daemon writes) |
 | Per-lease `.anyone` addresses | `[anon.control]` — `addr`, and `cookie_file` **or** `password` | missing, not `host:port`, neither or both authentications |
 | The provider's own outbound through `anon` | `anon.socks_proxy` | missing, or not `socks5h://<host>:<port>` |
 | All workload egress through `anon`, direct egress dropped | `[anon.egress]` — `network`, `gateway` | missing, or `gateway` not an IP address |
@@ -169,8 +169,10 @@ present are still checked for shape, so a typo fails where it was written.
 What the config does not (yet) do: the per-lease `.anyone` addresses, the
 `anon` egress network and the proxied outbound land in the later Milestone
 4 tickets against the shapes defined here — the `HiddenService` port
-(`src/hidden_service.rs`: `create_address`, `destroy_address`,
-`egress_for`), the `egress` field on `ContainerConfig`, and `[anon]`. Until
+(`src/hidden_service.rs`: `create_address`, which answers the host and the
+key it was made from, `restore_address`, which brings the same host back
+from that key after a restart, `destroy_address` and `egress_for`), the
+`egress` field on `ContainerConfig`, and `[anon]`. Until
 the per-lease addresses land, a spawn on a hidden provider is refused
 `invalid_request` with a message saying so, and `availability` answers the
 same for free first, so nobody pays for an address the provider cannot yet

@@ -183,7 +183,7 @@ impl Default for AnonConfig {
 /// provider authenticates to it — a cookie file (`CookieAuthentication 1`
 /// in the daemon's config; the file is `control_auth_cookie` in its data
 /// directory) OR a password (`HashedControlPassword`). Exactly one.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnonControl {
     /// `host:port` of the daemon's `ControlPort`, e.g. `anon-hs:9051`.
@@ -387,13 +387,13 @@ pub struct ProviderConfig {
 
 impl ProviderConfig {
     /// The host a lease's access details name, on a provider that is NOT
-    /// hidden: its `public_ip`. A Hidden Provider publishes no host, and
-    /// each of its leases carries a `.anyone` address of its own instead
-    /// (M4-2, TOON_Network #39); until that lands a hidden provider starts
-    /// no lease at all (`spawn::refuse_until_per_lease_addresses`), so the
-    /// empty string here is never reached on one.
-    pub fn access_host(&self) -> &str {
-        self.public_ip.as_deref().unwrap_or_default()
+    /// hidden: its `public_ip`, which `validate` requires there. `None` on
+    /// a Hidden Provider, which publishes no host: each of its leases
+    /// carries a `.anyone` address of its own instead (M4-2, TOON_Network
+    /// #39), and until that lands it starts no lease at all
+    /// (`spawn::refuse_until_per_lease_addresses`).
+    pub fn access_host(&self) -> Option<&str> {
+        self.public_ip.as_deref()
     }
 
     /// The blob cache directory: `blob_cache_dir`, or `blobs/` beside the
@@ -862,18 +862,12 @@ impl AnonConfig {
     /// typo check, applied whether or not the provider is hidden.
     fn validate_shape(&self) -> Result<()> {
         if let Some(control) = &self.control {
-            let (host, port) = control
-                .addr
-                .rsplit_once(':')
-                .filter(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
-                .unwrap_or(("", ""));
-            if host.is_empty() {
+            if !is_host_port(&control.addr) {
                 bail!(
                     "anon.control.addr {:?} is not host:port — the anon daemon's ControlPort",
                     control.addr
                 );
             }
-            let _ = port;
             match (&control.cookie_file, &control.password) {
                 (Some(_), Some(_)) => bail!(
                     "anon.control names both cookie_file and password: the daemon authenticates \
@@ -894,8 +888,7 @@ impl AnonConfig {
             }
         }
         if let Some(proxy) = &self.socks_proxy {
-            let url = reqwest::Url::parse(proxy)
-                .with_context(|| format!("anon.socks_proxy {:?} is not a URL", proxy))?;
+            let url = parse_url("anon.socks_proxy", proxy)?;
             if url.scheme() != "socks5h" || url.host_str().is_none() || url.port().is_none() {
                 bail!(
                     "anon.socks_proxy {:?} must be socks5h://<host>:<port>: only a socks5h proxy \
@@ -918,8 +911,7 @@ impl AnonConfig {
             }
         }
         if let Some(rpc) = &self.settlement_rpc_url {
-            reqwest::Url::parse(rpc)
-                .with_context(|| format!("anon.settlement_rpc_url {:?} is not a URL", rpc))?;
+            parse_url("anon.settlement_rpc_url", rpc)?;
         }
         if self.forward_host.is_empty() {
             bail!("anon.forward_host must name the host the daemon forwards lease ports to");
@@ -955,8 +947,7 @@ pub enum RpcHostVerdict {
 /// is self-hosted, and starting anyway would publish a claim nobody checked.
 /// `localhost` is loopback by definition and never resolved.
 pub fn settlement_rpc_verdict(url: &str) -> Result<RpcHostVerdict> {
-    let parsed = reqwest::Url::parse(url)
-        .with_context(|| format!("anon.settlement_rpc_url {:?} is not a URL", url))?;
+    let parsed = parse_url("anon.settlement_rpc_url", url)?;
     let public = |addr: IpAddr| {
         anyhow::anyhow!(
             "anon.settlement_rpc_url {:?} is at the public address {}: a Hidden Provider runs its \
@@ -996,9 +987,11 @@ pub fn settlement_rpc_verdict(url: &str) -> Result<RpcHostVerdict> {
     }
 }
 
-/// Loopback, RFC 1918, link-local, unspecified, or their IPv6 counterparts
-/// (`::1`, ULA `fc00::/7`, link-local `fe80::/10`), with an IPv4-mapped
-/// address judged as the IPv4 it maps.
+/// Loopback, RFC 1918, link-local, or their IPv6 counterparts (`::1`, ULA
+/// `fc00::/7`, link-local `fe80::/10`), with an IPv4-mapped address judged
+/// as the IPv4 it maps. The unspecified address (`0.0.0.0`, `::`) counts
+/// too: as a destination it is this host, which is as self-hosted as
+/// loopback.
 pub fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -1021,6 +1014,18 @@ fn url_host(url: &str) -> Option<String> {
     reqwest::Url::parse(url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))
+}
+
+/// `value` as a URL, or a refusal naming the config `key` it came from.
+fn parse_url(key: &str, value: &str) -> Result<reqwest::Url> {
+    reqwest::Url::parse(value).with_context(|| format!("{} {:?} is not a URL", key, value))
+}
+
+/// `host:port` with a non-empty host and a port that fits: the shape of a
+/// daemon's `ControlPort` as an operator writes it.
+fn is_host_port(addr: &str) -> bool {
+    addr.rsplit_once(':')
+        .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
 }
 
 fn default_forward_host() -> String {

@@ -22,7 +22,7 @@ use nostr_sdk::{EventBuilder, Keys, Kind, PublicKey, Tag, TagKind, Timestamp};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use common::{stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory};
+use common::{has_tag, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory};
 use toon_provider::nostr::directory_events::{
     ListingContent, LivenessContent, ProfileContent, Settlement, LIVENESS_EXPIRY_CADENCES,
 };
@@ -160,11 +160,6 @@ async fn harness() -> Harness {
 /// Every cell of a tag, as the relay sees it.
 fn tag_cells(event: &nostr_sdk::Event) -> Vec<Vec<String>> {
     event.tags.iter().map(|t| t.clone().to_vec()).collect()
-}
-
-fn has_tag(event: &nostr_sdk::Event, cells: &[&str]) -> bool {
-    let wanted: Vec<String> = cells.iter().map(|c| c.to_string()).collect();
-    tag_cells(event).contains(&wanted)
 }
 
 // ── the Provider Profile ────────────────────────────────────────────────────
