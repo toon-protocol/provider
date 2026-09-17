@@ -294,9 +294,76 @@ See [`tools/publisher/README.md`](tools/publisher/README.md). A provider that
 is not hidden sends no `proxy` field and opens every connection directly,
 exactly as before.
 
-What the config does not (yet) do: the `anon` egress network lands in the
-later Milestone 4 ticket against the shapes defined here —
-`HiddenService::egress_for` and the `egress` field on `ContainerConfig`.
+### Workload egress on a Hidden Provider
+
+A hidden lease's workload has **no network path except the `anon`
+egress**, and the policy is enforced by the kernel — routing and Docker's
+isolation of an internal network — never by an environment variable or a
+proxy setting an image could ignore. On every create of a hidden lease the
+provider hands the Docker backend the `EgressPolicy` its `HiddenService`
+answers (`egress_for`; the configured `[anon.egress]`), and the backend
+builds the lease from four objects instead of one (`src/docker.rs` has the
+full account and the two Docker facts that decide the shape):
+
+- **`toon-<id>-egress`**, the *namespace owner*: a small container on the
+  egress network — `[anon.egress].network`, which must be **internal** —
+  with the gateway as its DNS and `NET_ADMIN` as its only privilege, spent
+  once on `ip route replace default via <gateway>`; then it sleeps. It is
+  the provider's, running no tenant code.
+- **`toon-<id>`**, the workload, joins that namespace (`--network
+  container:`). It has no network of its own — never the default bridge,
+  never the provider's network — so its routing table is the owner's: the
+  egress subnet on-link and everything else via the gateway. It holds no
+  `NET_ADMIN`, so it can neither remove that route nor add one. A workload
+  that crashes and is restarted comes back *into* the same namespace, route
+  intact; a container on any non-internal network would instead get a
+  default route through the host back every time its namespace was made.
+- **`toon-<id>-ingress`**, the *forwarder*: Docker publishes no ports for a
+  container that is on internal networks only, so this one holds them — on
+  the provider's ordinary network with the lease's SSH forward and every
+  TCP port **published on the host at the same numbers a public lease would
+  use**, and on the egress network beside the owner, forwarding each to the
+  workload's container port (BusyBox `nc`, one listener per port, the owner
+  resolved by name per connection). The per-lease `.anyone` address is
+  forwarded to those host ports as for any lease. UDP ports are not
+  forwarded: a hidden-service address cannot carry them. Nothing on the
+  egress network can route *through* the forwarder.
+- The lease's data volume, as before.
+
+A `docker` lease that is hidden gets the same treatment: its `toon-<id>-net`
+is created `--internal`, and the `dind` sidecar is on the egress network too
+with the gateway as its DNS and its default route (set by its own command,
+first thing, before the daemon starts), so nested pulls and everything a
+nested container does leave through `anon` as §4.4 requires; the owner is
+on the lease's network as well, so the workload still finds the sidecar as
+`docker`.
+
+Both sidecars run one image, `alpine:3.20` pinned by digest
+(`toon_provider::docker::HIDDEN_SIDECAR_IMAGE`); pre-pull it or the first
+hidden lease pays for it. `ip route`, `ip addr` and a dial are how a tenant
+can check the claim from inside: a direct clearnet dial fails, a dial to the
+gateway succeeds, and no route names the default bridge.
+
+**What the egress network must be.** The operator makes it; the provider
+only attaches to it and never removes it. It is a Docker bridge network
+created **`--internal`** (compose: `internal: true`) with a fixed subnet,
+and the `anon` daemon is attached to it at the fixed address that is
+`[anon.egress].gateway`, running a **transparent egress** there: `TransPort`
+and `DNSPort` bound on that address, with the daemon's container holding
+`NET_ADMIN` and redirecting, in its own `nat PREROUTING`, every TCP
+connection arriving from the network's subnet to the `TransPort` and every
+port-53 query (UDP and TCP) to the `DNSPort` — and accepting nothing else
+from that subnet, so its control and SOCKS ports face the provider only.
+The daemon's own way out to the Anyone network is another, ordinary network
+of its own. A host with `br_netfilter` loaded (`bridge-nf-call-iptables =
+1`) runs bridged frames through Docker's isolation of internal networks,
+which drops anything not addressed within the subnet — every transparently
+proxied packet, that is — and needs `-i <egress bridge> -o <egress bridge>
+-j ACCEPT` in `DOCKER-USER`; the reference host has no `br_netfilter`. The
+sandbox's `hs` profile (infra/sandbox) is the worked example: compose
+network `hs-egress` (`toon-sandbox_hs-egress` on the host daemon) on
+`10.203.0.0/24`, the daemon at `10.203.0.2`, which is what
+`provider.example.toml` shows.
 
 ## Routes and the connector
 
@@ -706,7 +773,9 @@ eviction (`src/docker.rs` has the full account):
   the lease's egress. Nested images are the host's architecture; no
   emulation is offered.
 - **`toon-<id>-net`**, the bridge network the pair shares. The workload's
-  SSH forward and published ports are on the host as for any lease.
+  SSH forward and published ports are on the host as for any lease. On a
+  [Hidden Provider](#workload-egress-on-a-hidden-provider) the network is
+  internal and the pair's only way out is the `anon` gateway.
 
 **Accounting as one unit.** Both containers are created under one per-lease
 cgroup parent (`toon-<id>.slice` with the systemd cgroup driver; an absolute
