@@ -246,6 +246,11 @@ impl ProviderService {
             }
         );
         self.refuse_unverified_settlement_rpc()?;
+        // Beside it, and for the same reason: a Hidden Provider whose
+        // daemon will not let it create addresses would publish
+        // `hidden: true`, sell a lease, and only then find out it has no
+        // address to give the tenant who already paid (M4-3, #40).
+        crate::anon_control::refuse_unreachable_control(&self.state.config).await?;
 
         self.restore_leases().await;
         // Before anything is served or published: a primary whose Standby

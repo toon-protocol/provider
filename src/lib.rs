@@ -5,6 +5,7 @@
 //! its storage (Blossom) removed. See `NOTICE` for attribution and the
 //! `TOON_Network` repository for the spec, ADRs and glossary.
 
+pub mod anon_control;
 pub mod capabilities;
 pub mod clock;
 pub mod compute;
@@ -16,6 +17,7 @@ pub mod provider;
 pub mod provider_http;
 pub mod reputation;
 
+pub use anon_control::AnonControlService;
 pub use clock::{system_clock, Clock, SystemClock};
 pub use compute::{
     ComputeBackend, ContainerConfig, ContainerStatus, EgressPolicy, NodeStatus, PortMapping,
