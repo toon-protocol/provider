@@ -66,7 +66,7 @@ async fn harness_over(
 ) -> Harness {
     let backend = FakeBackend::new();
     let config = ProviderConfig {
-        public_ip: PUBLIC_IP.to_string(),
+        public_ip: Some(PUBLIC_IP.to_string()),
         nostr_private_key: nostr_sdk::Keys::generate().secret_key().to_secret_hex(),
         listings,
         workload_id_range_start: 1000,

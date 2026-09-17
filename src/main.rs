@@ -75,6 +75,17 @@ impl From<ReasonArg> for EvictionReason {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Before the config is loaded, and for every command: loading can WARN
+    // — a hidden provider's settlement RPC named by a hostname this machine
+    // does not resolve — and a warning nobody sees is not a warning. On
+    // stderr, so `routes`' rows on stdout still pipe into a config file.
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
     let config = load_config(&cli.config).with_context(|| format!("config: {}", cli.config))?;
 
     match cli.command {
@@ -135,14 +146,6 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        None => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-                )
-                .init();
-            ProviderService::new(config)?.run().await
-        }
+        None => ProviderService::new(config)?.run().await,
     }
 }

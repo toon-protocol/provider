@@ -42,6 +42,9 @@ async fn check(state: &AppState, body: &[u8]) -> Result<(), ErrorResponse> {
     let listing = state
         .config
         .sellable_listing(&request.listing, request.version)?;
+    // Until a hidden provider can give a lease its address (M4-2), the paid
+    // spawn is refused, and this free answer says so first (spec §9).
+    super::spawn::refuse_until_per_lease_addresses(&state.config)?;
 
     // §6.4's optional `role`: a Warm Standby is bought on `.standby`, which
     // exists only for a listing that prices one, so the question "would a

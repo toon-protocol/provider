@@ -42,6 +42,7 @@ fn config() -> ContainerConfig {
         args: vec!["sleep".to_string(), "300".to_string()],
         data_path: None,
         capabilities: vec![],
+        egress: None,
     }
 }
 
@@ -157,6 +158,7 @@ fn docker_config() -> ContainerConfig {
         args: vec!["sleep".to_string(), "300".to_string()],
         data_path: None,
         capabilities: vec!["docker".to_string()],
+        egress: None,
     }
 }
 

@@ -288,7 +288,7 @@ async fn publishing_provider_with(
     let registry = stub_registry().await;
     let dir = tempfile::tempdir().unwrap();
     let config = ProviderConfig {
-        public_ip: PUBLIC_IP.to_string(),
+        public_ip: Some(PUBLIC_IP.to_string()),
         nostr_private_key: Keys::generate().secret_key().to_secret_hex(),
         listings,
         lease_state_path: dir

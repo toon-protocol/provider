@@ -22,7 +22,7 @@ use nostr_sdk::{EventBuilder, Keys, Kind, PublicKey, Tag, TagKind, Timestamp};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-use common::{stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory};
+use common::{has_tag, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory};
 use toon_provider::nostr::directory_events::{
     ListingContent, LivenessContent, ProfileContent, Settlement, LIVENESS_EXPIRY_CADENCES,
 };
@@ -93,7 +93,7 @@ fn settlement() -> Vec<Settlement> {
 
 fn config(listings: Vec<Listing>, provider_key: &str, state_path: String) -> ProviderConfig {
     ProviderConfig {
-        public_ip: PUBLIC_IP.to_string(),
+        public_ip: Some(PUBLIC_IP.to_string()),
         nostr_private_key: provider_key.to_string(),
         ilp_address: "g.acme".to_string(),
         relay_set: vec![
@@ -162,11 +162,6 @@ fn tag_cells(event: &nostr_sdk::Event) -> Vec<Vec<String>> {
     event.tags.iter().map(|t| t.clone().to_vec()).collect()
 }
 
-fn has_tag(event: &nostr_sdk::Event, cells: &[&str]) -> bool {
-    let wanted: Vec<String> = cells.iter().map(|c| c.to_string()).collect();
-    tag_cells(event).contains(&wanted)
-}
-
 // ── the Provider Profile ────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -198,7 +193,7 @@ async fn the_profile_carries_everything_a_tenant_needs_to_pay_this_provider() {
     );
     assert_eq!(content.settlement, settlement());
     assert_eq!(content.isolation, "shared-kernel");
-    assert!(!content.hidden, "Milestone 1 has no Hidden Provider");
+    assert!(!content.hidden, "a provider that did not set hidden = true");
     assert_eq!(content.host.as_deref(), Some(PUBLIC_IP));
     assert_eq!(content.liveness_cadence_s, CADENCE);
 

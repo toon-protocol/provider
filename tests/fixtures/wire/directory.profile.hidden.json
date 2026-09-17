@@ -1,0 +1,42 @@
+{
+  "content": {
+    "connector_seal_key": "0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188",
+    "connector_url": "http://hiddenfixturehiddenfixturehiddenfixturehiddenfixturehidde.anyone/ilp",
+    "hidden": true,
+    "ilp_address": "g.fixture",
+    "isolation": "shared-kernel",
+    "liveness_cadence_s": 60,
+    "relays": [
+      "ws://relay.fixture.example:7100"
+    ],
+    "settlement": [
+      {
+        "chain": "solana",
+        "decimals": 6,
+        "token": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+      }
+    ]
+  },
+  "event": {
+    "content": "{\"ilp_address\":\"g.fixture\",\"connector_url\":\"http://hiddenfixturehiddenfixturehiddenfixturehiddenfixturehidde.anyone/ilp\",\"connector_seal_key\":\"0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188\",\"relays\":[\"ws://relay.fixture.example:7100\"],\"settlement\":[{\"chain\":\"solana\",\"token\":\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\",\"decimals\":6}],\"isolation\":\"shared-kernel\",\"hidden\":true,\"liveness_cadence_s\":60}",
+    "created_at": 1700000000,
+    "id": "709d6534e20cad36fd56a576db1d0b07a7deb08607cd10744650e7f61a37a73a",
+    "kind": 10432,
+    "pubkey": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+    "sig": "f77238ab5d8bba7044bba530fdfe6c16327f7dccb6de268b21cbbf61a907672eb49c27cf136184c6de92c6ab855f038d8ec4747ab1e68bce9b954b435f16f6c7",
+    "tags": [
+      [
+        "L",
+        "toon.network"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "profile.hidden",
+    "description": "The Provider Profile of a HIDDEN PROVIDER (spec §4.1, §10): `hidden: true`, NO `host` key at all, and a `connector_url` at an `.anyone` host — the only way the connector is reached. Everything else is `directory.profile`'s: same key, same sealing key, same Relay Set, same settlement. `hidden` is a self-assertion that nothing verifies, and it hides where the provider is, not that it was paid: payments stay public on chain (ADR 0008).",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "directory"
+  },
+  "kind_name": "K_PROFILE",
+  "nip01_serialization": "[0,\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\",1700000000,10432,[[\"L\",\"toon.network\"]],\"{\\\"ilp_address\\\":\\\"g.fixture\\\",\\\"connector_url\\\":\\\"http://hiddenfixturehiddenfixturehiddenfixturehiddenfixturehidde.anyone/ilp\\\",\\\"connector_seal_key\\\":\\\"0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188\\\",\\\"relays\\\":[\\\"ws://relay.fixture.example:7100\\\"],\\\"settlement\\\":[{\\\"chain\\\":\\\"solana\\\",\\\"token\\\":\\\"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v\\\",\\\"decimals\\\":6}],\\\"isolation\\\":\\\"shared-kernel\\\",\\\"hidden\\\":true,\\\"liveness_cadence_s\\\":60}\"]"
+}

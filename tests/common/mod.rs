@@ -15,9 +15,20 @@ use anyhow::Result;
 use async_trait::async_trait;
 use nostr_sdk::PublicKey;
 use sha2::{Digest, Sha256};
-use toon_provider::compute::{ComputeBackend, ContainerConfig, ContainerStatus, NodeStatus};
+use toon_provider::compute::{
+    ComputeBackend, ContainerConfig, ContainerStatus, EgressPolicy, NodeStatus,
+};
 use toon_provider::nostr::kinds::{K_LIVENESS, K_PROFILE, K_TAKEOVER};
-use toon_provider::{Clock, Directory, LivenessState, PublishReport, RelayLiveness};
+use toon_provider::{
+    AddressPort, Clock, Directory, HiddenAddress, HiddenService, LivenessState, PublishReport,
+    RelayLiveness,
+};
+
+/// True when `event` carries a tag whose cells are exactly `cells`.
+pub fn has_tag(event: &nostr_sdk::Event, cells: &[&str]) -> bool {
+    let wanted: Vec<String> = cells.iter().map(|c| c.to_string()).collect();
+    event.tags.iter().any(|t| t.clone().to_vec() == wanted)
+}
 use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -281,6 +292,174 @@ impl FakeClock {
 impl Clock for FakeClock {
     fn now(&self) -> u64 {
         self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// The egress policy the fake `HiddenService` answers unless a test sets
+/// another: what a hidden provider's `[anon.egress]` names in the sandbox.
+pub const FAKE_EGRESS_NETWORK: &str = "toon-hidden-egress";
+pub const FAKE_EGRESS_GATEWAY: &str = "172.30.0.2";
+
+/// An in-memory `HiddenService`, so a hidden provider's per-lease addresses
+/// can be created, restored and destroyed without an `anon` daemon. It
+/// records every address created (with the ports it maps), restored and
+/// destroyed, in order, and answers a deterministic `.anyone` host and key
+/// for each workload id, so a test — and a fixture — can say exactly what
+/// `access.host` must be, and what a lease record must carry.
+pub struct FakeHiddenService {
+    /// Every `create_address`, in order: the workload id and the ports it
+    /// asked for.
+    created: Mutex<Vec<(String, Vec<AddressPort>)>>,
+    /// Every `restore_address`, in order: the workload id, the key handed
+    /// back, and the ports.
+    restored: Mutex<Vec<(String, String, Vec<AddressPort>)>>,
+    /// Every `destroy_address`, in order, whether or not an address existed.
+    destroyed: Mutex<Vec<String>>,
+    /// The addresses that exist right now: workload id -> host.
+    live: Mutex<HashMap<String, String>>,
+    /// When set, the next create fails with this message, as a daemon whose
+    /// control port refused `ADD_ONION` would.
+    fail_next_create: Mutex<Option<String>>,
+    /// When set, the next destroy fails with this message and leaves the
+    /// address where it is, as a daemon that could not be reached would.
+    fail_next_destroy: Mutex<Option<String>>,
+    /// What `egress_for` answers.
+    egress: Mutex<EgressPolicy>,
+}
+
+impl FakeHiddenService {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            created: Mutex::default(),
+            restored: Mutex::default(),
+            destroyed: Mutex::default(),
+            live: Mutex::default(),
+            fail_next_create: Mutex::default(),
+            fail_next_destroy: Mutex::default(),
+            egress: Mutex::new(EgressPolicy {
+                network: FAKE_EGRESS_NETWORK.to_string(),
+                gateway: FAKE_EGRESS_GATEWAY.to_string(),
+            }),
+        })
+    }
+
+    /// The `.anyone` host this fake gives `workload_id`: the first 56 hex
+    /// digits of the id, each mapped onto a letter, so the host has the
+    /// shape of a real address (56 base32 characters), is different for
+    /// every workload, and can be predicted by the test that spawned it.
+    pub fn address_for(workload_id: &str) -> String {
+        let label: String = workload_id
+            .chars()
+            .take(56)
+            .map(|c| (b'a' + c.to_digit(16).unwrap_or(0) as u8) as char)
+            .collect();
+        format!("{label}.anyone")
+    }
+
+    /// The key this fake gives `workload_id`'s address, the shape the daemon
+    /// serialises (`ED25519-V3:<blob>`), deterministic like the host.
+    pub fn key_for(workload_id: &str) -> String {
+        format!(
+            "ED25519-V3:fake-{}",
+            &workload_id[..workload_id.len().min(16)]
+        )
+    }
+
+    pub fn created(&self) -> Vec<(String, Vec<AddressPort>)> {
+        self.created.lock().unwrap().clone()
+    }
+
+    pub fn restored(&self) -> Vec<(String, String, Vec<AddressPort>)> {
+        self.restored.lock().unwrap().clone()
+    }
+
+    pub fn destroyed(&self) -> Vec<String> {
+        self.destroyed.lock().unwrap().clone()
+    }
+
+    /// The addresses that exist right now, by workload id.
+    pub fn live(&self) -> HashMap<String, String> {
+        self.live.lock().unwrap().clone()
+    }
+
+    pub fn fail_next_create(&self, why: &str) {
+        *self.fail_next_create.lock().unwrap() = Some(why.to_string());
+    }
+
+    pub fn fail_next_destroy(&self, why: &str) {
+        *self.fail_next_destroy.lock().unwrap() = Some(why.to_string());
+    }
+
+    pub fn set_egress(&self, egress: EgressPolicy) {
+        *self.egress.lock().unwrap() = egress;
+    }
+}
+
+#[async_trait]
+impl HiddenService for FakeHiddenService {
+    async fn create_address(
+        &self,
+        workload_id: &str,
+        ports: &[AddressPort],
+    ) -> Result<HiddenAddress> {
+        self.created
+            .lock()
+            .unwrap()
+            .push((workload_id.to_string(), ports.to_vec()));
+        if let Some(why) = self.fail_next_create.lock().unwrap().take() {
+            anyhow::bail!("{}", why);
+        }
+        let host = Self::address_for(workload_id);
+        self.live
+            .lock()
+            .unwrap()
+            .insert(workload_id.to_string(), host.clone());
+        Ok(HiddenAddress {
+            host,
+            key: Some(Self::key_for(workload_id)),
+        })
+    }
+
+    /// The same host `create_address` gave, for the key it gave — as the
+    /// daemon derives an address from its key. A key this fake did not make
+    /// is refused, the way a daemon refuses a malformed one.
+    async fn restore_address(
+        &self,
+        workload_id: &str,
+        key: &str,
+        ports: &[AddressPort],
+    ) -> Result<String> {
+        self.restored.lock().unwrap().push((
+            workload_id.to_string(),
+            key.to_string(),
+            ports.to_vec(),
+        ));
+        if key != Self::key_for(workload_id) {
+            anyhow::bail!(
+                "{:?} is not a key this daemon made for {}",
+                key,
+                workload_id
+            );
+        }
+        let host = Self::address_for(workload_id);
+        self.live
+            .lock()
+            .unwrap()
+            .insert(workload_id.to_string(), host.clone());
+        Ok(host)
+    }
+
+    async fn destroy_address(&self, workload_id: &str) -> Result<()> {
+        self.destroyed.lock().unwrap().push(workload_id.to_string());
+        if let Some(why) = self.fail_next_destroy.lock().unwrap().take() {
+            anyhow::bail!("{}", why);
+        }
+        self.live.lock().unwrap().remove(workload_id);
+        Ok(())
+    }
+
+    fn egress_for(&self, _workload_id: &str) -> EgressPolicy {
+        self.egress.lock().unwrap().clone()
     }
 }
 

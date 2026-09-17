@@ -45,7 +45,8 @@ pub use availability::availability;
 pub use blob_cache::BlobCache;
 pub use cleanup::SWEEP_INTERVAL_SECS;
 pub use config::{
-    load_config, BackendKind, ImagePolicyConfig, Listing, ProviderConfig, MAX_PORTS_PER_WORKLOAD,
+    is_private_ip, load_config, settlement_rpc_verdict, AnonConfig, AnonControl, BackendKind,
+    ImagePolicyConfig, Listing, ProviderConfig, RpcHostVerdict, MAX_PORTS_PER_WORKLOAD,
 };
 pub use fetcher::BlobFetcher;
 pub use image_policy::{ImagePolicy, ResolvedImage};
@@ -62,13 +63,14 @@ pub use watchdog::{silent_on_a_majority, TakeoverAnnouncement, WATCHDOG_INTERVAL
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use tracing::{info, warn};
 
 use crate::clock::{system_clock, Clock};
 use crate::compute::{ComputeBackend, ContainerStatus};
 use crate::directory::Directory;
 use crate::docker::DockerBackend;
+use crate::hidden_service::HiddenService;
 use crate::provider_http::AppState;
 
 use persistence::{load_leases, persist_leases};
@@ -139,6 +141,15 @@ impl ProviderService {
             silence: Default::default(),
             cadences_without_majority: Default::default(),
         })
+    }
+
+    /// …and a caller-supplied `HiddenService`, so a hidden provider's
+    /// per-lease addresses can be created and destroyed against a fake
+    /// that records them instead of an `anon` daemon. Before `app_state`:
+    /// the router and the loops clone the state this sets.
+    pub fn with_hidden_service(mut self, hidden_service: Arc<dyn HiddenService>) -> Self {
+        self.state = self.state.with_hidden_service(hidden_service);
+        self
     }
 
     /// Arc-clones of this service's own state, so the HTTP app and the expiry
@@ -224,11 +235,17 @@ impl ProviderService {
     /// Run the provider until one of its loops exits.
     pub async fn run(&self) -> Result<()> {
         info!(
-            "starting TOON provider: {} ({}, {} listing version(s))",
+            "starting TOON provider: {} ({}, {} listing version(s){})",
             self.state.config.provider_name,
             self.state.config.ilp_address,
-            self.state.config.listings.len()
+            self.state.config.listings.len(),
+            if self.state.config.hidden {
+                ", hidden"
+            } else {
+                ""
+            }
         );
+        self.refuse_unverified_settlement_rpc()?;
 
         self.restore_leases().await;
         // Before anything is served or published: a primary whose Standby
@@ -269,6 +286,35 @@ impl ProviderService {
             // empty provider. It never returns: nothing about being
             // advertised is worth stranding a paid workload for.
             never = self.directory_loop() => never
+        }
+    }
+
+    /// The half of the settlement-RPC gate that only a RUNNING provider can
+    /// apply (spec §10, ADR 0008). Config load accepts an RPC hostname that
+    /// does not resolve — with a warning, so that `routes` works on a host
+    /// outside the sandbox's compose network — but a provider about to
+    /// publish `hidden: true` must be able to show its RPC is self-hosted,
+    /// and a name that does not resolve where the provider runs shows
+    /// nothing. Nothing is checked twice for a provider that is not hidden.
+    fn refuse_unverified_settlement_rpc(&self) -> Result<()> {
+        let config = &self.state.config;
+        let Some(rpc) = config
+            .anon
+            .settlement_rpc_url
+            .as_deref()
+            .filter(|_| config.hidden)
+        else {
+            return Ok(());
+        };
+        match config::settlement_rpc_verdict(rpc)? {
+            config::RpcHostVerdict::Private => Ok(()),
+            config::RpcHostVerdict::Unresolved(name) => bail!(
+                "anon.settlement_rpc_url names {:?}, which does not resolve here, so this \
+                 provider cannot show its settlement RPC is self-hosted and will not publish \
+                 hidden = true. Name it by a loopback or private address, or by a name this \
+                 host resolves (spec §10, ADR 0008)",
+                name
+            ),
         }
     }
 }

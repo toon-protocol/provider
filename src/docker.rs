@@ -904,6 +904,7 @@ mod tests {
             args: vec![],
             data_path: Some("/data".to_string()),
             capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
+            egress: None,
         }
     }
 
@@ -1199,6 +1200,7 @@ mod tests {
             args: vec![],
             data_path: None,
             capabilities: vec![],
+            egress: None,
         };
         let args = DockerBackend::new().run_args(&cfg, CgroupLayout::Systemd);
         assert!(!args.contains(&"-v".to_string()));

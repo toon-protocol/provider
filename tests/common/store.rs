@@ -493,7 +493,7 @@ pub fn store_config(w: &World, listings: Vec<Listing>) -> ProviderConfig {
     let keys = Keys::generate();
     let dir = tempfile::tempdir().unwrap().keep();
     ProviderConfig {
-        public_ip: "203.0.113.7".to_string(),
+        public_ip: Some("203.0.113.7".to_string()),
         nostr_private_key: keys.secret_key().to_secret_hex(),
         listings,
         workload_id_range_start: 1000,

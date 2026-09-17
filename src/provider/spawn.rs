@@ -104,6 +104,7 @@ async fn serve(
     let content: SpawnContent = serde_json::from_str(&request.content)
         .map_err(|e| invalid(format!("spawn content: {}", e)))?;
     check_shape(&content)?;
+    refuse_until_per_lease_addresses(&state.config)?;
 
     // ── 2. the listing version, and the fit ─────────────────────────────
     let listing = state
@@ -341,11 +342,36 @@ async fn serve(
         role,
         expires_at,
         access: Some(Access {
-            host: state.config.public_ip.clone(),
+            // A public provider's `public_ip`, which its config requires.
+            // The `None` of a hidden provider is never reached here — the
+            // placeholder above refuses its spawns — and M4-2 replaces
+            // this with the lease's own `.anyone` address.
+            host: state.config.access_host().unwrap_or_default().to_string(),
             ssh_port,
             ports,
         }),
     })
+}
+
+/// PLACEHOLDER, removed by M4-2 (TOON_Network #39). A Hidden Provider owes
+/// every lease a `.anyone` address of its own (spec §10), and until the
+/// spawn creates one through the `HiddenService` port there is nothing a
+/// tenant could reach: `access.host` would be an IP the provider promised
+/// never to publish, or nothing. So a spawn on a hidden provider is refused
+/// before a slot is taken — `invalid_request`, since the request is fine
+/// and it is this provider that cannot serve it yet — and `availability`
+/// answers the same for free first, so nobody pays for an address the
+/// provider cannot give (spec §9). Both call sites go with this function.
+pub(super) fn refuse_until_per_lease_addresses(
+    config: &super::config::ProviderConfig,
+) -> Result<(), ErrorResponse> {
+    if !config.hidden {
+        return Ok(());
+    }
+    Err(invalid(
+        "this is a Hidden Provider, and per-lease .anyone addresses land later in Milestone 4: \
+         it starts no lease until then",
+    ))
 }
 
 /// What a workload is started from: the lease's slot and the spawn that
@@ -622,6 +648,10 @@ fn container_config(
             .filter(|gb| *gb > 0)
             .map(|_| VOLUME_MOUNT_PATH.to_string()),
         capabilities: listing.capabilities.clone(),
+        // The egress policy a hidden workload is attached with comes from
+        // the `HiddenService` port; the Docker backend acts on it from M4-4
+        // (TOON_Network #41), and no hidden lease is started before then.
+        egress: None,
     }
 }
 

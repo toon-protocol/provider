@@ -5,13 +5,17 @@
 // nobody's approval and should need one file, so this is the only source.
 
 use std::collections::BTreeSet;
+use std::net::{IpAddr, ToSocketAddrs};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use super::fetcher::TXID_PLACEHOLDER;
 use super::persistence::LeaseRecord;
 use crate::capabilities;
+use crate::compute::EgressPolicy;
+use crate::hidden_service::is_anyone_host;
 use crate::nostr::directory_events::Settlement;
 use crate::nostr::wire::{ErrorCode, ErrorResponse, Resources};
 
@@ -104,6 +108,96 @@ pub struct ImagePolicyConfig {
     pub registry_url_override: Option<String>,
 }
 
+/// `[anon]`: everything a Hidden Provider needs from its `anon` daemon
+/// (spec §10, ADR 0008). Every key is optional in the TOML and ignored by a
+/// provider that is not hidden; with `hidden = true` each one below is a
+/// hiding condition, and `validate` refuses to load without it, naming the
+/// one that is missing.
+///
+/// The keys are grouped by which later ticket of Milestone 4 reads them, so
+/// that each can proceed against one shape: `control` is what the real
+/// `HiddenService` drives to create per-lease addresses (M4-3, #40);
+/// `socks_proxy` is where the provider's OWN outbound — relay reads, image
+/// fetches, the publish request — goes out (M4-5, #42); `egress` is what
+/// the compute backend attaches every hidden workload to (M4-4, #41); and
+/// `settlement_rpc_url` is the self-hosted chain endpoint the gate checks
+/// (this ticket) and the sandbox's `hs` profile names (M4-6, #43).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnonConfig {
+    /// `[anon.control]`: the daemon's control port, and how to authenticate
+    /// to it. The provider creates and destroys a `.anyone` address per
+    /// lease over it (`ADD_ONION` / `DEL_ONION`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<AnonControl>,
+
+    /// The SOCKS5 endpoint the provider's own outbound connections leave
+    /// through, as a URL: `socks5h://<host>:<port>`. `socks5h`, never
+    /// `socks5`: the `h` is what makes the PROXY resolve every name — a
+    /// relay's, a registry's, an `.anyone` host's — so no lookup ever leaves
+    /// this provider's resolver. Anything else is refused at load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socks_proxy: Option<String>,
+
+    /// `[anon.egress]`: the internal network every hidden workload is
+    /// attached to and the `anon` gateway that is its only route out (and
+    /// its DNS). The same struct the compute backend receives on every
+    /// `ContainerConfig` of a hidden lease (`ContainerConfig::egress`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub egress: Option<EgressPolicy>,
+
+    /// The settlement RPC endpoint this provider's connector settles
+    /// against, as a URL. A Hidden Provider runs its own (ADR 0008): an
+    /// unproxied read of a public RPC would link this host's network
+    /// location to its on-chain identity. So the host here MUST be loopback,
+    /// a private range (RFC 1918, ULA, link-local), or a name that resolves
+    /// only to such addresses — see `settlement_rpc_verdict` for what
+    /// happens to a name that does not resolve where the config is loaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_rpc_url: Option<String>,
+
+    /// The host the daemon forwards a per-lease address's ports to: where
+    /// this provider's SSH forwards and published ports are, AS THE DAEMON
+    /// SEES THEM. `127.0.0.1` when the daemon shares this host's network;
+    /// inside compose, the address the provider's host daemon is reachable
+    /// at from the `anon` container. Default `127.0.0.1`.
+    #[serde(default = "default_forward_host")]
+    pub forward_host: String,
+}
+
+impl Default for AnonConfig {
+    /// Nothing set, and the daemon on this host's loopback: what a provider
+    /// that is not hidden has, and what an `[anon]` table starts from.
+    fn default() -> Self {
+        Self {
+            control: None,
+            socks_proxy: None,
+            egress: None,
+            settlement_rpc_url: None,
+            forward_host: default_forward_host(),
+        }
+    }
+}
+
+/// `[anon.control]`: where the `anon` daemon's control port is and how the
+/// provider authenticates to it — a cookie file (`CookieAuthentication 1`
+/// in the daemon's config; the file is `control_auth_cookie` in its data
+/// directory) OR a password (`HashedControlPassword`). Exactly one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnonControl {
+    /// `host:port` of the daemon's `ControlPort`, e.g. `anon-hs:9051`.
+    pub addr: String,
+    /// Path to the daemon's `control_auth_cookie`, readable by this
+    /// process. One of this and `password`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cookie_file: Option<String>,
+    /// The control password, in the clear — the daemon holds its hash.
+    /// One of this and `cookie_file`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
@@ -119,9 +213,22 @@ pub struct ProviderConfig {
     #[serde(default = "default_ilp_address")]
     pub ilp_address: String,
 
+    /// The Hidden Provider declaration (spec §10, ADR 0008). `true` publishes
+    /// `hidden: true` and no `host` in the Profile and the `hidden:true`
+    /// label on every Listing — a claim, so `validate` refuses to load it
+    /// unless every hiding condition is configured: no `public_ip`, a
+    /// `connector_url` at an `.anyone` host, and each `[anon]` key. Nothing
+    /// outside verifies the claim; that is why the gate is strict.
+    #[serde(default)]
+    pub hidden: bool,
+
     /// The address tenants reach workloads at. Ports are exposed as
-    /// `public_ip:host_port`; there are no hostnames and no TLS.
-    pub public_ip: String,
+    /// `public_ip:host_port`; there are no hostnames and no TLS. Required
+    /// exactly when the provider is NOT hidden: a Hidden Provider publishes
+    /// no host at all, and its leases get `.anyone` addresses of their own
+    /// (spec §10), so setting it beside `hidden = true` is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_ip: Option<String>,
 
     /// Nostr secret key (hex or `nsec1…`). It signs everything this provider
     /// publishes and is the identity a Lease Request is addressed to.
@@ -271,9 +378,24 @@ pub struct ProviderConfig {
     /// is no eviction yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blob_cache_max_bytes: Option<u64>,
+
+    /// What a Hidden Provider needs from its `anon` daemon. Every key is
+    /// optional here and required by `validate` when `hidden = true`.
+    #[serde(default)]
+    pub anon: AnonConfig,
 }
 
 impl ProviderConfig {
+    /// The host a lease's access details name, on a provider that is NOT
+    /// hidden: its `public_ip`, which `validate` requires there. `None` on
+    /// a Hidden Provider, which publishes no host: each of its leases
+    /// carries a `.anyone` address of its own instead (M4-2, TOON_Network
+    /// #39), and until that lands it starts no lease at all
+    /// (`spawn::refuse_until_per_lease_addresses`).
+    pub fn access_host(&self) -> Option<&str> {
+        self.public_ip.as_deref()
+    }
+
     /// The blob cache directory: `blob_cache_dir`, or `blobs/` beside the
     /// lease table.
     pub fn blob_cache_dir(&self) -> std::path::PathBuf {
@@ -498,6 +620,7 @@ impl ProviderConfig {
         if self.liveness_cadence_s == 0 {
             bail!("liveness_cadence_s must be positive: it is a publishing interval");
         }
+        self.validate_hiding()?;
         // A provider that publishes must publish something a tenant can act
         // on. These are the Profile fields spec §4.1 does not mark optional,
         // and an empty one is worse than an absent directory: a Listing whose
@@ -650,6 +773,265 @@ impl ProviderConfig {
     }
 }
 
+impl ProviderConfig {
+    /// The Hidden Provider gate (spec §10, ADR 0008). With `hidden = true`
+    /// every hiding condition must be configured, and each missing one is
+    /// its own refusal naming it — the operator who wrote `hidden = true`
+    /// is looking, and a tenant who bought from a "hidden" provider with a
+    /// clearnet RPC could never find out. Without it, `public_ip` is
+    /// required and every `[anon]` key that IS present is only checked for
+    /// shape, so a typo is still caught where it was written.
+    fn validate_hiding(&self) -> Result<()> {
+        if !self.hidden {
+            if self.public_ip.is_none() {
+                bail!(
+                    "public_ip is required: it is the host a lease's access details name. \
+                     Only a Hidden Provider (hidden = true) has none"
+                );
+            }
+            self.anon.validate_shape()?;
+            return Ok(());
+        }
+
+        if let Some(ip) = &self.public_ip {
+            bail!(
+                "hidden = true, so public_ip ({:?}) must not be set: a Hidden Provider publishes \
+                 no host, and every lease gets a .anyone address of its own (spec §10)",
+                ip
+            );
+        }
+        match url_host(&self.connector_url) {
+            Some(host) if is_anyone_host(&host) => {}
+            _ => bail!(
+                "hidden = true, so connector_url ({:?}) must be at a .anyone host: a Hidden \
+                 Provider's connector is reachable only at an .anyone address (spec §10)",
+                self.connector_url
+            ),
+        }
+        let missing = |what: &str, condition: &str| {
+            anyhow::anyhow!(
+                "hidden = true, so {} must be set: {} (spec §10, ADR 0008)",
+                what,
+                condition
+            )
+        };
+        if self.anon.control.is_none() {
+            return Err(missing(
+                "[anon.control]",
+                "the anon control endpoint (addr, and cookie_file or password) is what creates \
+                 each lease's .anyone address",
+            ));
+        }
+        if self.anon.socks_proxy.is_none() {
+            return Err(missing(
+                "anon.socks_proxy",
+                "the SOCKS endpoint is where this provider's own outbound leaves through anon",
+            ));
+        }
+        if self.anon.egress.is_none() {
+            return Err(missing(
+                "[anon.egress]",
+                "the egress policy (network, gateway) is what routes every workload's traffic \
+                 through anon and blocks direct egress",
+            ));
+        }
+        let Some(rpc) = &self.anon.settlement_rpc_url else {
+            return Err(missing(
+                "anon.settlement_rpc_url",
+                "a Hidden Provider runs its own settlement RPC",
+            ));
+        };
+        self.anon.validate_shape()?;
+        match settlement_rpc_verdict(rpc)? {
+            RpcHostVerdict::Private => {}
+            RpcHostVerdict::Unresolved(name) => warn!(
+                "anon.settlement_rpc_url names {:?}, which does not resolve here, so whether it is \
+                 self-hosted cannot be checked. A Hidden Provider's settlement RPC must be on a \
+                 loopback or private address; this is checked again where the provider runs, \
+                 and refused there if the name still does not resolve",
+                name
+            ),
+        }
+        Ok(())
+    }
+}
+
+impl AnonConfig {
+    /// Every `[anon]` key that is present is well-formed. Presence is the
+    /// gate's business (`ProviderConfig::validate_hiding`); this is the
+    /// typo check, applied whether or not the provider is hidden.
+    fn validate_shape(&self) -> Result<()> {
+        if let Some(control) = &self.control {
+            if !is_host_port(&control.addr) {
+                bail!(
+                    "anon.control.addr {:?} is not host:port — the anon daemon's ControlPort",
+                    control.addr
+                );
+            }
+            match (&control.cookie_file, &control.password) {
+                (Some(_), Some(_)) => bail!(
+                    "anon.control names both cookie_file and password: the daemon authenticates \
+                     one way; keep the one its config enables"
+                ),
+                (None, None) => bail!(
+                    "anon.control must name how to authenticate to {}: cookie_file (the daemon's \
+                     control_auth_cookie) or password",
+                    control.addr
+                ),
+                (Some(cookie), None) if cookie.is_empty() => {
+                    bail!("anon.control.cookie_file is empty")
+                }
+                (None, Some(password)) if password.is_empty() => {
+                    bail!("anon.control.password is empty")
+                }
+                _ => {}
+            }
+        }
+        if let Some(proxy) = &self.socks_proxy {
+            let url = parse_url("anon.socks_proxy", proxy)?;
+            if url.scheme() != "socks5h" || url.host_str().is_none() || url.port().is_none() {
+                bail!(
+                    "anon.socks_proxy {:?} must be socks5h://<host>:<port>: only a socks5h proxy \
+                     resolves names on the far side, so no lookup leaves this provider",
+                    proxy
+                );
+            }
+        }
+        if let Some(egress) = &self.egress {
+            if egress.network.is_empty() {
+                bail!("anon.egress.network must name the internal network hidden workloads join");
+            }
+            if egress.gateway.parse::<IpAddr>().is_err() {
+                bail!(
+                    "anon.egress.gateway {:?} must be an IP address on {}: the workload's only \
+                     route out and its DNS, which an image cannot resolve by name",
+                    egress.gateway,
+                    egress.network
+                );
+            }
+        }
+        if let Some(rpc) = &self.settlement_rpc_url {
+            parse_url("anon.settlement_rpc_url", rpc)?;
+        }
+        if self.forward_host.is_empty() {
+            bail!("anon.forward_host must name the host the daemon forwards lease ports to");
+        }
+        Ok(())
+    }
+}
+
+/// What the settlement-RPC gate found out about a URL's host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RpcHostVerdict {
+    /// Loopback, a private range, or a name resolving only to such
+    /// addresses: self-hosted, as ADR 0008 requires.
+    Private,
+    /// A name that could not be resolved where this ran. Not a verdict at
+    /// all: the caller decides what it means (see `settlement_rpc_verdict`).
+    Unresolved(String),
+}
+
+/// The Hidden Provider's settlement-RPC rule (spec §10, ADR 0008): the URL's
+/// host is loopback, a private range, or a hostname whose DNS resolution
+/// yields only such addresses. A public address anywhere in the answer is a
+/// refusal.
+///
+/// A name that does NOT resolve is `Unresolved` rather than an error, and
+/// the two callers treat it differently ON PURPOSE. Config load
+/// (`validate`, which the `routes` command also runs) accepts it with a
+/// warning: a sandbox's chain hostnames (`anvil`, `solana-validator`) only
+/// resolve inside its compose network, and an operator rendering the route
+/// table on the host must not be told a config is invalid that is valid
+/// where it runs. The running provider (`ProviderService::run`) refuses it:
+/// a hidden provider that cannot resolve its own RPC's name cannot show it
+/// is self-hosted, and starting anyway would publish a claim nobody checked.
+/// `localhost` is loopback by definition and never resolved.
+pub fn settlement_rpc_verdict(url: &str) -> Result<RpcHostVerdict> {
+    let parsed = parse_url("anon.settlement_rpc_url", url)?;
+    let public = |addr: IpAddr| {
+        anyhow::anyhow!(
+            "anon.settlement_rpc_url {:?} is at the public address {}: a Hidden Provider runs its \
+             own settlement RPC on a loopback or private address, because an unproxied read of a \
+             public one links this host to its on-chain identity (spec §10, ADR 0008)",
+            url,
+            addr
+        )
+    };
+    match parsed.host() {
+        None => bail!("anon.settlement_rpc_url {:?} names no host", url),
+        Some(url::Host::Ipv4(ip)) if is_private_ip(IpAddr::V4(ip)) => Ok(RpcHostVerdict::Private),
+        Some(url::Host::Ipv4(ip)) => Err(public(IpAddr::V4(ip))),
+        Some(url::Host::Ipv6(ip)) if is_private_ip(IpAddr::V6(ip)) => Ok(RpcHostVerdict::Private),
+        Some(url::Host::Ipv6(ip)) => Err(public(IpAddr::V6(ip))),
+        Some(url::Host::Domain(name)) if name.eq_ignore_ascii_case("localhost") => {
+            Ok(RpcHostVerdict::Private)
+        }
+        Some(url::Host::Domain(name)) => {
+            let port = parsed.port_or_known_default().unwrap_or(80);
+            let Ok(addrs) = (name, port).to_socket_addrs() else {
+                return Ok(RpcHostVerdict::Unresolved(name.to_string()));
+            };
+            let mut any = false;
+            for addr in addrs {
+                any = true;
+                if !is_private_ip(addr.ip()) {
+                    return Err(public(addr.ip()));
+                }
+            }
+            if any {
+                Ok(RpcHostVerdict::Private)
+            } else {
+                Ok(RpcHostVerdict::Unresolved(name.to_string()))
+            }
+        }
+    }
+}
+
+/// Loopback, RFC 1918, link-local, or their IPv6 counterparts (`::1`, ULA
+/// `fc00::/7`, link-local `fe80::/10`), with an IPv4-mapped address judged
+/// as the IPv4 it maps. The unspecified address (`0.0.0.0`, `::`) counts
+/// too: as a destination it is this host, which is as self-hosted as
+/// loopback.
+pub fn is_private_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_private_ip(IpAddr::V4(v4));
+            }
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+        }
+    }
+}
+
+/// The host of `url`, if it parses as one and names a host.
+fn url_host(url: &str) -> Option<String> {
+    reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+}
+
+/// `value` as a URL, or a refusal naming the config `key` it came from.
+fn parse_url(key: &str, value: &str) -> Result<reqwest::Url> {
+    reqwest::Url::parse(value).with_context(|| format!("{} {:?} is not a URL", key, value))
+}
+
+/// `host:port` with a non-empty host and a port that fits: the shape of a
+/// daemon's `ControlPort` as an operator writes it.
+fn is_host_port(addr: &str) -> bool {
+    addr.rsplit_once(':')
+        .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+}
+
+fn default_forward_host() -> String {
+    "127.0.0.1".to_string()
+}
+
 fn is_ilp_segment_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '_' | '~' | '-')
 }
@@ -708,7 +1090,8 @@ impl Default for ProviderConfig {
             backend: BackendKind::Docker,
             provider_name: "TOON Provider".to_string(),
             ilp_address: default_ilp_address(),
-            public_ip: "127.0.0.1".to_string(),
+            hidden: false,
+            public_ip: Some("127.0.0.1".to_string()),
             nostr_private_key: String::new(),
             relay_set: Vec::new(),
             connector_url: String::new(),
@@ -734,6 +1117,7 @@ impl Default for ProviderConfig {
             gateway_url_pattern: None,
             blob_cache_dir: None,
             blob_cache_max_bytes: None,
+            anon: AnonConfig::default(),
         }
     }
 }
@@ -814,7 +1198,8 @@ nostr_private_key = "nsec1example"
 
         let cfg = load_config(path.to_str().unwrap()).unwrap();
         assert_eq!(cfg.provider_name, "Test Provider");
-        assert_eq!(cfg.public_ip, "203.0.113.7");
+        assert_eq!(cfg.public_ip.as_deref(), Some("203.0.113.7"));
+        assert!(!cfg.hidden);
         assert_eq!(cfg.backend, BackendKind::Docker);
         assert_eq!(cfg.http_bind_addr, "127.0.0.1:8080");
         assert_eq!(cfg.lease_state_path, "./toon-provider-leases.json");
@@ -1104,6 +1489,378 @@ storage_gb = 1
         assert!(cfg.validate().is_err());
 
         assert!(ProviderConfig::default().validate().is_ok());
+    }
+
+    // ── the Hidden Provider gate (spec §10, ADR 0008) ────────────────────
+
+    /// The 56-character label the `anon` daemon writes, as a connector URL.
+    fn anyone_url() -> String {
+        format!("http://{}.anyone/ilp", "h".repeat(56))
+    }
+
+    /// A Hidden Provider with every hiding condition configured, the
+    /// settlement RPC on loopback so that nothing is resolved.
+    fn hidden() -> ProviderConfig {
+        ProviderConfig {
+            hidden: true,
+            public_ip: None,
+            connector_url: anyone_url(),
+            anon: AnonConfig {
+                control: Some(AnonControl {
+                    addr: "anon-hs:9051".to_string(),
+                    cookie_file: Some("/var/lib/anon/control_auth_cookie".to_string()),
+                    password: None,
+                }),
+                socks_proxy: Some("socks5h://anon-hs:9050".to_string()),
+                egress: Some(EgressPolicy {
+                    network: "toon-hidden-egress".to_string(),
+                    gateway: "172.30.0.2".to_string(),
+                }),
+                settlement_rpc_url: Some("http://127.0.0.1:8545".to_string()),
+                ..AnonConfig::default()
+            },
+            ..ProviderConfig::default()
+        }
+    }
+
+    fn refusal(cfg: ProviderConfig) -> String {
+        cfg.validate()
+            .expect_err("this config must be refused")
+            .to_string()
+    }
+
+    #[test]
+    fn a_fully_configured_hidden_provider_loads() {
+        hidden().validate().expect("every hiding condition is met");
+        // …and through TOML, the way an operator writes it: the `[anon]`
+        // group with its two sub-tables, and no `public_ip` line at all.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+provider_name = "Hidden"
+hidden = true
+nostr_private_key = "nsec1example"
+connector_url = "{}"
+
+[anon]
+socks_proxy = "socks5h://anon-hs:9050"
+settlement_rpc_url = "http://localhost:8545"
+
+[anon.control]
+addr = "anon-hs:9051"
+password = "hunter2"
+
+[anon.egress]
+network = "toon-hidden-egress"
+gateway = "172.30.0.2"
+"#,
+                anyone_url()
+            ),
+        )
+        .unwrap();
+        let cfg = load_config(path.to_str().unwrap()).expect("a hidden TOML config loads");
+        assert!(cfg.hidden);
+        assert_eq!(cfg.public_ip, None);
+        assert_eq!(
+            cfg.anon.control.unwrap().password.as_deref(),
+            Some("hunter2")
+        );
+        assert_eq!(cfg.anon.forward_host, "127.0.0.1", "the default");
+    }
+
+    #[test]
+    fn each_missing_hiding_condition_is_its_own_refusal() {
+        // One refusal per condition of ADR 0008, each naming what is
+        // missing: the operator who wrote `hidden = true` is the reader.
+        let cases: Vec<(&str, ProviderConfig, &str)> = vec![
+            (
+                "public_ip beside hidden",
+                ProviderConfig {
+                    public_ip: Some("203.0.113.7".to_string()),
+                    ..hidden()
+                },
+                "public_ip",
+            ),
+            (
+                "a clearnet connector",
+                ProviderConfig {
+                    connector_url: "https://c.acme.example/ilp".to_string(),
+                    ..hidden()
+                },
+                "connector_url",
+            ),
+            (
+                "no connector at all",
+                ProviderConfig {
+                    connector_url: String::new(),
+                    ..hidden()
+                },
+                "connector_url",
+            ),
+            (
+                "no control endpoint",
+                ProviderConfig {
+                    anon: AnonConfig {
+                        control: None,
+                        ..hidden().anon
+                    },
+                    ..hidden()
+                },
+                "[anon.control]",
+            ),
+            (
+                "no SOCKS endpoint",
+                ProviderConfig {
+                    anon: AnonConfig {
+                        socks_proxy: None,
+                        ..hidden().anon
+                    },
+                    ..hidden()
+                },
+                "anon.socks_proxy",
+            ),
+            (
+                "no egress policy",
+                ProviderConfig {
+                    anon: AnonConfig {
+                        egress: None,
+                        ..hidden().anon
+                    },
+                    ..hidden()
+                },
+                "[anon.egress]",
+            ),
+            (
+                "no settlement RPC",
+                ProviderConfig {
+                    anon: AnonConfig {
+                        settlement_rpc_url: None,
+                        ..hidden().anon
+                    },
+                    ..hidden()
+                },
+                "anon.settlement_rpc_url",
+            ),
+            (
+                "a public settlement RPC",
+                ProviderConfig {
+                    anon: AnonConfig {
+                        settlement_rpc_url: Some("https://8.8.8.8:8545".to_string()),
+                        ..hidden().anon
+                    },
+                    ..hidden()
+                },
+                "public address 8.8.8.8",
+            ),
+        ];
+        let mut messages = BTreeSet::new();
+        for (what, cfg, names) in cases {
+            let message = refusal(cfg);
+            assert!(
+                message.contains(names),
+                "{what}: the refusal must name {names:?}, said {message:?}"
+            );
+            assert!(messages.insert(message), "{what}: a refusal of its own");
+        }
+    }
+
+    #[test]
+    fn the_control_endpoint_authenticates_one_way() {
+        let with = |cookie: Option<&str>, password: Option<&str>| ProviderConfig {
+            anon: AnonConfig {
+                control: Some(AnonControl {
+                    addr: "anon-hs:9051".to_string(),
+                    cookie_file: cookie.map(str::to_string),
+                    password: password.map(str::to_string),
+                }),
+                ..hidden().anon
+            },
+            ..hidden()
+        };
+        assert!(with(Some("/var/lib/anon/control_auth_cookie"), None)
+            .validate()
+            .is_ok());
+        assert!(with(None, Some("hunter2")).validate().is_ok());
+        assert!(refusal(with(None, None)).contains("cookie_file"));
+        assert!(refusal(with(Some("/c"), Some("p"))).contains("both"));
+        // And the endpoint itself is host:port.
+        let bad_addr = ProviderConfig {
+            anon: AnonConfig {
+                control: Some(AnonControl {
+                    addr: "anon-hs".to_string(),
+                    cookie_file: Some("/c".to_string()),
+                    password: None,
+                }),
+                ..hidden().anon
+            },
+            ..hidden()
+        };
+        assert!(refusal(bad_addr).contains("anon.control.addr"));
+    }
+
+    #[test]
+    fn the_socks_proxy_must_be_socks5h_and_the_gateway_an_ip() {
+        for proxy in [
+            "socks5://anon-hs:9050",
+            "http://anon-hs:9050",
+            "anon-hs:9050",
+            "socks5h://anon-hs",
+        ] {
+            let cfg = ProviderConfig {
+                anon: AnonConfig {
+                    socks_proxy: Some(proxy.to_string()),
+                    ..hidden().anon
+                },
+                ..hidden()
+            };
+            assert!(refusal(cfg).contains("anon.socks_proxy"), "{proxy}");
+        }
+        let cfg = ProviderConfig {
+            anon: AnonConfig {
+                egress: Some(EgressPolicy {
+                    network: "toon-hidden-egress".to_string(),
+                    gateway: "anon-hs".to_string(),
+                }),
+                ..hidden().anon
+            },
+            ..hidden()
+        };
+        assert!(refusal(cfg).contains("anon.egress.gateway"));
+    }
+
+    #[test]
+    fn the_settlement_rpc_may_be_loopback_private_or_a_name_resolving_only_to_such() {
+        // What ADR 0008's "runs its own settlement RPC" accepts: the
+        // sandbox's chains are on loopback from the host and on a private
+        // compose subnet from inside it, both by name and by address.
+        for url in [
+            "http://127.0.0.1:8545",
+            "http://localhost:8899",
+            "http://LOCALHOST:8899",
+            "http://[::1]:8545",
+            "http://10.0.0.5:8545",
+            "http://172.18.0.4:8545",
+            "http://192.168.1.10:8545",
+            "http://169.254.1.1:8545",
+            "http://[fd00::5]:8545",
+            "http://[fe80::1]:8545",
+            "http://[::ffff:10.0.0.5]:8545",
+        ] {
+            assert_eq!(
+                settlement_rpc_verdict(url).unwrap(),
+                RpcHostVerdict::Private,
+                "{url}"
+            );
+        }
+        for url in [
+            "https://api.mainnet-beta.solana.com",
+            "http://8.8.8.8:8545",
+            "http://[2001:db8::1]:8545",
+            "http://[::ffff:8.8.8.8]:8545",
+        ] {
+            let verdict = settlement_rpc_verdict(url);
+            // A public provider's NAME resolves only where there is DNS; its
+            // ADDRESS is refused everywhere. Either way it never passes.
+            match verdict {
+                Ok(RpcHostVerdict::Unresolved(_)) => {
+                    assert!(
+                        url.contains("solana.com"),
+                        "{url}: only a name can be unresolved"
+                    )
+                }
+                Ok(RpcHostVerdict::Private) => panic!("{url} is not private"),
+                Err(e) => assert!(e.to_string().contains("public address"), "{url}: {e}"),
+            }
+        }
+        assert!(settlement_rpc_verdict("not a url").is_err());
+        assert!(
+            settlement_rpc_verdict("file:///tmp/rpc").is_err(),
+            "no host"
+        );
+    }
+
+    #[test]
+    fn a_settlement_rpc_name_that_does_not_resolve_here_loads_with_a_warning() {
+        // The sandbox's chain hostnames (`anvil`, `solana-validator`) only
+        // resolve inside its compose network, and `toon-provider routes` is
+        // run on the host: config load accepts the name and warns, and it
+        // is the RUNNING provider that refuses to start on it
+        // (`ProviderService::refuse_unverified_settlement_rpc`). `.invalid`
+        // is reserved to never resolve (RFC 2606), which a compose service
+        // name on a developer's machine cannot promise.
+        let url = "http://anvil.invalid:8545";
+        assert_eq!(
+            settlement_rpc_verdict(url).unwrap(),
+            RpcHostVerdict::Unresolved("anvil.invalid".to_string())
+        );
+        let cfg = ProviderConfig {
+            anon: AnonConfig {
+                settlement_rpc_url: Some(url.to_string()),
+                ..hidden().anon
+            },
+            ..hidden()
+        };
+        cfg.validate()
+            .expect("accepted at load, checked again at run");
+    }
+
+    #[test]
+    fn public_ip_is_required_exactly_when_the_provider_is_not_hidden() {
+        let cfg = ProviderConfig {
+            public_ip: None,
+            ..ProviderConfig::default()
+        };
+        assert!(refusal(cfg).contains("public_ip is required"));
+        assert!(ProviderConfig::default().validate().is_ok());
+        assert!(hidden().validate().is_ok());
+    }
+
+    #[test]
+    fn the_anon_keys_are_optional_when_not_hidden_and_still_shape_checked() {
+        // Nothing changes for a public provider that writes no `[anon]`
+        // table — the two sandbox configs — and one that writes a bad key
+        // is told so where it wrote it, hidden or not.
+        assert_eq!(ProviderConfig::default().anon, AnonConfig::default());
+        let typo = ProviderConfig {
+            anon: AnonConfig {
+                socks_proxy: Some("socks5://leaks-dns:9050".to_string()),
+                ..AnonConfig::default()
+            },
+            ..ProviderConfig::default()
+        };
+        assert!(refusal(typo).contains("socks5h"));
+        let partial = ProviderConfig {
+            anon: AnonConfig {
+                settlement_rpc_url: Some("https://api.mainnet-beta.solana.com".to_string()),
+                ..AnonConfig::default()
+            },
+            ..ProviderConfig::default()
+        };
+        partial
+            .validate()
+            .expect("a public provider's RPC is not gated: it hides nothing");
+    }
+
+    #[test]
+    fn private_addresses_are_the_ranges_adr_0008_means_by_self_hosted() {
+        let private = |s: &str| is_private_ip(s.parse().unwrap());
+        assert!(private("127.0.0.1"));
+        assert!(private("10.1.2.3"));
+        assert!(private("172.31.255.255"));
+        assert!(private("192.168.0.1"));
+        assert!(private("169.254.10.10"));
+        assert!(private("::1"));
+        assert!(private("fc00::1"));
+        assert!(private("fdab::1"));
+        assert!(private("fe80::1"));
+        assert!(private("::ffff:192.168.0.1"));
+        assert!(!private("172.32.0.1"));
+        assert!(!private("8.8.8.8"));
+        assert!(!private("2001:db8::1"));
+        assert!(!private("::ffff:1.1.1.1"));
     }
 
     #[test]
