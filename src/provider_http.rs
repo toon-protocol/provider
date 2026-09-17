@@ -164,7 +164,8 @@ fn outbound_proxy_from_config(config: &ProviderConfig) -> Result<Option<Outbound
         // `hidden = true`; an `Ok(None)` here would be a provider that is
         // hidden everywhere but on its own socket.
         None => bail!(
-            "hidden = true, so anon.socks_proxy must be set: this provider's own relay reads,              image fetches and Directory writes have nowhere to leave through (spec §10)"
+            "hidden = true, so anon.socks_proxy must be set: this provider's own relay reads, \
+             image fetches and Directory writes have nowhere to leave through (spec §10)"
         ),
     }
 }
@@ -182,18 +183,21 @@ fn directory_from_config(
     config: &ProviderConfig,
     proxy: Option<&OutboundProxy>,
 ) -> Result<Arc<dyn Directory>> {
-    match (&config.publish_url, proxy) {
-        (Some(url), None) => Ok(Arc::new(ConnectorDirectory::new(
-            url.clone(),
-            config.relay_set.clone(),
-        )?)),
-        (Some(url), Some(proxy)) => Ok(Arc::new(
-            ConnectorDirectory::new(url.clone(), config.relay_set.clone())?.with_proxy(proxy)?,
-        )),
-        (None, None) => Ok(Arc::new(NullDirectory::new(config.relay_set.clone()))),
-        (None, Some(proxy)) => Ok(Arc::new(
-            NullDirectory::new(config.relay_set.clone()).with_proxy(proxy),
-        )),
+    match &config.publish_url {
+        Some(url) => {
+            let mut directory = ConnectorDirectory::new(url.clone(), config.relay_set.clone())?;
+            if let Some(proxy) = proxy {
+                directory = directory.with_proxy(proxy)?;
+            }
+            Ok(Arc::new(directory))
+        }
+        None => {
+            let mut directory = NullDirectory::new(config.relay_set.clone());
+            if let Some(proxy) = proxy {
+                directory = directory.with_proxy(proxy);
+            }
+            Ok(Arc::new(directory))
+        }
     }
 }
 

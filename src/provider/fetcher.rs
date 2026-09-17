@@ -52,7 +52,7 @@ use super::oci::{OciClient, OciEndpoint};
 use crate::directory::Directory;
 use crate::nostr::image_events::{BlobRecord, BlobRecordContent, BlobSource, ImageEntry};
 use crate::nostr::wire::{ErrorCode, ErrorResponse};
-use crate::outbound_proxy::OutboundProxy;
+use crate::outbound_proxy::{http_client, OutboundProxy};
 
 /// The placeholder a `gateway_url_pattern` must contain, replaced by the
 /// transaction id of the part or record being read.
@@ -328,18 +328,9 @@ impl BlobSources {
     }
 }
 
-/// The HTTP client every image byte is fetched on: a 30s budget per request,
-/// and the `anon` SOCKS port on a Hidden Provider.
-fn fetch_http(proxy: Option<&OutboundProxy>) -> Result<reqwest::Client> {
-    let builder = reqwest::Client::builder().timeout(Duration::from_secs(30));
-    let builder = match proxy {
-        Some(proxy) => proxy.apply(builder)?,
-        None => builder,
-    };
-    builder
-        .build()
-        .context("building the HTTP client for image fetches")
-}
+/// How long one image fetch may take: a gateway read, a registry pull, or the
+/// token exchange between them.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// One provider-wide fetcher, shared by `availability` and every spawn
 /// (`AppState`). Holds the HTTP client, the registry client, the gateway
@@ -364,7 +355,8 @@ impl BlobFetcher {
         registry_url_override: Option<String>,
         cache: BlobCache,
     ) -> Self {
-        let http = fetch_http(None).expect("reqwest client with a timeout builds");
+        let http = http_client(None, FETCH_TIMEOUT, "image fetches")
+            .expect("a client with a timeout and no proxy builds");
         Self {
             oci: OciClient::new(http.clone(), registry_url_override),
             http,
@@ -383,7 +375,7 @@ impl BlobFetcher {
     /// quietly goes direct. `socks5h`, so the registry's and the realm's
     /// names are resolved by the proxy.
     pub fn with_proxy(mut self, proxy: &OutboundProxy) -> Result<Self> {
-        let http = fetch_http(Some(proxy))?;
+        let http = http_client(Some(proxy), FETCH_TIMEOUT, "image fetches")?;
         self.oci = self.oci.with_client(http.clone());
         self.http = http;
         Ok(self)

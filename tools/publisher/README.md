@@ -55,7 +55,6 @@ Environment only; there is no config file.
 | `TOON_ENDPOINT_REWRITE` | `{}` | JSON map of advertised URL prefix -> the address this process can actually reach it at. |
 | `TOON_SOCKS_PROXY` | — | `socks5h://<host>:<port>` used when a publish request names none. |
 | `TOON_HIDDEN` | `false` | This publisher sits beside a **hidden** provider. Then `TOON_SOCKS_PROXY` is **required** and a missing one is a startup refusal. |
-| `TOON_PROXY_RPC` | `false` | Send the chain RPC through the proxy too. Leave off for a self-hosted RPC; turn on for a public one. |
 
 `RELAY_WRITE_ROUTES` is what keeps the ephemeral lane out: a destination
 ending in `.ephemeral` is refused at startup by name.
@@ -100,12 +99,16 @@ this process's `TOON_SOCKS_PROXY` name the same daemon, and `TOON_HIDDEN=true`
 makes a half-wired deployment fail loudly at start rather than leak quietly at
 the first publication.
 
-**The chain RPC is the exception.** A hidden provider runs its own settlement
-RPC on loopback or a private address — the provider refuses to start
-otherwise — and `anon` builds no circuit to a private address, so routing it
-through the proxy would fail rather than hide anything; the packet never
-leaves the box to begin with. Set `TOON_PROXY_RPC=true` only when this process
-is pointed at a public RPC, where that hop does leave.
+**The chain RPC is the one exception, and it is decided by where the RPC is,
+not by a flag.** A hidden provider runs its own settlement RPC on loopback or
+a private address — the provider refuses to start otherwise — and `anon`
+builds no circuit to such an address, so routing it through the proxy would
+fail rather than hide anything; the packet never crosses a network anyone
+outside can watch. So `TOON_RPC_URL` is dialled directly exactly when it is
+**near**: loopback, a private or link-local range, or a name resolving only to
+those — the same rule the provider applies to this publisher's own address.
+An RPC anywhere else does leave, and rides the proxy like everything else.
+There is no flag to get that wrong with.
 
 A provider that is not hidden sends no `proxy` field and this process behaves
 exactly as it did before the field existed — absent means direct.

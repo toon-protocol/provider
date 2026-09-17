@@ -24,7 +24,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 pub struct StubRelay {
     url: String,
-    host: String,
+    addr: SocketAddr,
     held: Arc<Mutex<Vec<Event>>>,
     requests: Arc<Mutex<Vec<Filter>>>,
     received: Arc<Mutex<Vec<Event>>>,
@@ -68,7 +68,7 @@ impl StubRelay {
 
         Self {
             url,
-            host: addr.to_string(),
+            addr,
             held,
             requests,
             received,
@@ -102,13 +102,13 @@ impl StubRelay {
     /// `127.0.0.1:<port>`: where this relay really is, for a SOCKS stub's
     /// routing table to point a made-up `.anyone` name at.
     pub fn socket_addr(&self) -> SocketAddr {
-        self.host.parse().unwrap()
+        self.addr
     }
 
     /// A relay URL under `host` that only a proxy holding the route can
     /// reach: `ws://<host>:<this relay's port>`. Nothing resolves it here.
     pub fn url_as(&self, host: &str) -> String {
-        format!("ws://{}:{}", host, self.socket_addr().port())
+        format!("ws://{}:{}", host, self.addr.port())
     }
 
     /// The remote address of every connection this relay has accepted.

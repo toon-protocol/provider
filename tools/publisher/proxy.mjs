@@ -86,20 +86,66 @@ export function startupRefusal({ hidden, socksProxy }) {
   return null;
 }
 
-/**
- * Whether `url` is the chain RPC this process was configured with.
- *
- * The one destination a proxied publisher still dials directly. A hidden
- * provider runs its OWN settlement RPC, on loopback or a private address
- * (ADR 0008) — the provider refuses to start otherwise — and `anon` builds no
- * circuit to a private address, so sending it through the proxy would fail
- * rather than hide anything: the packet never leaves the box to begin with.
- * `TOON_PROXY_RPC=true` overrides it for an operator who points this at a
- * public RPC anyway, where the hop does leave and must be covered.
- */
+/** Whether `url` is the chain RPC this process was configured with. */
 export function isRpcTarget(url, rpcUrl) {
   try {
     return new URL(url).origin === new URL(rpcUrl).origin;
+  } catch {
+    return false;
+  }
+}
+
+/** Loopback, an RFC 1918 or link-local range, ULA, or the unspecified address. */
+export function isPrivateAddress(ip) {
+  const address = String(ip).replace(/^\[|\]$/g, '');
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(address)) {
+    const [a, b] = address.split('.').map(Number);
+    if ([a, b].some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false;
+    return (
+      a === 127 || a === 10 || a === 0 || (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) || (a === 169 && b === 254)
+    );
+  }
+  const v6 = address.toLowerCase();
+  if (v6 === '::1' || v6 === '::') return true;
+  // An IPv4-mapped address is the IPv4 one (`::ffff:10.0.0.4`).
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(v6);
+  if (mapped) return isPrivateAddress(mapped[1]);
+  // ULA fc00::/7, link-local fe80::/10.
+  return /^f[cd][0-9a-f]{0,2}:/.test(v6) || /^fe[89ab][0-9a-f]?:/.test(v6);
+}
+
+/**
+ * Whether reaching `url` takes no packet off this host or its own private
+ * network — the same rule the provider applies to its directory publisher
+ * (`is_private_url`, spec §10), and the same reason.
+ *
+ * This is the ONE destination a proxied publisher still dials directly, and
+ * it is decided by where the destination IS rather than by a flag. A hidden
+ * provider runs its own settlement RPC on loopback or a private address (ADR
+ * 0008) — the provider refuses to start otherwise — and `anon` builds no
+ * circuit to such an address, so proxying it would fail rather than hide
+ * anything: the packet never crosses a network anyone outside can watch. An
+ * RPC that is anywhere else DOES leave, so it rides the proxy like everything
+ * else, and no flag can leave it uncovered by mistake.
+ *
+ * `lookup` is `dns.promises.lookup`, passed in so this is testable without
+ * DNS. A name that does not resolve is not near: the safe way to be wrong
+ * about a host is to proxy it.
+ */
+export async function isNearUrl(url, lookup) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const host = parsed.hostname.replace(/^\[|\]$/g, '');
+  if (host.toLowerCase() === 'localhost') return true;
+  if (/^[\d.]+$/.test(host) || host.includes(':')) return isPrivateAddress(host);
+  try {
+    const addresses = await lookup(host, { all: true });
+    return addresses.length > 0 && addresses.every((a) => isPrivateAddress(a.address));
   } catch {
     return false;
   }

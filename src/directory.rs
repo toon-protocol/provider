@@ -27,7 +27,6 @@
 // publishes to, and every Takeover is published there too.
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -40,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::nostr::kinds::{K_BLOB, K_LIVENESS, K_PROFILE, K_TAKEOVER};
-use crate::outbound_proxy::{is_loopback_url, OutboundProxy};
+use crate::outbound_proxy::{http_client, is_private_url, OutboundProxy};
 
 /// The `<kind>:<pubkey>:<d>` coordinate of an addressable event, as a
 /// spawn's `registry_entry.address` carries it (spec §6.2). `d` may itself
@@ -244,7 +243,7 @@ pub struct NullDirectory {
     relay_set: Vec<String>,
     /// The `anon` SOCKS port every relay read leaves through on a Hidden
     /// Provider (spec §10). `None` — direct — on every other provider.
-    proxy: Option<SocketAddr>,
+    proxy: Option<OutboundProxy>,
 }
 
 impl NullDirectory {
@@ -262,7 +261,7 @@ impl NullDirectory {
     /// resolves images, and both of those are relay reads that would
     /// otherwise name this host to a relay operator.
     pub fn with_proxy(mut self, proxy: &OutboundProxy) -> Self {
-        self.proxy = Some(proxy.addr());
+        self.proxy = Some(proxy.clone());
         self
     }
 }
@@ -285,17 +284,17 @@ impl Directory for NullDirectory {
     /// A provider with no publisher can still READ: an Image Registry
     /// entry lives on whatever relay the spawn named, which needs no money.
     async fn get_image_entry(&self, address: &str, relay: &str) -> Result<Option<Event>> {
-        fetch_addressable(address, relay, self.proxy).await
+        fetch_addressable(address, relay, self.proxy.as_ref()).await
     }
 
     /// The same free search of the Relay Set the publishing Directory does:
     /// paying for writes has nothing to do with reading.
     async fn find_blob_records(&self, digest: &str) -> Result<Vec<Event>> {
-        fetch_blob_records(&self.relay_set, digest, self.proxy).await
+        fetch_blob_records(&self.relay_set, digest, self.proxy.as_ref()).await
     }
 
     async fn get_profile(&self, provider: PublicKey) -> Result<Option<Event>> {
-        fetch_profile(&self.relay_set, provider, self.proxy).await
+        fetch_profile(&self.relay_set, provider, self.proxy.as_ref()).await
     }
 
     async fn liveness_state(
@@ -304,7 +303,7 @@ impl Directory for NullDirectory {
         relays: &[String],
         now: u64,
     ) -> Result<RelayLiveness> {
-        fetch_liveness_state(provider, relays, now, self.proxy).await
+        fetch_liveness_state(provider, relays, now, self.proxy.as_ref()).await
     }
 
     /// Not published, like everything else: a Takeover is a paid write, and
@@ -327,7 +326,7 @@ impl Directory for NullDirectory {
         claimants: &[PublicKey],
         relays: &[String],
     ) -> Result<Vec<Event>> {
-        fetch_takeovers(workload_id, claimants, relays, self.proxy).await
+        fetch_takeovers(workload_id, claimants, relays, self.proxy.as_ref()).await
     }
 }
 
@@ -339,13 +338,16 @@ impl Directory for NullDirectory {
 /// clearnet relay in its Relay Set is exactly the read that would name this
 /// host to a relay operator. The SOCKS mode resolves the destination through
 /// the proxy (`socks5h`), so no relay's name is looked up here either.
-fn relay_client(proxy: Option<SocketAddr>) -> Client {
+fn relay_client(proxy: Option<&OutboundProxy>) -> Client {
     match proxy {
         None => Client::default(),
-        Some(addr) => Client::builder()
+        Some(proxy) => Client::builder()
             .opts(
-                ClientOptions::new()
-                    .connection(Connection::new().proxy(addr).target(ConnectionTarget::All)),
+                ClientOptions::new().connection(
+                    Connection::new()
+                        .proxy(proxy.addr())
+                        .target(ConnectionTarget::All),
+                ),
             )
             .build(),
     }
@@ -367,7 +369,7 @@ struct Connected {
 }
 
 impl Connected {
-    async fn to(relays: &[String], proxy: Option<SocketAddr>) -> Self {
+    async fn to(relays: &[String], proxy: Option<&OutboundProxy>) -> Self {
         let client = relay_client(proxy);
         for relay in relays {
             if let Err(e) = client.add_relay(relay).await {
@@ -417,7 +419,7 @@ impl Connected {
 async fn fetch_profile(
     relay_set: &[String],
     provider: PublicKey,
-    proxy: Option<SocketAddr>,
+    proxy: Option<&OutboundProxy>,
 ) -> Result<Option<Event>> {
     if relay_set.is_empty() {
         return Ok(None);
@@ -447,7 +449,7 @@ async fn fetch_liveness_state(
     provider: PublicKey,
     relays: &[String],
     now: u64,
-    proxy: Option<SocketAddr>,
+    proxy: Option<&OutboundProxy>,
 ) -> Result<RelayLiveness> {
     let mut states = RelayLiveness::new();
     if relays.is_empty() {
@@ -526,7 +528,7 @@ async fn fetch_takeovers(
     workload_id: &str,
     claimants: &[PublicKey],
     relays: &[String],
-    proxy: Option<SocketAddr>,
+    proxy: Option<&OutboundProxy>,
 ) -> Result<Vec<Event>> {
     if relays.is_empty() || claimants.is_empty() {
         return Ok(Vec::new());
@@ -553,7 +555,7 @@ async fn fetch_takeovers(
 async fn fetch_blob_records(
     relay_set: &[String],
     digest: &str,
-    proxy: Option<SocketAddr>,
+    proxy: Option<&OutboundProxy>,
 ) -> Result<Vec<Event>> {
     if relay_set.is_empty() {
         return Ok(Vec::new());
@@ -581,7 +583,7 @@ async fn fetch_blob_records(
 async fn fetch_addressable(
     address: &str,
     relay: &str,
-    proxy: Option<SocketAddr>,
+    proxy: Option<&OutboundProxy>,
 ) -> Result<Option<Event>> {
     let (kind, pubkey, d) = parse_coordinate(address)?;
     let client = relay_client(proxy);
@@ -660,12 +662,11 @@ pub struct ConnectorDirectory {
     publish_url: String,
     relay_set: Vec<String>,
     http: reqwest::Client,
-    /// The `anon` SOCKS port every relay READ leaves through on a Hidden
-    /// Provider. `None` — direct — on every other provider.
-    relay_proxy: Option<SocketAddr>,
-    /// What goes in `PublishRequest::proxy`: the same proxy, for the
-    /// publisher's own hop to the connector.
-    request_proxy: Option<String>,
+    /// The `anon` SOCKS port on a Hidden Provider — every relay READ leaves
+    /// through it, and every publish request NAMES it for the publisher's own
+    /// hop to the connector. `None` — direct, and named to nobody — on every
+    /// other provider.
+    proxy: Option<OutboundProxy>,
 }
 
 /// How long a paid publication may take: a channel-backed packet through a
@@ -679,28 +680,13 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// read answers `Absent` for it.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The HTTP client the publish request goes out on: a 30s budget, and the
-/// `anon` SOCKS port when a Hidden Provider's publisher is somewhere a packet
-/// has to leave this host to reach.
-fn publisher_http(proxy: Option<&OutboundProxy>) -> Result<reqwest::Client> {
-    let builder = reqwest::Client::builder().timeout(PUBLISH_TIMEOUT);
-    let builder = match proxy {
-        Some(proxy) => proxy.apply(builder)?,
-        None => builder,
-    };
-    builder
-        .build()
-        .context("building the HTTP client for the directory publisher")
-}
-
 impl ConnectorDirectory {
     pub fn new(publish_url: impl Into<String>, relay_set: Vec<String>) -> Result<Self> {
         Ok(Self {
             publish_url: publish_url.into(),
             relay_set,
-            http: publisher_http(None)?,
-            relay_proxy: None,
-            request_proxy: None,
+            http: http_client(None, PUBLISH_TIMEOUT, "the directory publisher")?,
+            proxy: None,
         })
     }
 
@@ -708,19 +694,18 @@ impl ConnectorDirectory {
     /// `proxy`, every publish request NAMES it, and the request itself rides
     /// it unless the publisher is on this host's loopback (spec §10).
     ///
-    /// The loopback exception is not an escape from hiding. A publisher one
-    /// process over is reached by a packet that never leaves this box, and
-    /// asking `anon` to build a circuit back to the host it runs on would
-    /// fail rather than hide anything. What has to be hidden is the hop the
-    /// publisher makes NEXT, to the connector that sells the relay write —
-    /// and that is what `PublishRequest::proxy` buys, loopback publisher or
-    /// not.
+    /// The near-publisher exception is not an escape from hiding. A publisher
+    /// one process over on loopback, or one container over on a private
+    /// network, is reached by a packet that crosses nothing anyone outside
+    /// can watch, and asking `anon` for a circuit to such an address would
+    /// simply fail. What has to be hidden is the hop the publisher makes
+    /// NEXT, to the connector that sells the relay write — and that is what
+    /// `PublishRequest::proxy` buys, near publisher or not.
     pub fn with_proxy(mut self, proxy: &OutboundProxy) -> Result<Self> {
-        self.relay_proxy = Some(proxy.addr());
-        self.request_proxy = Some(proxy.url().to_string());
-        if !is_loopback_url(&self.publish_url) {
-            self.http = publisher_http(Some(proxy))?;
+        if !is_private_url(&self.publish_url) {
+            self.http = http_client(Some(proxy), PUBLISH_TIMEOUT, "the directory publisher")?;
         }
+        self.proxy = Some(proxy.clone());
         Ok(self)
     }
 
@@ -731,7 +716,7 @@ impl ConnectorDirectory {
         let request = PublishRequest {
             event,
             relays: relays.to_vec(),
-            proxy: self.request_proxy.clone(),
+            proxy: self.proxy.as_ref().map(|p| p.url().to_string()),
         };
 
         let response = self
@@ -778,7 +763,7 @@ impl Directory for ConnectorDirectory {
             .kind(Kind::Custom(K_LIVENESS))
             .author(provider)
             .limit(1);
-        let events = Connected::to(&self.relay_set, self.relay_proxy)
+        let events = Connected::to(&self.relay_set, self.proxy.as_ref())
             .await
             .fetch(filter, "Liveness")
             .await?;
@@ -788,15 +773,15 @@ impl Directory for ConnectorDirectory {
     }
 
     async fn get_image_entry(&self, address: &str, relay: &str) -> Result<Option<Event>> {
-        fetch_addressable(address, relay, self.relay_proxy).await
+        fetch_addressable(address, relay, self.proxy.as_ref()).await
     }
 
     async fn find_blob_records(&self, digest: &str) -> Result<Vec<Event>> {
-        fetch_blob_records(&self.relay_set, digest, self.relay_proxy).await
+        fetch_blob_records(&self.relay_set, digest, self.proxy.as_ref()).await
     }
 
     async fn get_profile(&self, provider: PublicKey) -> Result<Option<Event>> {
-        fetch_profile(&self.relay_set, provider, self.relay_proxy).await
+        fetch_profile(&self.relay_set, provider, self.proxy.as_ref()).await
     }
 
     async fn liveness_state(
@@ -805,7 +790,7 @@ impl Directory for ConnectorDirectory {
         relays: &[String],
         now: u64,
     ) -> Result<RelayLiveness> {
-        fetch_liveness_state(provider, relays, now, self.relay_proxy).await
+        fetch_liveness_state(provider, relays, now, self.proxy.as_ref()).await
     }
 
     async fn publish_takeover(&self, event: Event, relays: &[String]) -> Result<PublishReport> {
@@ -818,6 +803,6 @@ impl Directory for ConnectorDirectory {
         claimants: &[PublicKey],
         relays: &[String],
     ) -> Result<Vec<Event>> {
-        fetch_takeovers(workload_id, claimants, relays, self.relay_proxy).await
+        fetch_takeovers(workload_id, claimants, relays, self.proxy.as_ref()).await
     }
 }

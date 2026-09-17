@@ -4,7 +4,15 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
-import { isRpcTarget, isTrue, proxyFor, startupRefusal, validateProxy } from './proxy.mjs';
+import {
+  isNearUrl,
+  isPrivateAddress,
+  isRpcTarget,
+  isTrue,
+  proxyFor,
+  startupRefusal,
+  validateProxy,
+} from './proxy.mjs';
 
 describe('validateProxy', () => {
   it('accepts a socks5h URL with a host and a port', () => {
@@ -72,6 +80,51 @@ describe('isRpcTarget', () => {
     assert.equal(isRpcTarget('http://relay-connector:3000/ilp', 'http://127.0.0.1:8899'), false);
     assert.equal(isRpcTarget('http://127.0.0.1:8900/', 'http://127.0.0.1:8899'), false);
     assert.equal(isRpcTarget('not a url', 'http://127.0.0.1:8899'), false);
+  });
+});
+
+describe('isPrivateAddress', () => {
+  it('knows loopback, RFC 1918, link-local and ULA', () => {
+    for (const near of [
+      '127.0.0.1', '10.0.0.4', '172.16.0.1', '172.31.255.254', '192.168.1.1',
+      '169.254.1.1', '0.0.0.0', '::1', '::', 'fd00::1', 'fe80::1', '::ffff:10.0.0.4',
+    ]) {
+      assert.equal(isPrivateAddress(near), true, near);
+    }
+  });
+
+  it('and everything else is not', () => {
+    for (const far of ['8.8.8.8', '203.0.113.7', '172.32.0.1', '172.15.0.1', '2001:db8::1']) {
+      assert.equal(isPrivateAddress(far), false, far);
+    }
+  });
+});
+
+describe('isNearUrl', () => {
+  const resolving = (addresses) => async () => addresses.map((address) => ({ address }));
+  const failing = async () => {
+    throw new Error('ENOTFOUND');
+  };
+
+  it('takes an address literal at its word, without a lookup', async () => {
+    assert.equal(await isNearUrl('http://127.0.0.1:8899', failing), true);
+    assert.equal(await isNearUrl('http://solana:8899', failing), false);
+    assert.equal(await isNearUrl('http://8.8.8.8:8899', failing), false);
+    assert.equal(await isNearUrl('http://localhost:8899', failing), true);
+  });
+
+  it('is near only when every address a name resolves to is', async () => {
+    assert.equal(await isNearUrl('http://solana-validator:8899', resolving(['172.18.0.5'])), true);
+    assert.equal(
+      await isNearUrl('http://split:8899', resolving(['10.0.0.1', '8.8.8.8'])),
+      false,
+      'one public address anywhere in the answer is enough',
+    );
+    assert.equal(await isNearUrl('http://nothing:8899', resolving([])), false);
+  });
+
+  it('is not near when the name does not resolve — the safe way to be wrong', async () => {
+    assert.equal(await isNearUrl('http://gone:8899', failing), false);
   });
 });
 

@@ -30,7 +30,7 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use common::harness::{config_for, hidden_config, socks_proxy_of, NOW};
 use common::relay::StubRelay;
-use common::socks::SocksStub;
+use common::socks::{PeerTap, SocksStub};
 use common::store::{World, LAYER};
 use common::{stub_registry, valid_digest, valid_manifest_bytes, FakeBackend, FakeClock};
 use toon_provider::nostr::directory_events::{liveness_event, takeover_event, ProfileContent};
@@ -152,25 +152,30 @@ fn seed(relay: &StubRelay, provider: &Keys) {
     );
 }
 
-/// Every connection the relay accepted came from the proxy, and the proxy
-/// was asked for the relay by the name only it can resolve.
-fn assert_only_through(socks: &SocksStub, relay: &StubRelay, name: &str) {
-    let destination = format!("{}:{}", name, relay.socket_addr().port());
+/// The proxy was asked for `destination` by the name only it can resolve, and
+/// every connection the backend accepted is one the proxy opened — so the
+/// count of direct connections is zero, asserted rather than inferred.
+fn assert_only_through(socks: &SocksStub, peers: Vec<std::net::SocketAddr>, destination: &str) {
     assert!(
-        socks.asked_for(&destination),
+        socks.asked_for(destination),
         "the proxy was asked for {destination}; it saw {:?}",
         socks.destinations()
     );
-    let peers = relay.peers();
-    assert!(!peers.is_empty(), "the relay was reached at all");
+    assert!(!peers.is_empty(), "the backend was reached at all");
     let outgoing = socks.outgoing();
     for peer in &peers {
         assert!(
             outgoing.contains(peer),
-            "the relay accepted a connection from {peer}, which the proxy did not open \
-             (it opened {outgoing:?}) — something dialled the relay directly"
+            "a connection arrived from {peer}, which the proxy did not open \
+             (it opened {outgoing:?}) — something dialled the backend directly"
         );
     }
+}
+
+/// `assert_only_through` for a stub relay, which knows its own port.
+fn assert_relay_only_through(socks: &SocksStub, relay: &StubRelay, name: &str) {
+    let destination = format!("{}:{}", name, relay.socket_addr().port());
+    assert_only_through(socks, relay.peers(), &destination);
 }
 
 // ── relay reads ─────────────────────────────────────────────────────────
@@ -213,7 +218,7 @@ async fn every_relay_read_on_a_hidden_provider_leaves_through_the_socks_proxy() 
         1
     );
 
-    assert_only_through(&socks, &relay, RELAY_HOST);
+    assert_relay_only_through(&socks, &relay, RELAY_HOST);
 }
 
 /// The other half of the claim: a provider that is not hidden opens every
@@ -275,7 +280,7 @@ async fn a_hidden_config_wires_its_relay_reads_through_anon_socks_proxy() {
         .await
         .unwrap()
         .is_some());
-    assert_only_through(&socks, &relay, RELAY_HOST);
+    assert_relay_only_through(&socks, &relay, RELAY_HOST);
 }
 
 // ── image fetches ───────────────────────────────────────────────────────
@@ -288,7 +293,10 @@ async fn store_gateway_fetches_leave_through_the_socks_proxy() {
     let mut world = World::new().await;
     let payload = b"a layer worth hiding the fetch of".repeat(4);
     let digest = world.store(&payload, LAYER, 16).await;
-    let gateway = *world.gateway.address();
+    // `wiremock` cannot report its own callers, so the tap in front of it
+    // does: the proxy's route points here, and this forwards to the gateway.
+    let tap = PeerTap::infront_of(*world.gateway.address()).await;
+    let gateway = tap.socket_addr();
     let socks = SocksStub::start(&[(GATEWAY_HOST, gateway)]).await;
     let proxy = OutboundProxy::resolve(&socks.url()).unwrap();
 
@@ -311,14 +319,10 @@ async fn store_gateway_fetches_leave_through_the_socks_proxy() {
     assert_eq!(bytes.as_ref(), payload.as_slice());
 
     let destination = format!("{}:{}", GATEWAY_HOST, gateway.port());
-    assert!(
-        socks.asked_for(&destination),
-        "the gateway was named to the proxy: {:?}",
-        socks.destinations()
-    );
+    assert_only_through(&socks, tap.peers(), &destination);
     assert!(
         socks.destinations().iter().all(|d| d == &destination),
-        "and nothing else was: {:?}",
+        "and nothing but the gateway was named to the proxy: {:?}",
         socks.destinations()
     );
     // The Blob Record's own upload and every part of the blob — more reads
@@ -336,7 +340,8 @@ async fn store_gateway_fetches_leave_through_the_socks_proxy() {
 #[tokio::test]
 async fn registry_fetches_and_the_anonymous_token_exchange_leave_through_the_socks_proxy() {
     let registry = MockServer::start().await;
-    let addr = *registry.address();
+    let tap = PeerTap::infront_of(*registry.address()).await;
+    let addr = tap.socket_addr();
     let realm = format!("http://{}:{}/token", TOKEN_HOST, addr.port());
 
     // Anonymous first, as every registry client tries: the challenge names
@@ -385,14 +390,15 @@ async fn registry_fetches_and_the_anonymous_token_exchange_leave_through_the_soc
     let bytes = fetcher.fetch(&digest, &sources).await.unwrap();
     assert_eq!(bytes.as_ref(), valid_manifest_bytes().as_slice());
 
-    let destinations = socks.destinations();
-    assert!(
-        destinations.contains(&format!("{}:{}", REGISTRY_HOST, addr.port())),
-        "the manifest fetch: {destinations:?}"
+    assert_only_through(
+        &socks,
+        tap.peers(),
+        &format!("{}:{}", REGISTRY_HOST, addr.port()),
     );
     assert!(
-        destinations.contains(&format!("{}:{}", TOKEN_HOST, addr.port())),
-        "the anonymous token exchange: {destinations:?}"
+        socks.asked_for(&format!("{}:{}", TOKEN_HOST, addr.port())),
+        "the anonymous token exchange went through the proxy too: {:?}",
+        socks.destinations()
     );
 }
 
@@ -433,12 +439,13 @@ async fn a_publish_request_to_a_remote_publisher_names_the_proxy_and_rides_it() 
     );
 }
 
-/// A publisher on loopback is dialled directly — `anon` has no circuit back
-/// to the host it runs on, and a loopback packet leaves nothing to see — but
-/// it is still TOLD the proxy, because the hop it makes next, to the
-/// connector that sells the relay write, is the one that leaves.
+/// A publisher on loopback — or on a private network, as a sidecar container
+/// is — is dialled directly: `anon` builds no circuit to such an address, and
+/// the packet leaves nothing anyone outside can see. It is still TOLD the
+/// proxy, because the hop it makes next, to the connector that sells the
+/// relay write, is the one that leaves.
 #[tokio::test]
-async fn a_loopback_publisher_is_dialled_directly_and_still_told_the_proxy() {
+async fn a_near_publisher_is_dialled_directly_and_still_told_the_proxy() {
     let publisher = accepting_publisher().await;
     let socks = SocksStub::start(&[]).await;
     let proxy = OutboundProxy::resolve(&socks.url()).unwrap();

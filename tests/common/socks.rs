@@ -189,3 +189,63 @@ async fn request(client: &mut TcpStream) -> Option<(String, u16)> {
     client.read_exact(&mut port).await.ok()?;
     Some((host, u16::from_be_bytes(port)))
 }
+
+/// A TCP pipe in front of a server that cannot report its own callers.
+///
+/// `wiremock`'s gateway and registry answer HTTP and record requests, but not
+/// the peer address each arrived on — so, unlike `StubRelay`, they cannot say
+/// on their own that nothing reached them directly. A tap in front of one
+/// records the peer of every connection and forwards the bytes unchanged, and
+/// a test then asserts what it asserts of the relay: every caller was the
+/// SOCKS stub.
+pub struct PeerTap {
+    addr: SocketAddr,
+    peers: Arc<Mutex<Vec<SocketAddr>>>,
+    accept_loop: JoinHandle<()>,
+}
+
+impl PeerTap {
+    /// A tap on a free loopback port forwarding to `target`.
+    pub async fn infront_of(target: SocketAddr) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let peers: Arc<Mutex<Vec<SocketAddr>>> = Default::default();
+
+        let accept_loop = {
+            let peers = peers.clone();
+            tokio::spawn(async move {
+                while let Ok((mut stream, peer)) = listener.accept().await {
+                    peers.lock().unwrap().push(peer);
+                    tokio::spawn(async move {
+                        let Ok(mut upstream) = TcpStream::connect(target).await else {
+                            return;
+                        };
+                        let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+                    });
+                }
+            })
+        };
+
+        Self {
+            addr,
+            peers,
+            accept_loop,
+        }
+    }
+
+    /// Where the tap listens: what a SOCKS stub's routing table points at.
+    pub fn socket_addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// The remote address of every connection the tap has accepted.
+    pub fn peers(&self) -> Vec<SocketAddr> {
+        self.peers.lock().unwrap().clone()
+    }
+}
+
+impl Drop for PeerTap {
+    fn drop(&mut self) {
+        self.accept_loop.abort();
+    }
+}

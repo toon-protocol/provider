@@ -24,7 +24,8 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { ToonClient } from '@toon-protocol/client';
 import { createHiddenServiceTransport } from '@toon-protocol/client/hidden-service';
-import { isRpcTarget, isTrue, proxyFor, startupRefusal } from './proxy.mjs';
+import { lookup } from 'node:dns/promises';
+import { isNearUrl, isRpcTarget, isTrue, proxyFor, startupRefusal } from './proxy.mjs';
 
 const PORT = Number(process.env.PORT ?? 8081);
 const BIND = process.env.BIND_ADDR ?? '0.0.0.0';
@@ -45,10 +46,15 @@ const TIMEOUT_MS = Number(process.env.TOON_TIMEOUT_MS ?? 60_000);
 // proxy is a refusal to start rather than a quiet leak.
 const SOCKS_PROXY = process.env.TOON_SOCKS_PROXY;
 const HIDDEN = isTrue(process.env.TOON_HIDDEN);
-// Send the chain RPC through the proxy too. Default OFF: a hidden provider's
-// settlement RPC is its own, on loopback or a private address, and `anon`
-// builds no circuit to one. Turn it on only for a public RPC (ADR 0002).
-const PROXY_RPC = isTrue(process.env.TOON_PROXY_RPC);
+
+// Whether the chain RPC is near enough to dial directly: loopback, a private
+// range, or a name resolving only to those — what a hidden provider's own
+// settlement RPC has to be (ADR 0008), and what `anon` can build no circuit
+// to. Resolved once, on the first proxied request, because it is a fact about
+// the deployment and not about the publication. Anywhere else, the RPC leaves
+// this host like everything else and rides the proxy with it.
+let rpcIsNear = null;
+const rpcNear = () => (rpcIsNear ??= isNearUrl(RPC_URL, lookup));
 
 // A connector's self-description advertises the endpoint a client should dial,
 // and the client dials THAT, not the URL it was configured with — one free GET
@@ -82,15 +88,15 @@ const rewrite = (input) => {
  * this host to the hub, whatever the connector's address looked like. The
  * chain RPC is the one exception, and `isRpcTarget` says why.
  */
-function dial(socksProxy) {
+function carriageThrough(socksProxy) {
   if (socksProxy === undefined) {
     return { fetch: (input, init) => fetch(rewrite(input), init), close: async () => {} };
   }
   const transport = createHiddenServiceTransport(socksProxy);
   return {
-    fetch: (input, init) => {
+    fetch: async (input, init) => {
       const url = rewrite(input);
-      if (!PROXY_RPC && isRpcTarget(url, RPC_URL)) return fetch(url, init);
+      if (isRpcTarget(url, RPC_URL) && (await rpcNear())) return fetch(url, init);
       return transport.fetch(url, init);
     },
     close: () => transport.close(),
@@ -133,16 +139,16 @@ for (const [relay, destination] of Object.entries(WRITE_ROUTES)) {
  * client for the life of the process, as before. Publications are serialized
  * (`serialize`), so nothing is in flight while it is swapped.
  */
-let live = null;
+let current = null;
 
 async function client(socksProxy) {
-  if (live !== null && live.proxy !== socksProxy) {
-    const stale = live;
-    live = null;
+  if (current !== null && current.proxy !== socksProxy) {
+    const stale = current;
+    current = null;
     await stale.carriage.close().catch(() => {});
   }
-  if (live === null) {
-    const carriage = dial(socksProxy);
+  if (current === null) {
+    const carriage = carriageThrough(socksProxy);
     const entry = { proxy: socksProxy, carriage, promise: null };
     entry.promise = (async () => {
       mkdirSync(dirname(CHANNEL_STORE), { recursive: true });
@@ -176,13 +182,13 @@ async function client(socksProxy) {
     })().catch(async (e) => {
       // Do not cache a failed bring-up: the validator or the hub may simply
       // not be up yet, and the next publication should try again.
-      if (live === entry) live = null;
+      if (current === entry) current = null;
       await carriage.close().catch(() => {});
       throw e;
     });
-    live = entry;
+    current = entry;
   }
-  return live.promise;
+  return current.promise;
 }
 
 // A channel claim carries a strictly increasing nonce per channel, so two
@@ -298,6 +304,6 @@ server.listen(PORT, BIND, () => {
     `[publisher] listening on ${BIND}:${PORT}; write routes ${JSON.stringify(WRITE_ROUTES)}; ` +
       (SOCKS_PROXY === undefined
         ? 'dialling directly unless a request names a proxy'
-        : `dialling through ${SOCKS_PROXY}${PROXY_RPC ? ' (chain RPC included)' : ''}`),
+        : `dialling through ${SOCKS_PROXY}`),
   );
 });
