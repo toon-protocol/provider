@@ -24,7 +24,7 @@ use common::socks::SocksStub;
 use common::{stub_registry, FakeBackend, FakeClock, FakeDirectory};
 use toon_provider::is_anyone_host;
 use toon_provider::nostr::gateway_grant::{gateway_grant_event, GrantContent};
-use toon_provider::nostr::kinds::{K_GATEWAY_GRANT, TOON_LABEL};
+use toon_provider::nostr::kinds::{K_GATEWAY_GRANT, K_LEASE_REQUEST, TOON_LABEL};
 use toon_provider::provider::ImagePolicyConfig;
 
 /// How long past `NOW` a grant in these tests is good for.
@@ -45,13 +45,16 @@ async fn lease(h: &Harness, seed: u8) -> Keys {
 }
 
 /// The grant content a tenant signs for a standalone lease: one gateway, one
-/// workload, a `standby_set` of one, and an expiry.
-fn grant_content(gateway: &PublicKey, tenant: &Keys, seed: u8, expires_at: u64) -> GrantContent {
+/// workload, a `standby_set` naming the one PROVIDER that holds the lease,
+/// and an expiry. The provider reads neither `http_port` nor `standby_set` —
+/// they tell the gateway which port to forward to and which providers to ask
+/// — but a grant that named the wrong thing there would be a bad example.
+fn grant_content(h: &Harness, gateway: &PublicKey, seed: u8, expires_at: u64) -> GrantContent {
     GrantContent {
         workload_id: workload_id(seed),
         gateway: gateway.to_hex(),
         http_port: HTTP_PORT,
-        standby_set: vec![tenant.public_key().to_hex()],
+        standby_set: vec![h.provider.to_hex()],
         expires_at,
         name: None,
     }
@@ -92,7 +95,7 @@ async fn a_granted_gateway_reads_exactly_what_the_tenant_reads() {
     let (status, tenants_answer) = status_with(&h, &tenant, 0xaa, None).await;
     assert_eq!(status, StatusCode::OK, "{}", tenants_answer);
 
-    let content = grant_content(&gateway.public_key(), &tenant, 0xaa, NOW + GRANT_TTL);
+    let content = grant_content(&h, &gateway.public_key(), 0xaa, NOW + GRANT_TTL);
     let (status, gateways_answer) =
         status_with(&h, &gateway, 0xaa, Some(grant(&content, &tenant))).await;
     assert_eq!(status, StatusCode::OK, "{}", gateways_answer);
@@ -102,23 +105,27 @@ async fn a_granted_gateway_reads_exactly_what_the_tenant_reads() {
     );
 }
 
-/// A grant event built by hand, so a test can make its `d` tag and its
-/// content disagree — something `gateway_grant_event` cannot do, because it
-/// derives the tag from the content.
-fn grant_with_identifier(content: &GrantContent, tenant: &Keys, identifier: &str) -> Value {
-    let event = EventBuilder::new(
-        Kind::Custom(K_GATEWAY_GRANT),
-        serde_json::to_string(content).unwrap(),
-    )
-    .tags([
-        Tag::identifier(identifier.to_string()),
-        Tag::custom(TagKind::p(), [content.gateway.clone()]),
-        Tag::custom(TagKind::custom("L"), [TOON_LABEL]),
-    ])
-    .custom_created_at(Timestamp::from(NOW))
-    .sign_with_keys(tenant)
-    .unwrap();
+/// A grant event built by hand and properly signed, so a test can vary the
+/// `d` tag and the kind independently of the content — which
+/// `gateway_grant_event` cannot do, because it derives both from what it is
+/// given.
+fn signed_as(content: &GrantContent, tenant: &Keys, kind: u16, identifier: &str) -> Value {
+    let event = EventBuilder::new(Kind::Custom(kind), serde_json::to_string(content).unwrap())
+        .tags([
+            Tag::identifier(identifier.to_string()),
+            Tag::custom(TagKind::p(), [content.gateway.clone()]),
+            Tag::custom(TagKind::custom("L"), [TOON_LABEL]),
+        ])
+        .custom_created_at(Timestamp::from(NOW))
+        .sign_with_keys(tenant)
+        .unwrap();
     serde_json::to_value(event).unwrap()
+}
+
+/// That builder with the kind a grant actually has, for the cases that vary
+/// only the `d` tag.
+fn grant_with_identifier(content: &GrantContent, tenant: &Keys, identifier: &str) -> Value {
+    signed_as(content, tenant, K_GATEWAY_GRANT, identifier)
 }
 
 /// Every way a grant can fail to admit the gateway carrying it. Each is
@@ -129,7 +136,7 @@ async fn every_grant_defect_is_bad_grant_and_nothing_else() {
     let h = harness().await;
     let tenant = lease(&h, 0xaa).await;
     let gateway = Keys::generate();
-    let good = grant_content(&gateway.public_key(), &tenant, 0xaa, NOW + GRANT_TTL);
+    let good = grant_content(&h, &gateway.public_key(), 0xaa, NOW + GRANT_TTL);
 
     // A signature that does not verify.
     let mut tampered_sig = grant(&good, &tenant);
@@ -152,22 +159,23 @@ async fn every_grant_defect_is_bad_grant_and_nothing_else() {
     let by_a_stranger = grant(&good, &stranger);
 
     // About another workload, in content and in the `d` tag together...
-    let elsewhere = grant_content(&gateway.public_key(), &tenant, 0xbb, NOW + GRANT_TTL);
+    let elsewhere = grant_content(&h, &gateway.public_key(), 0xbb, NOW + GRANT_TTL);
     // ...and in each of them alone, so neither can be trusted without the
     // other.
     let content_elsewhere = grant_with_identifier(&elsewhere, &tenant, &workload_id(0xaa));
     let identifier_elsewhere = grant_with_identifier(&good, &tenant, &workload_id(0xbb));
 
     // Naming a gateway that is not the key signing the request.
-    let another_gateway = grant_content(
-        &Keys::generate().public_key(),
-        &tenant,
-        0xaa,
-        NOW + GRANT_TTL,
-    );
+    let another_gateway = grant_content(&h, &Keys::generate().public_key(), 0xaa, NOW + GRANT_TTL);
 
     // Expired one second ago.
-    let expired = grant_content(&gateway.public_key(), &tenant, 0xaa, NOW - 1);
+    let expired = grant_content(&h, &gateway.public_key(), 0xaa, NOW - 1);
+
+    // Correctly signed by the tenant, about this workload, naming this
+    // gateway, unexpired — and not a grant at all, because its kind is a
+    // Lease Request's. Nothing the tenant signed as a kind 4432 delegates
+    // anything, whatever its content happens to say.
+    let wrong_kind = signed_as(&good, &tenant, K_LEASE_REQUEST, &workload_id(0xaa));
 
     for (case, grant_json) in [
         ("a signature that does not verify", tampered_sig),
@@ -178,6 +186,7 @@ async fn every_grant_defect_is_bad_grant_and_nothing_else() {
         ("a `d` tag naming another workload", identifier_elsewhere),
         ("naming another gateway", grant(&another_gateway, &tenant)),
         ("expired", grant(&expired, &tenant)),
+        ("not a Gateway Grant at all", wrong_kind),
     ] {
         let (status, body) = status_with(&h, &gateway, 0xaa, Some(grant_json)).await;
         assert_eq!(error_of(&body), "bad_grant", "{}: {}", case, body);
@@ -207,7 +216,7 @@ async fn a_granted_gateway_may_not_terminate_the_lease_it_reads() {
     let h = harness().await;
     let tenant = lease(&h, 0xaa).await;
     let gateway = Keys::generate();
-    let content = grant_content(&gateway.public_key(), &tenant, 0xaa, NOW + GRANT_TTL);
+    let content = grant_content(&h, &gateway.public_key(), 0xaa, NOW + GRANT_TTL);
 
     let request = RequestSpec {
         tenant: Keys::parse(&gateway.secret_key().to_secret_hex()).unwrap(),
@@ -240,7 +249,7 @@ async fn a_grant_on_the_tenants_own_terminate_changes_nothing() {
     let h = harness().await;
     let tenant = lease(&h, 0xaa).await;
     let gateway = Keys::generate();
-    let content = grant_content(&gateway.public_key(), &tenant, 0xaa, NOW + GRANT_TTL);
+    let content = grant_content(&h, &gateway.public_key(), 0xaa, NOW + GRANT_TTL);
 
     let request = RequestSpec {
         tenant: Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap(),
@@ -263,11 +272,11 @@ async fn a_grant_on_the_tenants_own_terminate_changes_nothing() {
 /// provider does not know has always been: `invalid_request`, never dropped
 /// (ADR 0004).
 #[tokio::test]
-async fn a_grant_on_spawn_extend_or_availability_is_still_an_unknown_field() {
+async fn a_grant_on_spawn_extend_standby_extend_or_availability_is_unknown() {
     let h = harness().await;
     let tenant = Keys::generate();
     let gateway = Keys::generate();
-    let content = grant_content(&gateway.public_key(), &tenant, 0xaa, NOW + GRANT_TTL);
+    let content = grant_content(&h, &gateway.public_key(), 0xaa, NOW + GRANT_TTL);
     let grant = grant(&content, &tenant);
 
     let mut spawn_content = serde_json::to_value(spawn_content(0xaa)).unwrap();
@@ -279,6 +288,15 @@ async fn a_grant_on_spawn_extend_or_availability_is_still_an_unknown_field() {
     let (status, body) = post(
         &h.app,
         "/listings/basic/v1/extend",
+        json!({ "workload_id": workload_id(0xaa), "grant": grant.clone() }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+    assert_eq!(error_of(&body), "invalid_request");
+
+    let (status, body) = post(
+        &h.app,
+        "/listings/basic/v1/standby/extend",
         json!({ "workload_id": workload_id(0xaa), "grant": grant.clone() }),
     )
     .await;
@@ -340,7 +358,7 @@ async fn a_hidden_providers_granted_status_names_the_anyone_host_and_dials_nothi
 
     let tenant = lease(&h, 0xaa).await;
     let gateway = Keys::generate();
-    let content = grant_content(&gateway.public_key(), &tenant, 0xaa, NOW + GRANT_TTL);
+    let content = grant_content(&h, &gateway.public_key(), 0xaa, NOW + GRANT_TTL);
 
     // The spawn fetched an image, which is outbound this provider makes for
     // every lease — and proves the stub is the only way out of this process,

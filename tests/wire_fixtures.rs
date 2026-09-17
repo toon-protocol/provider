@@ -498,9 +498,21 @@ impl Fixture {
     /// `op = status` or `op = terminate` about one workload. `ttl` also makes
     /// two requests about the same workload distinct events, since the
     /// provider refuses a replayed id (§6.1).
+    fn about_request(&self, tenant: &Keys, op: &str, seed: u8, ttl: u64) -> Event {
+        lease_request(
+            tenant,
+            &[self.provider_pubkey()],
+            op,
+            &about(seed),
+            NOW,
+            NOW + ttl,
+        )
+    }
+
     /// A `status` signed by a WORKLOAD GATEWAY, carrying the tenant's grant
     /// in its content (spec §6.5). The gateway signs for itself: nothing of
-    /// the tenant's is here but the grant it published.
+    /// the tenant's is here but the grant it published. `ttl` distinguishes
+    /// two such requests the same way `about_request`'s does.
     fn granted_request(&self, gateway: &Keys, seed: u8, grant: &Event, ttl: u64) -> Event {
         let mut content = about(seed);
         content["grant"] = event_json(grant);
@@ -509,17 +521,6 @@ impl Fixture {
             &[self.provider_pubkey()],
             "status",
             &content,
-            NOW,
-            NOW + ttl,
-        )
-    }
-
-    fn about_request(&self, tenant: &Keys, op: &str, seed: u8, ttl: u64) -> Event {
-        lease_request(
-            tenant,
-            &[self.provider_pubkey()],
-            op,
-            &about(seed),
             NOW,
             NOW + ttl,
         )
@@ -1218,7 +1219,7 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
     golden("status.granted.json", doc);
 
     // And the refusal that keeps a grant a delegation rather than a bearer
-    // token: one signed by somebody who does not hold this lease.
+    // credential: one signed by somebody who does not hold this lease.
     let stolen = gateway_grant(
         &grant_content(&gateway, aa, NOW + GRANT_TTL),
         &f.other_tenant,

@@ -427,19 +427,30 @@ fn may_read(
     let Some(grant) = &content.grant else {
         return Err(refusal);
     };
-    let tenant = PublicKey::parse(&lease.tenant).map_err(|_| not_tenant())?;
-    gateway_grant::check(grant, &tenant, &content.workload_id, signer, now)
+    gateway_grant::check(
+        grant,
+        &lease_tenant(lease)?,
+        &content.workload_id,
+        signer,
+        now,
+    )
 }
 
 /// The signer must be the lease's tenant. Compared as public keys, not as
 /// strings: the same key has more than one hex spelling.
 fn check_tenant(lease: &LeaseRecord, signer: &PublicKey) -> Result<(), ErrorResponse> {
-    let tenant = PublicKey::parse(&lease.tenant).map_err(|_| not_tenant())?;
-    if tenant == *signer {
+    if lease_tenant(lease)? == *signer {
         Ok(())
     } else {
         Err(not_tenant())
     }
+}
+
+/// The lease's tenant as a key. A record whose stored tenant does not parse
+/// belongs to nobody this request can prove it is, so it is `not_tenant` —
+/// the same answer either caller would reach on its own.
+fn lease_tenant(lease: &LeaseRecord) -> Result<PublicKey, ErrorResponse> {
+    PublicKey::parse(&lease.tenant).map_err(|_| not_tenant())
 }
 
 fn not_tenant() -> ErrorResponse {
