@@ -244,12 +244,20 @@ deny_references = []
 # cookie_file = "/var/lib/anon/control_auth_cookie"
 # # password = "..."
 #
-# # The egress policy of every hidden workload: attached to this internal
-# # network instead of the default bridge, with this gateway — the anon
-# # daemon's address on that network, its transparent egress — as the only
-# # route out and as its DNS. An IP address, not a name: the workload's
-# # resolver IS the gateway. Direct egress is dropped by the network, not by
-# # anything the image could ignore.
+# # The egress policy of every hidden workload (README, "Workload egress on a
+# # Hidden Provider"): an INTERNAL Docker network — `docker network create
+# # --internal`, or `internal: true` in compose — that the anon daemon is
+# # attached to at this fixed address, running a transparent egress there
+# # (TransPort + DNSPort, with every TCP connection and every DNS query from
+# # the network redirected to them). Every hidden workload is attached to
+# # that network and nothing else, with this gateway as its only route out
+# # and as its DNS. An IP address, not a name: the workload's resolver IS
+# # the gateway. Direct egress is dropped by the kernel — no route, and the
+# # host forwards nothing off an internal network — not by anything the
+# # image could ignore. The network is the operator's: it must exist before
+# # the first hidden lease, and it is never removed. The values are the
+# # sandbox's: compose project `toon-sandbox`, network `hs-egress` on
+# # 10.203.0.0/24, the daemon at .2.
 # [anon.egress]
-# network = "toon-hidden-egress"
-# gateway = "172.30.0.2"
+# network = "toon-sandbox_hs-egress"
+# gateway = "10.203.0.2"

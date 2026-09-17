@@ -43,7 +43,7 @@ use super::image_policy::{self, ResolvedImage};
 use super::oci_layout::write_layout_tar;
 use super::persistence::{count_live, persist_leases, LeaseRecord, LeaseState};
 use super::standby::{self, SpawnRoute};
-use crate::compute::{container_name, ContainerConfig, PortMapping};
+use crate::compute::{container_name, ContainerConfig, EgressPolicy, PortMapping};
 use crate::nostr::image_events::SpawnImage;
 use crate::nostr::lease_request::{self, Op};
 use crate::nostr::wire::{
@@ -419,6 +419,7 @@ pub(super) async fn fetch_and_start(
         })?,
     };
 
+    let egress = egress_policy(state, &launch.content.workload_id)?;
     let config = container_config(
         launch.id,
         launch.listing,
@@ -426,6 +427,7 @@ pub(super) async fn fetch_and_start(
         &run_image,
         launch.ssh_port,
         launch.ports,
+        egress,
     );
     let started = match state.backend.create_container(&config).await {
         Ok(_) => state.backend.start_container(launch.id).await,
@@ -608,6 +610,30 @@ fn looks_like_ssh_public_key(key: &str) -> bool {
     known && blob.len() >= 16
 }
 
+/// The egress policy a workload is attached with (spec §10): what the
+/// `HiddenService` port answers for it on a Hidden Provider, `None` on a
+/// provider that is not hidden — today's networking, untouched. A hidden
+/// provider with no `HiddenService` installed has nothing to confine a
+/// workload with, so it starts none: `no_capacity`, since the request was
+/// fine and it is this provider that cannot serve it.
+fn egress_policy(
+    state: &AppState,
+    workload_id: &str,
+) -> Result<Option<EgressPolicy>, ErrorResponse> {
+    if !state.config.hidden {
+        return Ok(None);
+    }
+    match &state.hidden_service {
+        Some(hidden_service) => Ok(Some(hidden_service.egress_for(workload_id))),
+        None => Err(ErrorResponse::new(
+            ErrorCode::NoCapacity,
+            "this Hidden Provider has no HiddenService to confine a workload's egress with, \
+             so it starts none",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn container_config(
     id: u32,
     listing: &Listing,
@@ -615,6 +641,7 @@ fn container_config(
     pull: &str,
     ssh_port: u16,
     ports: &[PortAccess],
+    egress: Option<EgressPolicy>,
 ) -> ContainerConfig {
     let (entrypoint, leading_args) = match &content.entrypoint {
         Some(e) => (e.first().cloned(), e[1..].to_vec()),
@@ -648,10 +675,7 @@ fn container_config(
             .filter(|gb| *gb > 0)
             .map(|_| VOLUME_MOUNT_PATH.to_string()),
         capabilities: listing.capabilities.clone(),
-        // The egress policy a hidden workload is attached with comes from
-        // the `HiddenService` port; the Docker backend acts on it from M4-4
-        // (TOON_Network #41), and no hidden lease is started before then.
-        egress: None,
+        egress,
     }
 }
 

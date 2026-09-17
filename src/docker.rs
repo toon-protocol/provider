@@ -77,6 +77,68 @@
 // `nesting` is still refused at config load (`capabilities::grant_refusal`):
 // it would mean tenant code holding kernel privileges this backend never
 // hands out.
+//
+// A HIDDEN LEASE (spec §10, ADR 0008; TOON_Network #41) is one whose config
+// carries an `EgressPolicy`: the name of an INTERNAL Docker network whose
+// only way out is the `anon` daemon, and that daemon's IP address on it. The
+// workload must have no network path except that gateway, and the policy
+// must hold no matter what the image does — so it is enforced by the kernel's
+// routing table and Docker's own isolation of an internal network, never by
+// an environment variable or a proxy setting. Two facts about Docker decide
+// the shape (both verified against the daemon this backend is tested on):
+//
+//   * A container on an internal network gets NO default route, and the host
+//     DROPS anything it forwards off that bridge. A container on any
+//     non-internal network gets `default via <the host's bridge>` back every
+//     time its network namespace is created — after `docker start`, after a
+//     restart-policy restart, after a host reboot. So a hidden workload is
+//     attached to internal networks ONLY, and can never fall open.
+//   * Docker does not publish ports for a container that is on internal
+//     networks only. The lease's SSH forward and published ports must still
+//     be on the host (the per-lease `.anyone` address is forwarded to them),
+//     so something ELSE publishes them and hands the connections on.
+//
+// Hence two more objects per hidden lease, both the PROVIDER'S, running no
+// tenant code, from one small image pinned by digest (`HIDDEN_SIDECAR_IMAGE`):
+//
+//   toon-<id>-egress   owns the workload's network namespace: it is on the
+//                      egress network (and, for a `docker` lease, on the
+//                      lease's own network too), its DNS is the gateway, and
+//                      its only privilege is `NET_ADMIN`, spent once on
+//                      `ip route replace default via <gateway>`; then it
+//                      sleeps. The workload joins it (`--network container:`)
+//                      and so has that routing table and that resolver, holds
+//                      no `NET_ADMIN` of its own, and cannot change either.
+//                      Because the namespace is this container's, a workload
+//                      that crashes and is restarted comes back INTO it, with
+//                      the route still there; the owner's own restart re-runs
+//                      the command.
+//   toon-<id>-ingress  the forwarder: on the provider's ordinary network with
+//                      the lease's host ports published — exactly the ports a
+//                      public lease would publish, at the same numbers — and
+//                      on the egress network beside the owner, forwarding each
+//                      one to the workload's container port. TCP only: a
+//                      hidden-service address carries nothing else. It has a
+//                      default route out, so a connection the daemon makes to
+//                      a host port is answered; nothing on the egress network
+//                      can route THROUGH it (forwarding is off, it NATs
+//                      nothing, it listens on the lease's ports and no other).
+//
+// A `docker` lease that is hidden gets the same: its `toon-<id>-net` is made
+// internal, and the sidecar is on the egress network too with the gateway as
+// its DNS and its default route (set by its own command; it is privileged
+// already), so every nested pull leaves through `anon` as §4.4 requires.
+//
+// The ONE observable a tenant can check from inside: a direct clearnet dial
+// fails, a dial to the gateway succeeds, and `ip route` names nothing but the
+// egress network's subnet and the gateway. Caveat for the host: Docker's
+// isolation of an internal network is a FORWARD-chain drop of anything off
+// the bridge that is not addressed within its subnet; on a host with
+// `br_netfilter` loaded and `bridge-nf-call-iptables = 1`, bridged frames
+// traverse that chain too and the workload's transparently-proxied packets
+// (addressed to the real destination, sent to the gateway's MAC) would be
+// dropped with them. The reference host has no `br_netfilter`; one that does
+// must accept `-i <egress bridge> -o <egress bridge>` in `DOCKER-USER`.
 
 use std::path::Path;
 use std::process::Stdio;
@@ -92,7 +154,7 @@ use tracing::{info, warn};
 use crate::capabilities;
 use crate::compute::{
     container_name, id_from_container_name, ComputeBackend, ContainerConfig, ContainerStatus,
-    NodeStatus, SSH_CONTAINER_PORT, SSH_PUBLIC_KEY_ENV, WORKLOAD_NAME_PREFIX,
+    EgressPolicy, NodeStatus, SSH_CONTAINER_PORT, SSH_PUBLIC_KEY_ENV, WORKLOAD_NAME_PREFIX,
 };
 
 /// The image every lease's daemon runs: the official `dind`, pinned by digest
@@ -102,6 +164,24 @@ use crate::compute::{
 /// `docker` lease otherwise pays for the pull.
 pub const DIND_IMAGE: &str =
     "docker:28-dind@sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac";
+
+/// The image a hidden lease's two sidecars run (the module docs): Alpine,
+/// pinned by digest, for its BusyBox `ip` (the owner's one route) and `nc`
+/// (the forwarder's listeners). Multi-arch, so the digest is the index's.
+/// Small, and pulled once; an operator SHOULD still pre-pull it, as with
+/// `DIND_IMAGE`, or the first hidden lease pays for it.
+pub const HIDDEN_SIDECAR_IMAGE: &str =
+    "alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc";
+
+/// The capability the namespace owner holds, and the only one: what
+/// `ip route replace` needs.
+const NET_ADMIN: &str = "NET_ADMIN";
+
+/// How long the owner may take to show its default route after it starts.
+/// It is one `ip` command; a container that has not run it in this long has
+/// failed to, and the lease is refused rather than started unconfined.
+const ROUTE_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const ROUTE_READY_POLL: Duration = Duration::from_millis(200);
 
 /// Where the sidecar mounts the socket volume. A directory of its own rather
 /// than the daemon's `/var/run`, so the daemon's pid file and its containerd
@@ -170,8 +250,32 @@ fn data_volume(id: u32) -> String {
     format!("{}-data", container_name(id))
 }
 
+/// The hidden lease's namespace owner (the module docs).
+fn egress_name(id: u32) -> String {
+    format!("{}-egress", container_name(id))
+}
+
+/// The hidden lease's forwarder.
+fn ingress_name(id: u32) -> String {
+    format!("{}-ingress", container_name(id))
+}
+
 fn grants_docker(config: &ContainerConfig) -> bool {
     capabilities::advertises(&config.capabilities, capabilities::DOCKER)
+}
+
+/// True when the lease has anything beside its workload: a `docker` grant's
+/// sidecar, a hidden lease's owner and forwarder, or both.
+fn has_extras(config: &ContainerConfig) -> bool {
+    grants_docker(config) || config.egress.is_some()
+}
+
+/// The one route a hidden namespace has: everything via the gateway. `ip
+/// route replace` so it also overwrites a default some other endpoint might
+/// have set — a hidden namespace's endpoints are all on internal networks
+/// and set none, but the intent is "this and nothing else", not "add".
+fn egress_route_command(policy: &EgressPolicy) -> String {
+    format!("ip route replace default via {}", policy.gateway)
 }
 
 /// The sidecar's command: the `dind` entrypoint with the daemon on ONE unix
@@ -180,19 +284,71 @@ fn grants_docker(config: &ContainerConfig) -> bool {
 /// world-usable as soon as it exists — on every start, restarts included, so
 /// the mode cannot regress. `TERM` is forwarded so `docker stop` still shuts
 /// the daemon down cleanly; the second `wait` collects it after the trap.
-fn sidecar_command() -> String {
+///
+/// On a hidden lease the daemon's egress route comes first, before anything
+/// could be pulled: the sidecar is on internal networks only, so until then
+/// it has no route at all, and being privileged it needs no helper to set
+/// one. A route that cannot be set fails the command, and the lease.
+fn sidecar_command(egress: Option<&EgressPolicy>) -> String {
     let socket = format!("{}/{}", SIDECAR_SOCKET_DIR, SOCKET_FILE);
+    let route = egress
+        .map(|policy| format!("{} && ", egress_route_command(policy)))
+        .unwrap_or_default();
     format!(
-        "dockerd-entrypoint.sh dockerd --host=unix://{socket} --bip={bip} \
+        "{route}dockerd-entrypoint.sh dockerd --host=unix://{socket} --bip={bip} \
          --default-address-pool {pool} & pid=$!; \
          trap 'kill -TERM \"$pid\" 2>/dev/null' TERM INT; \
          while kill -0 \"$pid\" 2>/dev/null && ! [ -S {socket} ]; do sleep 0.2; done; \
          chmod 0666 {socket} 2>/dev/null; \
          wait \"$pid\"; wait \"$pid\"",
+        route = route,
         socket = socket,
         bip = NESTED_BRIDGE_IP,
         pool = NESTED_ADDRESS_POOL,
     )
+}
+
+/// The owner's command: the route, then nothing, for as long as the lease
+/// lives. `exec` so the sleep is pid 1 and a stop is one signal.
+fn owner_command(policy: &EgressPolicy) -> String {
+    format!("{} && exec sleep infinity", egress_route_command(policy))
+}
+
+/// The forwarder's command: one BusyBox `nc` server per published TCP port,
+/// each forking a client to the owner's name (resolved per connection by
+/// Docker's embedded DNS on the egress network they share, so the workload's
+/// address is never copied anywhere) at the workload's container port.
+fn forwarder_command(id: u32, ports: &[(u16, u16)]) -> String {
+    let owner = egress_name(id);
+    let listeners: Vec<String> = ports
+        .iter()
+        .map(|(host_port, container_port)| {
+            format!(
+                "nc -lk -p {} -e nc {} {} &",
+                host_port, owner, container_port
+            )
+        })
+        .collect();
+    format!("{} wait", listeners.join(" "))
+}
+
+/// The TCP ports a hidden lease publishes, as (host port, container port):
+/// the SSH forward first, then the tenant's. UDP is left out — a
+/// hidden-service address cannot carry it, so a forward would reach nothing.
+fn forwarded_ports(config: &ContainerConfig) -> Vec<(u16, u16)> {
+    let mut ports: Vec<(u16, u16)> = config
+        .host_port
+        .map(|host_port| (host_port, SSH_CONTAINER_PORT))
+        .into_iter()
+        .collect();
+    ports.extend(
+        config
+            .ports
+            .iter()
+            .filter(|p| p.protocol.eq_ignore_ascii_case("tcp"))
+            .map(|p| (p.host_port, p.container_port)),
+    );
+    ports
 }
 
 /// How the host daemon lays out cgroups, which decides what `--cgroup-parent`
@@ -250,7 +406,9 @@ impl CgroupLayout {
 
 pub struct DockerBackend {
     /// `None` = the host's default `bridge`. A `docker` lease ignores it: its
-    /// pair runs on the lease's own network.
+    /// pair runs on the lease's own network. A hidden lease's workload
+    /// ignores it too — it is on the egress network and nothing else — and
+    /// its forwarder is what sits here, publishing the lease's ports.
     network: Option<String>,
     /// Asked of the daemon once, on the first lease that needs it.
     cgroup_layout: OnceCell<CgroupLayout>,
@@ -295,13 +453,24 @@ impl DockerBackend {
         ];
         args.extend(Self::limit_flags(config));
 
+        // The lease is one unit: a `docker` workload joins the sidecar
+        // under the lease's cgroup parent.
         if docker {
-            // The lease is one unit: the workload joins the sidecar under
-            // the lease's cgroup parent and on the lease's network.
             if let Some(parent) = layout.parent_arg(config.id) {
                 args.push("--cgroup-parent".into());
                 args.push(parent);
             }
+        }
+        // Where the workload is: a hidden one has no networks of its own,
+        // it lives in its owner's namespace (the module docs) — and so
+        // publishes nothing here either, Docker refusing `-p` in that mode
+        // and the forwarder holding the ports. Otherwise the lease's own
+        // network for a `docker` lease, or the provider's.
+        let hidden = config.egress.is_some();
+        if hidden {
+            args.push("--network".into());
+            args.push(format!("container:{}", egress_name(config.id)));
+        } else if docker {
             args.push("--network".into());
             args.push(network_name(config.id));
         } else if let Some(net) = &self.network {
@@ -314,7 +483,7 @@ impl DockerBackend {
         // an image before it starts, and every sshd image reads its keys
         // from somewhere different, so the image (or the spawn's
         // entrypoint) is what installs it.
-        if let Some(host_port) = config.host_port {
+        if let Some(host_port) = config.host_port.filter(|_| !hidden) {
             args.push("-p".into());
             args.push(format!("{}:{}/tcp", host_port, SSH_CONTAINER_PORT));
         }
@@ -323,12 +492,14 @@ impl DockerBackend {
             args.push(format!("{}={}", SSH_PUBLIC_KEY_ENV, key));
         }
 
-        for port in &config.ports {
-            args.push("-p".into());
-            args.push(format!(
-                "{}:{}/{}",
-                port.host_port, port.container_port, port.protocol
-            ));
+        if !hidden {
+            for port in &config.ports {
+                args.push("-p".into());
+                args.push(format!(
+                    "{}:{}/{}",
+                    port.host_port, port.container_port, port.protocol
+                ));
+            }
         }
 
         for (k, v) in &config.env {
@@ -393,6 +564,20 @@ impl DockerBackend {
             network_name(id),
             "--network-alias".into(),
             "docker".into(),
+        ]);
+        // Hidden: the egress network too, with the gateway as the daemon's
+        // resolver (the nested daemon's containers inherit what it resolves
+        // with, and any resolver they fall back to is redirected by the
+        // gateway all the same). The route is the command's first act.
+        if let Some(policy) = &config.egress {
+            args.extend([
+                "--network".into(),
+                policy.network.clone(),
+                "--dns".into(),
+                policy.gateway.clone(),
+            ]);
+        }
+        args.extend([
             "-v".into(),
             format!("{}:/var/lib/docker", daemon_volume(id)),
             "-v".into(),
@@ -400,9 +585,107 @@ impl DockerBackend {
             DIND_IMAGE.into(),
             "sh".into(),
             "-c".into(),
-            sidecar_command(),
+            sidecar_command(config.egress.as_ref()),
         ]);
         args
+    }
+
+    /// The `docker network create` argv for a `docker` lease's own network:
+    /// internal on a hidden lease, so neither the sidecar nor the workload
+    /// ever gets a default route through it.
+    fn network_args(config: &ContainerConfig) -> Vec<String> {
+        let mut args: Vec<String> = vec!["network".into(), "create".into()];
+        if config.egress.is_some() {
+            args.push("--internal".into());
+        }
+        args.push(network_name(config.id));
+        args
+    }
+
+    /// The `docker run` argv for a hidden lease's namespace owner (the
+    /// module docs): on the egress network — and the lease's own, for a
+    /// `docker` lease — with the gateway as its resolver, `NET_ADMIN` and
+    /// nothing else, running the route and then a sleep. Killed outright on
+    /// stop: there is nothing to shut down.
+    fn owner_args(config: &ContainerConfig, policy: &EgressPolicy) -> Vec<String> {
+        let id = config.id;
+        let mut args: Vec<String> = vec![
+            "run".into(),
+            "-d".into(),
+            "--name".into(),
+            egress_name(id),
+            "--restart".into(),
+            "unless-stopped".into(),
+            "--stop-signal".into(),
+            "SIGKILL".into(),
+            "--network".into(),
+            policy.network.clone(),
+        ];
+        if grants_docker(config) {
+            args.push("--network".into());
+            args.push(network_name(id));
+        }
+        args.extend([
+            "--dns".into(),
+            policy.gateway.clone(),
+            "--cap-add".into(),
+            NET_ADMIN.into(),
+            HIDDEN_SIDECAR_IMAGE.into(),
+            "sh".into(),
+            "-c".into(),
+            owner_command(policy),
+        ]);
+        args
+    }
+
+    /// The `docker run` argv for a hidden lease's forwarder (the module
+    /// docs): the lease's TCP ports published on the host at the numbers a
+    /// public lease would use, on the provider's network for the way back to
+    /// whoever dialed. The egress network, its way to the workload, is
+    /// connected AFTER the run (`connect_forwarder_args`): Docker refuses
+    /// the default `bridge` beside a user-defined network in one `run`, and
+    /// the forwarder's listeners resolve the owner per connection, so
+    /// nothing is lost by joining a moment later. `None` when the lease
+    /// publishes no TCP port: nothing to forward, so nothing runs.
+    fn forwarder_args(&self, config: &ContainerConfig) -> Option<Vec<String>> {
+        let ports = forwarded_ports(config);
+        if ports.is_empty() {
+            return None;
+        }
+        let id = config.id;
+        let mut args: Vec<String> = vec![
+            "run".into(),
+            "-d".into(),
+            "--name".into(),
+            ingress_name(id),
+            "--restart".into(),
+            "unless-stopped".into(),
+            "--stop-signal".into(),
+            "SIGKILL".into(),
+            "--network".into(),
+            self.network.clone().unwrap_or_else(|| "bridge".into()),
+        ];
+        for (host_port, _) in &ports {
+            args.push("-p".into());
+            args.push(format!("{}:{}/tcp", host_port, host_port));
+        }
+        args.extend([
+            HIDDEN_SIDECAR_IMAGE.into(),
+            "sh".into(),
+            "-c".into(),
+            forwarder_command(id, &ports),
+        ]);
+        Some(args)
+    }
+
+    /// Joins the forwarder to the egress network, where the owner is.
+    fn connect_forwarder_args(id: u32, policy: &EgressPolicy) -> Vec<String> {
+        vec![
+            "network".into(),
+            "connect".into(),
+            policy.network.clone(),
+            ingress_name(id),
+        ]
     }
 
     /// The argv of the helper that writes the listing's limits onto the
@@ -511,10 +794,13 @@ impl DockerBackend {
             .await
     }
 
-    /// Everything a `docker` lease made besides the workload itself, removed.
-    /// Best-effort and idempotent: it runs on every delete, on a failed
-    /// build, and before a re-spawn at an id whose last lease may have left
-    /// pieces behind. The data volume is not touched here.
+    /// Everything a lease made besides the workload itself — a `docker`
+    /// lease's sidecar, seed, volumes and network, a hidden lease's owner and
+    /// forwarder — removed. Best-effort and idempotent: it runs on every
+    /// delete, on a failed build, and before a re-spawn at an id whose last
+    /// lease may have left pieces behind. The data volume is not touched
+    /// here. The workload must already be gone: its namespace is the
+    /// owner's.
     async fn remove_lease_extras(&self, id: u32) {
         let had_sidecar = self.running(&sidecar_name(id)).await.is_some();
         self.remove_lease_extras_after(id, had_sidecar).await;
@@ -526,6 +812,8 @@ impl DockerBackend {
         let sidecar = sidecar_name(id);
         let _ = self.docker(&["rm", "-f", "-v", &sidecar]).await;
         let _ = self.docker(&["rm", "-f", &seed_name(id)]).await;
+        let _ = self.docker(&["rm", "-f", &ingress_name(id)]).await;
+        let _ = self.docker(&["rm", "-f", &egress_name(id)]).await;
         let _ = self
             .docker(&["volume", "rm", "-f", &socket_volume(id), &daemon_volume(id)])
             .await;
@@ -667,50 +955,120 @@ impl DockerBackend {
         Ok(())
     }
 
-    async fn build_docker_lease(&self, config: &ContainerConfig) -> Result<String> {
+    /// Waits until the owner's namespace has its default route — the one
+    /// thing its command does — giving up if the owner exits (the route
+    /// could not be set: a gateway that is not on the egress network, say)
+    /// or the timeout passes. Nothing joins the namespace before this
+    /// answers, so no workload ever runs in one without the route.
+    async fn wait_for_route(&self, id: u32) -> Result<()> {
+        let owner = egress_name(id);
+        let deadline = Instant::now() + ROUTE_READY_TIMEOUT;
+        loop {
+            let probe = self
+                .docker(&["exec", &owner, "ip", "-4", "route", "show", "default"])
+                .await?;
+            if probe.status.success() {
+                let route = String::from_utf8_lossy(&probe.stdout);
+                if route.contains("default via ") {
+                    return Ok(());
+                }
+            }
+            if self.running(&owner).await != Some(true) {
+                let logs = self.docker(&["logs", "--tail", "20", &owner]).await?;
+                bail!(
+                    "the lease's egress namespace exited before it had its route: {}",
+                    String::from_utf8_lossy(&logs.stderr).trim()
+                );
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "the lease's egress namespace had no default route within {:?}",
+                    ROUTE_READY_TIMEOUT
+                );
+            }
+            tokio::time::sleep(ROUTE_READY_POLL).await;
+        }
+    }
+
+    async fn build_lease(&self, config: &ContainerConfig) -> Result<String> {
         let id = config.id;
         let started = Instant::now();
-        let layout = self.cgroup_layout().await;
-        self.docker_ok(
-            &["network".into(), "create".into(), network_name(id)],
-            "creating the lease network",
-        )
-        .await?;
-        self.docker_ok(&Self::sidecar_args(config, layout), "creating the sidecar")
+        let docker = grants_docker(config);
+        let layout = if docker {
+            self.cgroup_layout().await
+        } else {
+            CgroupLayout::Unsupported
+        };
+        if docker {
+            self.docker_ok(&Self::network_args(config), "creating the lease network")
+                .await?;
+            self.docker_ok(&Self::sidecar_args(config, layout), "creating the sidecar")
+                .await?;
+            self.seed_socket_dir(config).await?;
+            self.docker_ok(&["start".into(), sidecar_name(id)], "starting the sidecar")
+                .await?;
+            let version = self.wait_for_daemon(id).await?;
+            info!(
+                "lease {} has its own daemon ({}) at {}/{} after {:.1?}",
+                id,
+                version,
+                WORKLOAD_SOCKET_DIR,
+                SOCKET_FILE,
+                started.elapsed()
+            );
+            self.apply_unit_limits(layout, config).await?;
+        }
+        if let Some(policy) = &config.egress {
+            self.docker_ok(
+                &Self::owner_args(config, policy),
+                "starting the egress namespace",
+            )
             .await?;
-        self.seed_socket_dir(config).await?;
-        self.docker_ok(&["start".into(), sidecar_name(id)], "starting the sidecar")
-            .await?;
-        let version = self.wait_for_daemon(id).await?;
-        info!(
-            "lease {} has its own daemon ({}) at {}/{} after {:.1?}",
-            id,
-            version,
-            WORKLOAD_SOCKET_DIR,
-            SOCKET_FILE,
-            started.elapsed()
-        );
-        self.apply_unit_limits(layout, config).await?;
+            self.wait_for_route(id).await?;
+            match self.forwarder_args(config) {
+                Some(args) => {
+                    self.docker_ok(&args, "starting the ingress forwarder")
+                        .await?;
+                    self.docker_ok(
+                        &Self::connect_forwarder_args(id, policy),
+                        "joining the ingress forwarder to the egress network",
+                    )
+                    .await?;
+                }
+                None => info!(
+                    "lease {} publishes no TCP port, so it gets no ingress forwarder",
+                    id
+                ),
+            }
+            info!(
+                "lease {} is confined to {} via {} after {:.1?}",
+                id,
+                policy.network,
+                policy.gateway,
+                started.elapsed()
+            );
+        }
         let created = self
             .docker_ok(&self.run_args(config, layout), "docker run")
             .await?;
         info!(
-            "lease {} workload started beside its daemon after {:.1?}",
+            "lease {} workload started beside its sidecars after {:.1?}",
             id,
             started.elapsed()
         );
         Ok(created)
     }
 
-    /// A `docker` lease: its network, sidecar, seeded socket volume, unit
-    /// limits and then the workload, in that order so the socket is live
-    /// before the workload's first process runs. Whatever was made before a
-    /// failure is removed again, so no sidecar outlives a lease that never
-    /// started.
-    async fn create_docker_lease(&self, config: &ContainerConfig) -> Result<String> {
+    /// A lease with extras: a `docker` lease's network, sidecar, seeded
+    /// socket volume and unit limits; a hidden lease's namespace owner (with
+    /// its route proven) and forwarder; and then the workload, in that order
+    /// so the socket is live and the namespace confined before the
+    /// workload's first process runs. Whatever was made before a failure is
+    /// removed again, so no sidecar outlives a lease that never started.
+    async fn create_lease(&self, config: &ContainerConfig) -> Result<String> {
         let id = config.id;
         self.remove_lease_extras(id).await;
-        let result = self.build_docker_lease(config).await;
+        let result = self.build_lease(config).await;
         if let Err(e) = &result {
             warn!(
                 "lease {} could not be built ({}); removing what was made",
@@ -793,8 +1151,8 @@ impl ComputeBackend for DockerBackend {
     }
 
     async fn create_container(&self, config: &ContainerConfig) -> Result<String> {
-        if grants_docker(config) {
-            return self.create_docker_lease(config).await;
+        if has_extras(config) {
+            return self.create_lease(config).await;
         }
         self.docker_ok(
             &self.run_args(config, CgroupLayout::Unsupported),
@@ -811,6 +1169,25 @@ impl ComputeBackend for DockerBackend {
             self.docker_ok(&["start".into(), sidecar.clone()], "starting the sidecar")
                 .await?;
             self.wait_for_daemon(id).await?;
+        }
+        // A hidden lease's namespace comes back before the workload joins
+        // it, with its route proven again; the forwarder in any order.
+        let owner = egress_name(id);
+        if self.running(&owner).await.is_some() {
+            self.docker_ok(
+                &["start".into(), owner.clone()],
+                "starting the egress namespace",
+            )
+            .await?;
+            self.wait_for_route(id).await?;
+        }
+        let forwarder = ingress_name(id);
+        if self.running(&forwarder).await.is_some() {
+            self.docker_ok(
+                &["start".into(), forwarder.clone()],
+                "starting the ingress forwarder",
+            )
+            .await?;
         }
         let name = container_name(id);
         let output = self.docker(&["start", &name]).await?;
@@ -832,6 +1209,14 @@ impl ComputeBackend for DockerBackend {
         let stop_workload = ["stop", &name];
         let stop_sidecar = ["stop", "-t", SIDECAR_STOP_GRACE_S, &sidecar];
         let _ = tokio::join!(self.docker(&stop_workload), self.docker(&stop_sidecar));
+        // A hidden lease's owner and forwarder go once the workload has
+        // had its grace period: the owner's namespace IS the workload's,
+        // and both are killed outright (their stop signal), so this costs
+        // nothing.
+        let (owner, forwarder) = (egress_name(id), ingress_name(id));
+        let stop_owner = ["stop", &owner];
+        let stop_forwarder = ["stop", &forwarder];
+        let _ = tokio::join!(self.docker(&stop_owner), self.docker(&stop_forwarder));
         Ok(())
     }
 
@@ -845,7 +1230,8 @@ impl ComputeBackend for DockerBackend {
         let rm_sidecar = ["rm", "-f", "-v", &sidecar];
         let _ = tokio::join!(self.docker(&rm_workload), self.docker(&rm_sidecar));
         // Remove the volume too, so a re-spawn at the same id cannot inherit
-        // the last tenant's state.
+        // the last tenant's state. Then everything else of the lease's —
+        // after the workload, whose namespace a hidden lease's owner holds.
         let _ = self.docker(&["volume", "rm", "-f", &data_volume(id)]).await;
         self.remove_lease_extras_after(id, had_sidecar).await;
         Ok(())
@@ -906,6 +1292,45 @@ mod tests {
             capabilities: capabilities.iter().map(|c| c.to_string()).collect(),
             egress: None,
         }
+    }
+
+    /// What the harness's fake `HiddenService` answers: the shape an
+    /// operator's `[anon.egress]` has.
+    fn policy() -> EgressPolicy {
+        EgressPolicy {
+            network: "toon-hidden-egress".to_string(),
+            gateway: "172.30.0.2".to_string(),
+        }
+    }
+
+    /// `config`, on a Hidden Provider: the same lease with an egress policy
+    /// and one published TCP port and one UDP.
+    fn hidden_config(id: u32, capabilities: &[&str]) -> ContainerConfig {
+        ContainerConfig {
+            ports: vec![
+                crate::compute::PortMapping {
+                    host_port: 17777,
+                    container_port: 7777,
+                    protocol: "tcp".to_string(),
+                },
+                crate::compute::PortMapping {
+                    host_port: 17778,
+                    container_port: 7778,
+                    protocol: "udp".to_string(),
+                },
+            ],
+            egress: Some(policy()),
+            ..config(id, capabilities)
+        }
+    }
+
+    /// Every value of a repeated flag, in order.
+    fn flag_values<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
+        args.iter()
+            .enumerate()
+            .filter(|(i, a)| *i > 0 && args[i - 1] == flag && a.as_str() != flag)
+            .map(|(_, a)| a.as_str())
+            .collect()
     }
 
     /// The `-v` values of an argv, in order.
@@ -997,9 +1422,19 @@ mod tests {
         // workloads with — not by bind-mounting its socket, not through a
         // device, not over TCP. Asserted on the argv rather than by reading
         // the code, because this is the line a capability is most likely to
-        // cross by accident. Both an ungranted lease and a `docker` one.
-        for caps in [&[][..], &["docker"][..]] {
-            let cfg = config(42, caps);
+        // cross by accident. An ungranted lease and a `docker` one, public
+        // and hidden.
+        for (caps, hidden) in [
+            (&[][..], false),
+            (&["docker"][..], false),
+            (&[][..], true),
+            (&["docker"][..], true),
+        ] {
+            let cfg = if hidden {
+                hidden_config(42, caps)
+            } else {
+                config(42, caps)
+            };
             let args =
                 DockerBackend::with_network("toon-net").run_args(&cfg, CgroupLayout::Systemd);
 
@@ -1018,9 +1453,10 @@ mod tests {
             for flag in PRIVILEGE_FLAGS {
                 assert!(
                     !args.iter().any(|a| a == flag),
-                    "{} is a privilege no listing on this backend grants ({:?})",
+                    "{} is a privilege no listing on this backend grants ({:?}, hidden {})",
                     flag,
-                    caps
+                    caps,
+                    hidden
                 );
             }
             // Every mount is a named volume of the lease's own, never a
@@ -1113,6 +1549,194 @@ mod tests {
         // The workload's argv still says nothing about a socket: the
         // daemon puts it there.
         assert!(!workload.iter().any(|a| a.contains("docker.sock")));
+    }
+
+    // ── a hidden lease ──────────────────────────────────────────────────
+
+    #[test]
+    fn a_hidden_workload_lives_in_its_owners_namespace_and_publishes_nothing_itself() {
+        // Spec §10: the workload has no network path except the anon
+        // egress. It joins the owner's namespace — no network of its own,
+        // never the provider's or the default bridge — and so carries no
+        // `-p` (Docker refuses one in that mode; the forwarder holds the
+        // ports) and no `--dns`; everything else of the lease is as it was.
+        let cfg = hidden_config(42, &[]);
+        let backend = DockerBackend::with_network("toon-net");
+        let args = backend.run_args(&cfg, CgroupLayout::Systemd);
+
+        assert_eq!(
+            flag_values(&args, "--network"),
+            vec!["container:toon-42-egress"]
+        );
+        assert!(!args.contains(&"-p".to_string()), "{:?}", args);
+        assert!(!args.contains(&"--dns".to_string()));
+        assert!(!args.contains(&"--cap-add".to_string()));
+        assert!(args.contains(&"SSH_PUBLIC_KEY=ssh-ed25519 AAAA tenant".to_string()));
+        assert!(args.contains(&"FOO=bar".to_string()));
+        assert_eq!(mounts(&args), vec!["toon-42-data:/data"]);
+        assert_eq!(flag_value(&args, "--cpus"), Some("1.500"));
+
+        // A public lease, same config without the policy: unchanged.
+        let public = backend.run_args(&config(42, &[]), CgroupLayout::Systemd);
+        assert_eq!(flag_values(&public, "--network"), vec!["toon-net"]);
+        assert!(public.contains(&"30042:22/tcp".to_string()));
+    }
+
+    #[test]
+    fn the_owner_holds_the_route_and_net_admin_and_nothing_else() {
+        // The namespace: on the egress network only, the gateway as its
+        // resolver, NET_ADMIN for the one route it sets, then a sleep.
+        // Nothing of the tenant's reaches it — no key, no env, no mount.
+        let cfg = hidden_config(42, &[]);
+        let args = DockerBackend::owner_args(&cfg, &policy());
+
+        assert_eq!(args[0], "run");
+        assert_eq!(flag_value(&args, "--name"), Some("toon-42-egress"));
+        assert_eq!(flag_values(&args, "--network"), vec!["toon-hidden-egress"]);
+        assert_eq!(flag_value(&args, "--dns"), Some("172.30.0.2"));
+        assert_eq!(flag_values(&args, "--cap-add"), vec!["NET_ADMIN"]);
+        assert_eq!(flag_value(&args, "--stop-signal"), Some("SIGKILL"));
+        for flag in PRIVILEGE_FLAGS.iter().filter(|f| **f != "--cap-add") {
+            assert!(!args.iter().any(|a| a == flag), "{}", flag);
+        }
+        assert!(mounts(&args).is_empty());
+        assert!(!args.contains(&"-p".to_string()));
+        assert!(!args.iter().any(|a| a.starts_with("SSH_PUBLIC_KEY=")));
+        assert!(args.contains(&HIDDEN_SIDECAR_IMAGE.to_string()));
+        assert!(
+            HIDDEN_SIDECAR_IMAGE.contains("@sha256:"),
+            "pinned by digest"
+        );
+        assert_eq!(
+            args.last().unwrap(),
+            "ip route replace default via 172.30.0.2 && exec sleep infinity"
+        );
+
+        // A `docker` lease's owner is on the lease's network too, so the
+        // workload still finds the sidecar as `docker`.
+        let args = DockerBackend::owner_args(&hidden_config(42, &["docker"]), &policy());
+        assert_eq!(
+            flag_values(&args, "--network"),
+            vec!["toon-hidden-egress", "toon-42-net"]
+        );
+    }
+
+    #[test]
+    fn the_forwarder_publishes_the_leases_tcp_ports_on_the_host_at_the_same_numbers() {
+        // What a public lease would publish, published: the SSH forward
+        // and every TCP port, host port to host port, forwarded to the
+        // owner's name at the container port. UDP is not carried by an
+        // address, so it is not forwarded. On the provider's network for
+        // the way back, joined to the egress network for the way in; no
+        // privilege, no mount, no tenant environment.
+        let cfg = hidden_config(42, &[]);
+        let args = DockerBackend::with_network("toon-net")
+            .forwarder_args(&cfg)
+            .expect("a lease with ports gets a forwarder");
+
+        assert_eq!(flag_value(&args, "--name"), Some("toon-42-ingress"));
+        assert_eq!(flag_values(&args, "--network"), vec!["toon-net"]);
+        assert_eq!(
+            DockerBackend::connect_forwarder_args(42, &policy()),
+            vec![
+                "network",
+                "connect",
+                "toon-hidden-egress",
+                "toon-42-ingress"
+            ],
+            "the egress network is joined after the run"
+        );
+        assert_eq!(
+            flag_values(&args, "-p"),
+            vec!["30042:30042/tcp", "17777:17777/tcp"]
+        );
+        assert!(!args.iter().any(|a| a.contains("udp")));
+        let command = args.last().unwrap();
+        assert_eq!(
+            command,
+            "nc -lk -p 30042 -e nc toon-42-egress 22 & nc -lk -p 17777 -e nc toon-42-egress 7777 & wait"
+        );
+        for flag in PRIVILEGE_FLAGS {
+            assert!(!args.iter().any(|a| a == flag), "{}", flag);
+        }
+        assert!(!args.contains(&"--dns".to_string()));
+        assert!(mounts(&args).is_empty());
+        assert!(!args.iter().any(|a| a.starts_with("SSH_PUBLIC_KEY=")));
+        assert!(args.contains(&HIDDEN_SIDECAR_IMAGE.to_string()));
+
+        // With no provider network configured, the default bridge is the
+        // way back.
+        let args = DockerBackend::new().forwarder_args(&cfg).unwrap();
+        assert_eq!(flag_values(&args, "--network"), vec!["bridge"]);
+
+        // Nothing to publish, nothing to run.
+        let silent = ContainerConfig {
+            host_port: None,
+            ports: vec![crate::compute::PortMapping {
+                host_port: 17778,
+                container_port: 7778,
+                protocol: "udp".to_string(),
+            }],
+            ..hidden_config(42, &[])
+        };
+        assert!(DockerBackend::new().forwarder_args(&silent).is_none());
+    }
+
+    #[test]
+    fn a_hidden_docker_lease_confines_its_network_and_sidecar_too() {
+        // Spec §4.4 on a Hidden Provider: nested pulls are the lease's
+        // egress and leave through anon. The lease's own network is
+        // internal (no default route through it, ever); the sidecar is on
+        // the egress network too, resolves through the gateway, and its
+        // command sets the route before the daemon starts.
+        let cfg = hidden_config(42, &["docker"]);
+        let network = DockerBackend::network_args(&cfg);
+        assert_eq!(
+            network,
+            vec!["network", "create", "--internal", "toon-42-net"]
+        );
+        assert_eq!(
+            DockerBackend::network_args(&config(42, &["docker"])),
+            vec!["network", "create", "toon-42-net"],
+            "a public lease's network is as it was"
+        );
+
+        let sidecar = DockerBackend::sidecar_args(&cfg, CgroupLayout::Systemd);
+        assert_eq!(
+            flag_values(&sidecar, "--network"),
+            vec!["toon-42-net", "toon-hidden-egress"]
+        );
+        assert_eq!(flag_value(&sidecar, "--network-alias"), Some("docker"));
+        assert_eq!(flag_value(&sidecar, "--dns"), Some("172.30.0.2"));
+        let command = sidecar.last().unwrap();
+        assert!(
+            command.starts_with("ip route replace default via 172.30.0.2 && dockerd-entrypoint.sh"),
+            "{}",
+            command
+        );
+        assert!(command.contains("--host=unix:///toon/run/docker.sock"));
+
+        // The public sidecar has none of it.
+        let public = DockerBackend::sidecar_args(&config(42, &["docker"]), CgroupLayout::Systemd);
+        assert_eq!(flag_values(&public, "--network"), vec!["toon-42-net"]);
+        assert!(!public.contains(&"--dns".to_string()));
+        assert!(public.last().unwrap().starts_with("dockerd-entrypoint.sh"));
+
+        // The workload joins the owner, and is still under the lease's
+        // cgroup parent with the lease's socket.
+        let workload = DockerBackend::new().run_args(&cfg, CgroupLayout::Systemd);
+        assert_eq!(
+            flag_values(&workload, "--network"),
+            vec!["container:toon-42-egress"]
+        );
+        assert_eq!(
+            flag_value(&workload, "--cgroup-parent"),
+            Some("toon-42.slice")
+        );
+        assert_eq!(
+            mounts(&workload),
+            vec!["toon-42-data:/data", "toon-42-run:/var/run"]
+        );
     }
 
     #[test]
@@ -1221,6 +1845,8 @@ mod tests {
             socket_volume(42),
             daemon_volume(42),
             network_name(42),
+            egress_name(42),
+            ingress_name(42),
         ] {
             assert!(name.starts_with("toon-42-"), "{}", name);
             assert_eq!(id_from_container_name(&name), None, "{}", name);
