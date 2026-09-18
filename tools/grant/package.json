@@ -1,21 +1,19 @@
 {
-  "name": "toon-gateway-grant",
+  "name": "toon-gateway-handover",
   "version": "0.1.0",
   "private": true,
-  "description": "Signs and publishes a Gateway Grant from a tenant's own key, so the tenant never hands that key to a Workload Gateway",
+  "description": "Derives a Gateway Grant from a lease's root secret and seals a Gateway Handover to a Workload Gateway's connector, so a tenant holds no key and publishes nothing",
   "license": "Apache-2.0",
   "type": "module",
-  "main": "publish.mjs",
+  "main": "seal.mjs",
   "bin": {
-    "toon-grant": "publish.mjs"
+    "toon-handover": "seal.mjs"
   },
   "scripts": {
-    "start": "node publish.mjs",
+    "start": "node seal.mjs",
     "test": "node --test"
   },
   "dependencies": {
-    "@noble/curves": "^2.0.0",
-    "@toon-protocol/client": "^3.0.0",
-    "nostr-tools": "^2.25.1"
+    "@toon-protocol/client": "^3.0.0"
   }
 }
