@@ -366,6 +366,39 @@ async fn a_status_with_a_wrong_an_absent_or_another_leases_token_is_not_tenant()
     assert_eq!(status, StatusCode::OK, "{}", body);
 }
 
+/// A Continuation Token reaches no answer a provider sends, refusal or not
+/// (spec §6.1.1). The token type makes that hold by construction — it
+/// redacts its own `Debug`, has no `Display` and hands its bytes to nobody
+/// but serde — and this is the route-level proof: neither the token the
+/// request presented nor the token the lease stored is anywhere in what
+/// comes back.
+#[tokio::test]
+async fn no_answer_ever_quotes_a_continuation_token() {
+    let h = harness().await;
+    let lease = spawn_lease(&h, 1).await;
+    let stranger = mint().continuation_for(&h.provider);
+    let quoted = |body: &Value, token: &ContinuationToken| {
+        let hex = serde_json::to_value(token).unwrap();
+        body.to_string().contains(hex.as_str().unwrap())
+    };
+
+    for spec in [
+        RequestSpec::about(&h, "status", &lease.workload_id).with_token(&stranger),
+        RequestSpec::about(&h, "terminate", &lease.workload_id).with_token(&stranger),
+    ] {
+        let path = format!("/{}", spec.op);
+        let (_, body) = post(&h.app, &path, json!({ "request": spec.request() })).await;
+        assert_eq!(error_of(&body), "not_tenant", "{}", body);
+        assert!(!quoted(&body, &stranger), "the presented token: {}", body);
+        assert!(!quoted(&body, &lease.token), "the stored token: {}", body);
+    }
+
+    // Nor does a successful answer, which has every reason to echo the lease
+    // and no reason to echo its secret.
+    let (_, body) = status_with(&h, &lease.token, &lease.workload_id).await;
+    assert!(!quoted(&body, &lease.token), "{}", body);
+}
+
 #[tokio::test]
 async fn status_for_a_lease_this_provider_never_had_is_unknown_workload() {
     let h = harness().await;

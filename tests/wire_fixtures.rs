@@ -283,12 +283,7 @@ fn keys(secret: &str) -> Keys {
 
 /// One of the fixed 32-byte root secrets above, as a tenant holds it.
 fn root(secret: &str) -> RootSecret {
-    let mut bytes = [0u8; 32];
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&secret[index * 2..index * 2 + 2], 16)
-            .expect("a fixture root secret is hex");
-    }
-    RootSecret::from_bytes(bytes)
+    RootSecret::from_hex(secret).expect("a fixture root secret is 64 lowercase hex characters")
 }
 
 /// A fixture's `request_id`. A real tenant draws 32 random bytes for every
@@ -746,10 +741,7 @@ fn the_continuation_derivation_vector() {
     // different token and one member cannot act as the tenant against
     // another (spec §7).
     let at_primary = root(TENANT_ROOT_SECRET).continuation_for(&keys(PRIMARY_SECRET).public_key());
-    assert_ne!(
-        serde_json::to_value(&derived).unwrap(),
-        serde_json::to_value(&at_primary).unwrap()
-    );
+    assert_ne!(derived, at_primary);
     golden(
         "continuation.vector.json",
         json!({

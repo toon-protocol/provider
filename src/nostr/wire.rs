@@ -15,7 +15,6 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::continuation::ContinuationToken;
-use super::lease_request::Op;
 
 /// The body of every authenticated route (`.spawn`, `.standby`, `status`,
 /// `terminate`): one Lease Request. Validating it is `nostr::lease_request`.
@@ -23,6 +22,33 @@ use super::lease_request::Op;
 #[serde(deny_unknown_fields)]
 pub struct LeaseRequestEnvelope {
     pub request: LeaseRequest,
+}
+
+/// What a Lease Request asks for, and which route may serve it (spec §6.1).
+///
+/// One value per route rather than one per shape: a Warm Standby's spawn
+/// carries the same content a primary's does, and `standby` is what says
+/// which of the two paid spawn routes the tenant meant this one for. A route
+/// that finds another `op` refuses the request rather than guessing —
+/// `nostr::lease_request` is where that happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Op {
+    Spawn,
+    Standby,
+    Status,
+    Terminate,
+}
+
+impl Op {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Op::Spawn => "spawn",
+            Op::Standby => "standby",
+            Op::Status => "status",
+            Op::Terminate => "terminate",
+        }
+    }
 }
 
 /// A Lease Request (spec §6.1): a plain JSON object, signed by nobody.
@@ -555,6 +581,11 @@ pub enum ErrorCode {
     /// asserting no delegation hears, so the two refusals stay tellable
     /// apart: one says *you are not the tenant*, the other *your delegation
     /// does not apply here*.
+    ///
+    /// No route answers it today: the published Gateway Grant went with kind
+    /// `30438` (ADR 0016), and the derived sub-token that replaces it is
+    /// TOON_Network#58's. The code stays in the taxonomy because §5 keeps
+    /// it, and a tenant implementation must know it before it can meet it.
     BadGrant,
 }
 

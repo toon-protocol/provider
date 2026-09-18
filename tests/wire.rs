@@ -14,7 +14,6 @@ use toon_provider::nostr::image_events::{
     BlobSource, ImageEntry, ImageEntryContent, SpawnImage, Template, TemplateContent,
 };
 use toon_provider::nostr::kinds::{K_BLOB, K_IMAGE, K_TAKEOVER, K_TEMPLATE, TOON_LABEL};
-use toon_provider::nostr::lease_request::Op;
 use toon_provider::nostr::wire::*;
 
 fn spawn_content() -> SpawnContent {

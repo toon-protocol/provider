@@ -213,8 +213,7 @@ async fn each_member_accepts_only_its_own_token() {
     let at_primary = spawn.token_at(&primary);
     let at_standby = spawn.token_at(&standby);
     assert_ne!(
-        serde_json::to_value(&at_primary).unwrap(),
-        serde_json::to_value(&at_standby).unwrap(),
+        at_primary, at_standby,
         "one root secret, one token per member"
     );
 

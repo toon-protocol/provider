@@ -25,9 +25,9 @@ use tracing::error;
 use super::cleanup::end_lease;
 use super::persistence::{persist_leases, LeaseEnd, LeaseRecord, LeaseState};
 use crate::nostr::directory_events::eviction_event;
-use crate::nostr::lease_request::{self, Op, ValidLeaseRequest};
+use crate::nostr::lease_request::{self, ValidLeaseRequest};
 use crate::nostr::wire::{
-    ErrorCode, ErrorResponse, EvictResponse, EvictionReason, ExtendRequest, ExtendResponse,
+    ErrorCode, ErrorResponse, EvictResponse, EvictionReason, ExtendRequest, ExtendResponse, Op,
     StatusResponse, TakeoverStatus, TerminateResponse, WorkloadContent,
 };
 use crate::provider_http::AppState;

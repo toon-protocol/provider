@@ -55,6 +55,12 @@ impl RootSecret {
         Self(bytes)
     }
 
+    /// A root secret as a tenant's tooling spells one: 64 lowercase hex
+    /// characters, the same shape a token has on the wire.
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        bytes_from_hex(hex).map(Self)
+    }
+
     /// The Continuation Token this lease presents to `provider`:
     ///
     /// ```text
@@ -91,15 +97,22 @@ impl ContinuationToken {
     /// A token as a request or the lease table spells it: exactly 64
     /// lowercase hex characters. Anything else is not a token.
     pub fn from_hex(hex: &str) -> Option<Self> {
-        if !is_lower_hex(hex, 64) {
-            return None;
-        }
-        let mut bytes = [0u8; 32];
-        for (index, byte) in bytes.iter_mut().enumerate() {
-            *byte = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
-        }
-        Some(Self(bytes))
+        bytes_from_hex(hex).map(Self)
     }
+}
+
+/// The 32 bytes `hex` spells, or `None` if it is not exactly 64 lowercase
+/// hex characters. Shared by both secrets here, because both are 32 bytes
+/// and both are written the same way.
+fn bytes_from_hex(hex: &str) -> Option<[u8; 32]> {
+    if !is_lower_hex(hex, 64) {
+        return None;
+    }
+    let mut bytes = [0u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(hex.get(index * 2..index * 2 + 2)?, 16).ok()?;
+    }
+    Some(bytes)
 }
 
 impl PartialEq for ContinuationToken {

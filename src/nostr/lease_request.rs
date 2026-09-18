@@ -17,42 +17,15 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use nostr_sdk::PublicKey;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::continuation::ContinuationToken;
-use super::wire::{is_lower_hex, ErrorCode, ErrorResponse, LeaseRequest, LeaseRequestEnvelope};
+use super::wire::{is_lower_hex, ErrorCode, ErrorResponse, LeaseRequest, LeaseRequestEnvelope, Op};
 
 /// A request whose `expiration` is more than this far ahead of now is
 /// refused as stale: a tenant has no reason to mint one valid for longer,
 /// and a captured request should not stay replayable for long.
 pub const MAX_REQUEST_WINDOW_SECS: u64 = 300;
-
-/// The `op` field: what the request asks for, and which route may serve it.
-///
-/// One value per route rather than one per shape: a Warm Standby's spawn
-/// carries the same content a primary's does, and `standby` is what says
-/// which of the two paid spawn routes the tenant meant this one for. A route
-/// that finds another `op` refuses the request rather than guessing (§6.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Op {
-    Spawn,
-    Standby,
-    Status,
-    Terminate,
-}
-
-impl Op {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Op::Spawn => "spawn",
-            Op::Standby => "standby",
-            Op::Status => "status",
-            Op::Terminate => "terminate",
-        }
-    }
-}
 
 /// What survives validation: the id it was booked under, until when it is
 /// good, the token it presented, and the content to parse per op.

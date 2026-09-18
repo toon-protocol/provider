@@ -17,8 +17,7 @@
 use nostr_sdk::PublicKey;
 use serde::{Deserialize, Serialize};
 
-use crate::nostr::lease_request::Op;
-use crate::nostr::wire::{ErrorCode, ErrorResponse, Role};
+use crate::nostr::wire::{ErrorCode, ErrorResponse, Op, Role};
 
 /// Which of the two paid spawn routes a request arrived on.
 ///
