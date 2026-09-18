@@ -194,6 +194,27 @@ async fn status_of(h: &Harness, set: &Set) -> Value {
         .1
 }
 
+/// The same `status`, asked by a Workload Gateway the tenant delegated to
+/// (spec §6.5.1): the Gateway Grant this member's token derives, presented
+/// as the request's `continuation`, and the moment it was derived for in the
+/// content. Here so that "a grant is answered byte for byte what the tenant
+/// is answered" is proven on a lease whose answer carries a `takeover` —
+/// which only a settled Standby Set has.
+async fn delegated_status_of(h: &Harness, set: &Set, expires_at: u64) -> Value {
+    let grant = set
+        .root
+        .continuation_for(&h.provider)
+        .gateway_sub(expires_at);
+    let content = json!({
+        "workload_id": set.workload_id,
+        "gateway_expires_at": expires_at,
+    });
+    let spec = RequestSpec::op(h, "status", content).with_token(&grant);
+    post(&h.app, "/status", json!({ "request": spec.request() }))
+        .await
+        .1
+}
+
 async fn pay(h: &Harness, route: &str, set: &Set) -> (StatusCode, Value) {
     post(&h.app, route, json!({ "workload_id": set.workload_id })).await
 }
@@ -284,6 +305,20 @@ async fn the_earliest_claim_wins_and_the_rest_stay_reserved() {
         s2.provider.to_hex(),
         "a loser says where the workload went"
     );
+
+    // And a Workload Gateway the tenant delegated to is answered byte for
+    // byte what that member's own tenant is answered, `takeover` and all
+    // (spec §6.5.1): a grant delegates READING this lease, so it changes
+    // nothing about what reading it says — at the winner, where the answer
+    // carries `access` and a `takeover`, and at the loser, where it carries
+    // a `takeover` and no `access`.
+    let good_for = NOW + 4 * CADENCE;
+    for member in [&s2, &s1] {
+        let tenants = status_of(member, &set).await;
+        let gateways = delegated_status_of(member, &set, good_for).await;
+        assert!(gateways["takeover"].is_object(), "{gateways}");
+        assert_eq!(gateways, tenants, "{gateways}");
+    }
 }
 
 /// The same `created_at` at both: the lower index wins, whichever order

@@ -241,9 +241,37 @@ pub struct SpawnContent {
     pub template: Option<String>,
 }
 
-/// Content of a Lease Request with `op = status` or `op = terminate`: the
+/// Content of a Lease Request with `op = status` (spec §6.5, §6.5.1): the workload
+/// it is about, and — when the request is a Workload Gateway's — the moment
+/// the Gateway Grant it presents was derived for.
+///
+/// The VALUE of the grant is not here. It rides in the request's
+/// `continuation`, exactly where the lease's own token rides, because that
+/// is what it stands in for; `gateway_expires_at` only says which moment to
+/// recompute it at.
+///
+/// This field is named by `status` content and by NOTHING else, which is
+/// what makes a gateway attempting to `terminate` fall out of the shape
+/// itself: with the field it is `invalid_request`, because `WorkloadContent`
+/// does not name it, and without it the grant it presents is simply not the
+/// lease's token, which is `not_tenant`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatusContent {
+    pub workload_id: String,
+    /// Unix seconds: the moment this request asserts its Gateway Grant was
+    /// derived for. Absent is a request asserting no delegation at all,
+    /// which is `not_tenant` rather than `bad_grant` when its token is not
+    /// the lease's (spec §6.5.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_expires_at: Option<u64>,
+}
+
+/// Content of a Lease Request with `op = terminate` (spec §6.6): the
 /// workload it is about, and nothing else. Authority is the request's
-/// Continuation Token (spec §6.1), which is not part of the content.
+/// Continuation Token (spec §6.1), which is not part of the content — and
+/// only the lease's OWN token will do here, because a Gateway Grant admits
+/// `status` and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkloadContent {
@@ -576,16 +604,15 @@ pub enum ErrorCode {
     /// reservation is not running — it is paid on `.standby.extend` instead.
     NotRunning,
     StaleRequest,
-    /// A `status` asserted a gateway delegation that does not apply here
-    /// (spec §6.5). Distinct from `NotTenant`, which is what a request
-    /// asserting no delegation hears, so the two refusals stay tellable
-    /// apart: one says *you are not the tenant*, the other *your delegation
-    /// does not apply here*.
+    /// A `status` asserted a Gateway Grant that does not apply here (spec
+    /// §6.5.1). Distinct from `NotTenant`, which is what a request asserting
+    /// no delegation hears, so the two refusals stay tellable apart: one
+    /// says *you are not the tenant*, the other *your delegation does not
+    /// apply here*.
     ///
-    /// No route answers it today: the published Gateway Grant went with kind
-    /// `30438` (ADR 0016), and the derived sub-token that replaces it is
-    /// TOON_Network#58's. The code stays in the taxonomy because §5 keeps
-    /// it, and a tenant implementation must know it before it can meet it.
+    /// The ASSERTION decides which of the two a request gets, not the
+    /// defect, and one code covers every defect — so a gateway learns that
+    /// its delegation does not apply and nothing about the lease.
     BadGrant,
 }
 
