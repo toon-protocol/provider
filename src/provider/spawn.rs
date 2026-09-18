@@ -231,7 +231,7 @@ async fn serve(
             LeaseRecord {
                 id,
                 workload_id: content.workload_id.clone(),
-                continuation: continuation.clone(),
+                continuation,
                 listing: listing.name.clone(),
                 listing_version: listing.version,
                 role,
