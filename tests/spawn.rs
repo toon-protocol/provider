@@ -1,23 +1,22 @@
 //! The spawn route, driven the way the provider's connector drives it: a
-//! POST with a tenant-signed Lease Request in, JSON out. Assertions are on
-//! the answer and on what the faked `ComputeBackend` was asked to run —
-//! never on the provider's internal state.
+//! POST with a Lease Request in, JSON out. Assertions are on the answer and
+//! on what the faked `ComputeBackend` was asked to run — never on the
+//! provider's internal state.
 
 mod common;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use nostr_sdk::{EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
-use serde_json::{json, Value};
+use nostr_sdk::Keys;
+use serde_json::json;
 use tower::ServiceExt;
 
 use common::harness::{
-    digest, error_of, harness, harness_with, harness_with_policy, listing, post, restart, spawn,
-    spawn_content, workload_id, RequestSpec, INTERVAL, NOW, PUBLIC_IP, SSH_KEY,
+    digest, error_of, harness, harness_with, harness_with_policy, listing, mint, post, restart,
+    spawn, spawn_content, workload_id, RequestSpec, INTERVAL, NOW, PUBLIC_IP, SSH_KEY,
 };
 use common::{BackendCall, FakeBackend, FakeClock, FakeDirectory};
 use toon_provider::compute::{ContainerConfig, PortMapping};
-use toon_provider::nostr::kinds::K_LEASE_REQUEST;
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, SpawnContent};
 use toon_provider::provider::ImagePolicyConfig;
 use toon_provider::Clock;
@@ -28,7 +27,7 @@ use toon_provider::Clock;
 async fn a_valid_spawn_starts_the_workload_and_answers_the_access_details() {
     let h = harness().await;
     let content = spawn_content(1);
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).request()).await;
 
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["workload_id"], workload_id(1));
@@ -81,36 +80,54 @@ async fn a_valid_spawn_starts_the_workload_and_answers_the_access_details() {
 
 // ── refusals, in the spec's order ───────────────────────────────────────
 
+/// A spawn brings the token its lease will keep, and `status` with that
+/// token is how a tenant sees that it was kept (spec §6.1). Nothing else
+/// about the tenant is stored, so this is the whole of what the spawn
+/// established.
 #[tokio::test]
-async fn a_tampered_request_is_bad_signature() {
+async fn a_spawn_needs_no_prior_token_and_stores_the_one_it_brings() {
     let h = harness().await;
-    let mut event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
-    // Same signature, different content: the id no longer matches.
-    event["content"] = Value::String(serde_json::to_string(&spawn_content(2)).unwrap());
-    let (status, body) = spawn(&h, event).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(error_of(&body), "bad_signature");
-    assert!(h.backend.calls().is_empty(), "nothing was started");
+    let content = spawn_content(1);
+    let token = mint().continuation_for(&h.provider);
+
+    // Nothing was stored before this: the token is new, and the spawn is
+    // accepted on it alone.
+    let (status, body) = spawn(
+        &h,
+        RequestSpec::spawn(&h, &content)
+            .with_token(&token)
+            .request(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+
+    let spec = RequestSpec::about(&h, "status", &content.workload_id).with_token(&token);
+    let (status, body) = post(&h.app, "/status", json!({ "request": spec.request() })).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["state"], "running");
 }
 
+/// A spawn with no `continuation` at all would buy a lease nobody could ever
+/// read, extend or stop, so it is a request the tenant must correct — and
+/// nothing is started for it.
 #[tokio::test]
-async fn a_forged_signature_is_bad_signature() {
+async fn a_spawn_with_no_token_is_invalid() {
     let h = harness().await;
-    let mut event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
-    event["sig"] = Value::String("00".repeat(64));
-    let (_, body) = spawn(&h, event).await;
-    assert_eq!(error_of(&body), "bad_signature");
+    let spec = RequestSpec::spawn(&h, &spawn_content(1)).with_no_token();
+    let (status, body) = spawn(&h, spec.request()).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+    assert_eq!(error_of(&body), "invalid_request");
+    assert!(h.backend.calls().is_empty(), "nothing was started");
 }
 
 #[tokio::test]
 async fn an_expired_request_is_stale() {
     let h = harness().await;
     let spec = RequestSpec {
-        created_at: NOW - 100,
         expiration: Some(NOW - 1),
         ..RequestSpec::spawn(&h, &spawn_content(1))
     };
-    let (status, body) = spawn(&h, spec.sign()).await;
+    let (status, body) = spawn(&h, spec.request()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(error_of(&body), "stale_request");
 }
@@ -119,20 +136,18 @@ async fn an_expired_request_is_stale() {
 async fn a_request_valid_for_more_than_300_seconds_is_stale() {
     let h = harness().await;
     let spec = RequestSpec {
-        created_at: NOW - 400,
-        expiration: Some(NOW + 10), // 410 s window
+        expiration: Some(NOW + 301),
         ..RequestSpec::spawn(&h, &spawn_content(1))
     };
-    let (_, body) = spawn(&h, spec.sign()).await;
+    let (_, body) = spawn(&h, spec.request()).await;
     assert_eq!(error_of(&body), "stale_request");
 
     // Exactly 300 s is fine.
     let spec = RequestSpec {
-        created_at: NOW - 290,
-        expiration: Some(NOW + 10),
+        expiration: Some(NOW + 300),
         ..RequestSpec::spawn(&h, &spawn_content(1))
     };
-    let (status, body) = spawn(&h, spec.sign()).await;
+    let (status, body) = spawn(&h, spec.request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
 }
 
@@ -143,18 +158,19 @@ async fn a_request_with_no_expiration_is_invalid() {
         expiration: None,
         ..RequestSpec::spawn(&h, &spawn_content(1))
     };
-    let (_, body) = spawn(&h, spec.sign()).await;
+    let (_, body) = spawn(&h, spec.request()).await;
     assert_eq!(error_of(&body), "invalid_request");
 }
 
+/// A Lease Request names ONE provider on every op, a spawn included, and a
+/// request naming another provider is never accepted here however good its
+/// token is (spec §6.1, §7).
 #[tokio::test]
-async fn a_request_addressed_to_another_provider_is_refused() {
+async fn a_request_naming_another_provider_is_refused() {
     let h = harness().await;
-    let spec = RequestSpec {
-        providers: vec![Keys::generate().public_key()],
-        ..RequestSpec::spawn(&h, &spawn_content(1))
-    };
-    let (status, body) = spawn(&h, spec.sign()).await;
+    let spec =
+        RequestSpec::spawn(&h, &spawn_content(1)).addressed_to(Keys::generate().public_key());
+    let (status, body) = spawn(&h, spec.request()).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(error_of(&body), "invalid_request");
     assert!(body["message"]
@@ -165,21 +181,35 @@ async fn a_request_addressed_to_another_provider_is_refused() {
 }
 
 #[tokio::test]
-async fn a_request_for_another_op_or_kind_is_invalid() {
+async fn a_request_for_another_op_is_invalid() {
     let h = harness().await;
-    let spec = RequestSpec {
-        op: "status",
-        ..RequestSpec::spawn(&h, &spawn_content(1))
-    };
-    let (_, body) = spawn(&h, spec.sign()).await;
-    assert_eq!(error_of(&body), "invalid_request");
+    // The `.spawn` route serves `op = spawn` and nothing else: a request
+    // meant to reserve capacity, or to read a lease, is not served here.
+    for op in ["standby", "status", "terminate", "nonsense"] {
+        let spec = RequestSpec {
+            op,
+            ..RequestSpec::spawn(&h, &spawn_content(1))
+        };
+        let (_, body) = spawn(&h, spec.request()).await;
+        assert_eq!(error_of(&body), "invalid_request", "op={}", op);
+    }
+    assert!(h.backend.calls().is_empty());
+}
 
-    let spec = RequestSpec {
-        kind: 1,
-        ..RequestSpec::spawn(&h, &spawn_content(1))
-    };
-    let (_, body) = spawn(&h, spec.sign()).await;
-    assert_eq!(error_of(&body), "invalid_request");
+/// `request_id` is what the replay set keys on, so a request that carries
+/// none it could key on is refused before anything else happens.
+#[tokio::test]
+async fn a_request_id_that_is_not_32_bytes_of_hex_is_invalid() {
+    let h = harness().await;
+    for bad in ["", "ab", &"AB".repeat(32), &"zz".repeat(32)] {
+        let spec = RequestSpec {
+            request_id: bad.to_string(),
+            ..RequestSpec::spawn(&h, &spawn_content(1))
+        };
+        let (_, body) = spawn(&h, spec.request()).await;
+        assert_eq!(error_of(&body), "invalid_request", "request_id={:?}", bad);
+    }
+    assert!(h.backend.calls().is_empty());
 }
 
 #[tokio::test]
@@ -207,7 +237,7 @@ async fn runtime_flags_host_mounts_devices_and_capabilities_are_invalid() {
             content,
             ..RequestSpec::spawn(&h, &spawn_content(1))
         };
-        let (status, body) = spawn(&h, spec.sign()).await;
+        let (status, body) = spawn(&h, spec.request()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{}: {}", field, body);
         assert_eq!(error_of(&body), "invalid_request", "{}", field);
     }
@@ -245,7 +275,7 @@ async fn asking_for_docker_in_the_workload_is_refused_when_the_listing_does_not_
             content,
             ..RequestSpec::spawn(&h, &spawn_content(1))
         };
-        let (status, body) = spawn(&h, spec.sign()).await;
+        let (status, body) = spawn(&h, spec.request()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{}: {}", field, body);
         assert_eq!(error_of(&body), "invalid_request", "{}", field);
     }
@@ -263,7 +293,7 @@ async fn asking_for_docker_in_the_workload_is_refused_when_the_listing_does_not_
         )]),
         ..spawn_content(1)
     };
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     let created = &h.backend.created()[0];
     assert_eq!(
@@ -305,7 +335,7 @@ async fn an_image_registry_form_this_provider_cannot_serve_is_refused_image() {
             image,
             ..spawn_content(1)
         };
-        let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+        let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).request()).await;
         assert_eq!(
             status,
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -335,14 +365,14 @@ async fn an_image_registry_form_is_refused_before_capacity_is_counted() {
     // tenant learns the real reason rather than one that would change if it
     // waited.
     let h = harness_with(vec![listing("basic", 1, 1)]).await;
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
 
     let content = SpawnContent {
         image: ImageRef::by_digest(digest()),
         ..spawn_content(2)
     };
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).request()).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
     assert_eq!(error_of(&body), "refused_image");
 }
@@ -386,7 +416,7 @@ async fn an_image_that_is_neither_of_the_three_forms_is_invalid_request() {
     for (label, image) in cases {
         let mut content = serde_json::to_value(spawn_content(1)).unwrap();
         content["image"] = image;
-        let (status, body) = spawn(&h, RequestSpec::op(&h, "spawn", content).sign()).await;
+        let (status, body) = spawn(&h, RequestSpec::op(&h, "spawn", content).request()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{}: {}", label, body);
         assert_eq!(error_of(&body), "invalid_request", "{}", label);
     }
@@ -406,7 +436,7 @@ async fn a_template_grants_nothing_and_a_capability_beside_it_is_still_refused()
         ),
         ..spawn_content(1)
     };
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     let created = &h.backend.created()[0];
     assert_eq!(
@@ -427,7 +457,7 @@ async fn a_template_grants_nothing_and_a_capability_beside_it_is_still_refused()
         listing("basic", 1, 2).capabilities.is_empty(),
         "the listing these leases are bought on grants nothing"
     );
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(2)).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(2)).request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     let by_hand = &h.backend.created()[1];
     assert_eq!(
@@ -446,7 +476,7 @@ async fn a_template_grants_nothing_and_a_capability_beside_it_is_still_refused()
     for privilege in ["privileged", "capabilities", "devices", "mounts"] {
         let mut with = serde_json::to_value(&content).unwrap();
         with[privilege] = json!(true);
-        let (status, body) = spawn(&h, RequestSpec::op(&h, "spawn", with).sign()).await;
+        let (status, body) = spawn(&h, RequestSpec::op(&h, "spawn", with).request()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{}: {}", privilege, body);
         assert_eq!(error_of(&body), "invalid_request", "{}", privilege);
     }
@@ -506,7 +536,7 @@ async fn malformed_ids_keys_images_and_ports_are_invalid() {
         ),
     ];
     for (label, content) in cases {
-        let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+        let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).request()).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{}: {}", label, body);
         assert_eq!(error_of(&body), "invalid_request", "{}", label);
     }
@@ -521,7 +551,7 @@ async fn a_listing_version_this_provider_does_not_sell_is_wrong_listing_version(
         "/listings/gpu/v1/spawn",
         "/listings/basic/latest/spawn",
     ] {
-        let event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
+        let event = RequestSpec::spawn(&h, &spawn_content(1)).request();
         let (status, body) = post(&h.app, path, json!({ "request": event })).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{}: {}", path, body);
         assert_eq!(error_of(&body), "wrong_listing_version", "{}", path);
@@ -531,11 +561,11 @@ async fn a_listing_version_this_provider_does_not_sell_is_wrong_listing_version(
 #[tokio::test]
 async fn a_workload_id_held_by_another_tenant_is_taken() {
     let h = harness().await;
-    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::OK);
 
-    // A different tenant, the same id.
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    // A different token, the same id.
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error_of(&body), "workload_id_taken");
     assert_eq!(
@@ -548,29 +578,23 @@ async fn a_workload_id_held_by_another_tenant_is_taken() {
 #[tokio::test]
 async fn the_same_tenant_respawning_an_id_it_holds_is_taken_too() {
     let h = harness().await;
-    let tenant = Keys::generate();
-    let first = RequestSpec {
-        tenant: Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::spawn(&h, &spawn_content(1))
-    };
-    let (status, _) = spawn(&h, first.sign()).await;
+    let token = mint().continuation_for(&h.provider);
+    let first = RequestSpec::spawn(&h, &spawn_content(1)).with_token(&token);
+    let (status, _) = spawn(&h, first.request()).await;
     assert_eq!(status, StatusCode::OK);
-    // A second later, so this is a new request and not a replay of the first.
-    h.clock.advance(1);
-    let again = RequestSpec {
-        tenant,
-        ..RequestSpec::spawn(&h, &spawn_content(1))
-    };
-    let (_, body) = spawn(&h, again.sign()).await;
+    // The same token again, on a request of its own: a spawn buys a NEW
+    // lease, and the id names a lease that already exists.
+    let again = RequestSpec::spawn(&h, &spawn_content(1)).with_token(&token);
+    let (_, body) = spawn(&h, again.request()).await;
     assert_eq!(error_of(&body), "workload_id_taken");
 }
 
 #[tokio::test]
 async fn a_full_listing_is_no_capacity() {
     let h = harness_with(vec![listing("basic", 1, 1)]).await;
-    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(2)).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(2)).request()).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(error_of(&body), "no_capacity");
     assert_eq!(h.backend.calls().len(), 2);
@@ -582,7 +606,7 @@ async fn capacity_is_per_listing_name_across_versions() {
     // Then the price changes (a new version and a restart, ADR 0009) and v2
     // is asked for the same hardware.
     let h = harness_with(vec![listing("basic", 1, 1)]).await;
-    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::OK);
 
     let h = restart(
@@ -598,7 +622,7 @@ async fn capacity_is_per_listing_name_across_versions() {
     .await;
     h.service.restore_leases().await;
 
-    let event = RequestSpec::spawn(&h, &spawn_content(2)).sign();
+    let event = RequestSpec::spawn(&h, &spawn_content(2)).request();
     let (_, body) = post(
         &h.app,
         "/listings/basic/v2/spawn",
@@ -615,7 +639,7 @@ async fn capacity_is_per_listing_name_across_versions() {
 #[tokio::test]
 async fn a_replayed_lease_request_is_refused() {
     let h = harness().await;
-    let event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
+    let event = RequestSpec::spawn(&h, &spawn_content(1)).request();
     let (status, _) = spawn(&h, event.clone()).await;
     assert_eq!(status, StatusCode::OK);
 
@@ -627,11 +651,11 @@ async fn a_replayed_lease_request_is_refused() {
 
 #[tokio::test]
 async fn a_request_refused_after_acceptance_cannot_be_resent_either() {
-    // The id is remembered once the signed request was accepted as
-    // authentic, so a captured refusal cannot be replayed onto the right
-    // route later. A tenant signs a new request instead.
+    // The id is remembered once the request was accepted as fresh and ours,
+    // so a captured refusal cannot be replayed onto the right route later.
+    // A tenant sends a new request instead.
     let h = harness().await;
-    let event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
+    let event = RequestSpec::spawn(&h, &spawn_content(1)).request();
     let (_, body) = post(
         &h.app,
         "/listings/basic/v2/spawn",
@@ -648,16 +672,15 @@ async fn the_first_failing_step_is_the_one_reported() {
     // Every later fault present, one earlier fault added per case.
     let h = harness_with(vec![listing("basic", 1, 1)]).await;
     // Fill the listing and take an id, so steps 4 and 6 would fail.
-    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::OK);
 
     // 1 before 2: a stale request on an unsold version is stale.
     let stale = RequestSpec {
         expiration: Some(NOW - 1),
-        created_at: NOW - 10,
         ..RequestSpec::spawn(&h, &spawn_content(1))
     }
-    .sign();
+    .request();
     let (_, body) = post(
         &h.app,
         "/listings/basic/v9/spawn",
@@ -673,7 +696,7 @@ async fn the_first_failing_step_is_the_one_reported() {
         content,
         ..RequestSpec::spawn(&h, &spawn_content(1))
     }
-    .sign();
+    .request();
     let (_, body) = post(
         &h.app,
         "/listings/basic/v9/spawn",
@@ -691,7 +714,7 @@ async fn the_first_failing_step_is_the_one_reported() {
         ]),
         ..spawn_content(1)
     };
-    let event = RequestSpec::spawn(&h, &content).sign();
+    let event = RequestSpec::spawn(&h, &content).request();
     let (_, body) = post(
         &h.app,
         "/listings/basic/v9/spawn",
@@ -701,15 +724,15 @@ async fn the_first_failing_step_is_the_one_reported() {
     assert_eq!(error_of(&body), "wrong_listing_version");
 
     // 3 before 4/6.
-    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &content).request()).await;
     assert_eq!(error_of(&body), "invalid_request");
 
     // 4 before 6: a taken id on a full listing is taken.
-    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(error_of(&body), "workload_id_taken");
 
     // 6 on its own.
-    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(2)).sign()).await;
+    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(2)).request()).await;
     assert_eq!(error_of(&body), "no_capacity");
 }
 
@@ -717,7 +740,7 @@ async fn the_first_failing_step_is_the_one_reported() {
 async fn a_workload_that_fails_to_start_is_no_capacity_and_releases_its_slot() {
     let h = harness_with(vec![listing("basic", 1, 1)]).await;
     h.backend.fail_next_create("pull failed: manifest unknown");
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::CONFLICT, "{}", body);
     assert_eq!(error_of(&body), "no_capacity");
     assert!(body["message"]
@@ -726,7 +749,7 @@ async fn a_workload_that_fails_to_start_is_no_capacity_and_releases_its_slot() {
         .contains("manifest unknown"));
 
     // The slot and the id are free again: the tenant's next try succeeds.
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
 }
 
@@ -735,7 +758,7 @@ async fn payment_headers_are_never_read() {
     // ADR 0005: a packet through a hop carries no X-TOON-* headers, so a
     // request that carries them must be served exactly as one that does not.
     let h = harness().await;
-    let event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
+    let event = RequestSpec::spawn(&h, &spawn_content(1)).request();
     let response = h
         .app
         .clone()
@@ -760,7 +783,7 @@ async fn payment_headers_are_never_read() {
 #[tokio::test]
 async fn an_unpaid_lease_expires_and_its_workload_id_is_free_again() {
     let h = harness_with(vec![listing("basic", 1, 1)]).await;
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::OK);
     let expires_at = body["expires_at"].as_u64().unwrap();
 
@@ -781,14 +804,14 @@ async fn an_unpaid_lease_expires_and_its_workload_id_is_free_again() {
     );
 
     // The id and the slot are free: the same tenant-chosen id spawns again.
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
 }
 
 #[tokio::test]
 async fn a_spawned_lease_survives_a_restart() {
     let h = harness().await;
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     let expires_at = body["expires_at"].as_u64().unwrap();
 
@@ -812,7 +835,7 @@ async fn a_spawned_lease_survives_a_restart() {
     // It still holds its workload id...
     let (_, body) = spawn(
         &restarted,
-        RequestSpec::spawn(&restarted, &spawn_content(1)).sign(),
+        RequestSpec::spawn(&restarted, &spawn_content(1)).request(),
     )
     .await;
     assert_eq!(error_of(&body), "workload_id_taken");
@@ -829,52 +852,26 @@ async fn a_workload_that_vanished_keeps_its_id_until_its_lease_ends() {
     // The daemon no longer has toon-1000, but its lease is still paid for:
     // the next spawn must take the next id, not refuse, and not reuse 1000.
     let h = harness().await;
-    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::OK);
     h.backend.vanish(1000);
 
     h.clock.advance(1);
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(2)).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(2)).request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["access"]["ssh_port"], 40001, "the second id, 1001");
     assert_eq!(h.backend.calls()[2], BackendCall::Create(1001));
 }
 
-#[tokio::test]
-async fn a_request_created_in_the_future_is_stale() {
-    // Otherwise a created_at far ahead of the clock would stretch the 300 s
-    // window past what it is meant to bound.
-    let h = harness().await;
-    let spec = RequestSpec {
-        created_at: NOW + 1000,
-        expiration: Some(NOW + 1300),
-        ..RequestSpec::spawn(&h, &spawn_content(1))
-    };
-    let (_, body) = spawn(&h, spec.sign()).await;
-    assert_eq!(error_of(&body), "stale_request");
-}
-
+/// `provider` is one key, not a list: a request that tries to address two
+/// providers is a shape this spec does not name, and an unknown shape is
+/// refused rather than read for the half that fits (spec §6.1).
 #[tokio::test]
 async fn a_request_naming_a_second_provider_is_refused() {
     let h = harness().await;
-    let mut event = RequestSpec::spawn(&h, &spawn_content(1)).sign();
-    // Re-sign with an extra `p` for someone else.
-    let tenant = Keys::generate();
-    let content = event["content"].as_str().unwrap().to_string();
-    event = serde_json::to_value(
-        EventBuilder::new(Kind::Custom(K_LEASE_REQUEST), content)
-            .tags([
-                Tag::public_key(h.provider),
-                Tag::public_key(Keys::generate().public_key()),
-                Tag::custom(TagKind::custom("op"), ["spawn"]),
-                Tag::expiration(Timestamp::from(NOW + 60)),
-            ])
-            .custom_created_at(Timestamp::from(NOW))
-            .sign_with_keys(&tenant)
-            .unwrap(),
-    )
-    .unwrap();
-    let (_, body) = spawn(&h, event).await;
+    let mut request = RequestSpec::spawn(&h, &spawn_content(1)).request();
+    request["provider"] = json!([h.provider.to_hex(), Keys::generate().public_key().to_hex()]);
+    let (_, body) = spawn(&h, request).await;
     assert_eq!(error_of(&body), "invalid_request");
     assert!(h.backend.calls().is_empty());
 }
@@ -892,7 +889,7 @@ async fn ports_are_checked_against_the_listing_not_before_it() {
             .collect(),
         ..spawn_content(1)
     };
-    let event = RequestSpec::spawn(&h, &content).sign();
+    let event = RequestSpec::spawn(&h, &content).request();
     let (_, body) = post(
         &h.app,
         "/listings/basic/v9/spawn",
@@ -900,7 +897,7 @@ async fn ports_are_checked_against_the_listing_not_before_it() {
     )
     .await;
     assert_eq!(error_of(&body), "wrong_listing_version");
-    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &content).request()).await;
     assert_eq!(error_of(&body), "invalid_request");
 }
 
@@ -913,7 +910,7 @@ async fn a_paid_spawn_with_a_denied_digest_is_refused_image() {
         ..Default::default()
     };
     let h = harness_with_policy(vec![listing("basic", 1, 2)], policy).await;
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
     assert_eq!(error_of(&body), "refused_image");
     assert!(
@@ -989,13 +986,13 @@ async fn a_denied_image_is_reported_before_a_full_listing() {
     // Fill the listing's one slot with the undenied image.
     let mut runnable = spawn_content(1);
     runnable.image.digest = good_digest;
-    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &runnable).sign()).await;
+    let (status, _) = spawn(&h, RequestSpec::spawn(&h, &runnable).request()).await;
     assert_eq!(status, StatusCode::OK);
 
     // A different workload id (so `workload_id_taken` does not fire first)
     // naming the denied digest, on a now-full listing.
     let mut refused = spawn_content(2);
     refused.image.digest = denied_digest;
-    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &refused).sign()).await;
+    let (_, body) = spawn(&h, RequestSpec::spawn(&h, &refused).request()).await;
     assert_eq!(error_of(&body), "refused_image");
 }

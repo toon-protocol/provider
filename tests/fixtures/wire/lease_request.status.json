@@ -2,59 +2,33 @@
   "content": {
     "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   },
-  "event": {
-    "content": "{\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
-    "created_at": 1700000000,
-    "id": "a6306c01832614b58783e553548b417493a7d46bb4362c35a5703dfb79829a6e",
-    "kind": 4432,
-    "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
-    "sig": "ce13852ab8ba54c6833f1f199a2f14958528f81552383c51f6dda76d1a48a72dcde53064e878cd0c452e1512e19f85687460b05f27bc6bd2e68b9854bf61e310",
-    "tags": [
-      [
-        "p",
-        "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
-      ],
-      [
-        "op",
-        "status"
-      ],
-      [
-        "expiration",
-        "1700000060"
-      ]
-    ]
-  },
   "fixture": {
     "case": "status",
     "description": "Asks after the lease on the free `<addr>.status` route. The body of `status.running`.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "lease_request"
   },
-  "kind_name": "K_LEASE_REQUEST",
-  "nip01_serialization": "[0,\"4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa\",1700000000,4432,[[\"p\",\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\"],[\"op\",\"status\"],[\"expiration\",\"1700000060\"]],\"{\\\"workload_id\\\":\\\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\\"}\"]",
   "packet_body": {
     "request": {
-      "content": "{\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
-      "created_at": 1700000000,
-      "id": "a6306c01832614b58783e553548b417493a7d46bb4362c35a5703dfb79829a6e",
-      "kind": 4432,
-      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
-      "sig": "ce13852ab8ba54c6833f1f199a2f14958528f81552383c51f6dda76d1a48a72dcde53064e878cd0c452e1512e19f85687460b05f27bc6bd2e68b9854bf61e310",
-      "tags": [
-        [
-          "p",
-          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
-        ],
-        [
-          "op",
-          "status"
-        ],
-        [
-          "expiration",
-          "1700000060"
-        ]
-      ]
+      "content": {
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "status",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "e833663192557ab39024f03a5f78a920ad836da2b085c021a2ece1847b55f2bd"
     }
   },
-  "packet_body_encoding": "The HTTP request body is this JSON object: the signed event, unmodified, as the value of the single key `request`. No other key is allowed. The connector carries the whole HTTP request inside its sealed envelope; the provider app receives this body as plaintext JSON."
+  "packet_body_encoding": "The HTTP request body is this JSON object: the request, unmodified, as the value of the single key `request`. No other key is allowed, and nothing is signed — a Lease Request is a plain JSON object carrying the lease's Continuation Token (spec §6.1, ADR 0016). The connector carries the whole HTTP request inside its sealed envelope; the provider app receives this body as plaintext JSON.",
+  "request": {
+    "content": {
+      "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+    "expiration": 1700000060,
+    "op": "status",
+    "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+    "request_id": "e833663192557ab39024f03a5f78a920ad836da2b085c021a2ece1847b55f2bd"
+  }
 }

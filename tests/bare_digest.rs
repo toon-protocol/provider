@@ -43,7 +43,7 @@ async fn a_bare_digest_runs_from_blob_records_with_no_entry_and_no_reference() {
         availability(&h, bare_image(&index)).await,
         json!({ "would_run": true })
     );
-    let (status, body) = spawn(&h, 0x11, ImageRef::by_digest(index.clone())).await;
+    let (status, body, _) = spawn(&h, 0x11, ImageRef::by_digest(index.clone())).await;
 
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["workload_id"], "11".repeat(32));
@@ -103,7 +103,7 @@ async fn a_bare_digest_with_no_record_for_one_blob_is_refused_image_on_both_rout
     assert_refused(&body, &format!("no source is known for blob {}", layer));
     assert_refused(&body, "Relay Set holds no Blob Record for it");
 
-    let (status, body) = spawn(&h, 0x21, ImageRef::by_digest(index)).await;
+    let (status, body, _) = spawn(&h, 0x21, ImageRef::by_digest(index)).await;
 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
     assert_eq!(body["error"], "refused_image", "{}", body);
@@ -158,7 +158,7 @@ async fn an_entry_record_whose_parts_fail_falls_through_to_one_on_the_relay_set(
     h.directory.seed_image_entry(w.entry(&manifest, MANIFEST));
     h.directory.seed_blob_record(second);
 
-    let (status, body) = spawn(
+    let (status, body, _) = spawn(
         &h,
         0x31,
         ImageRef::from_registry(manifest.clone(), w.address(), RELAY),
@@ -220,7 +220,7 @@ async fn the_first_record_that_verifies_wins_and_the_second_is_never_fetched() {
     h.directory.seed_blob_record(first);
     h.directory.seed_blob_record(second);
 
-    let (status, body) = spawn(&h, 0x41, ImageRef::by_digest(manifest_digest)).await;
+    let (status, body, _) = spawn(&h, 0x41, ImageRef::by_digest(manifest_digest)).await;
 
     assert_eq!(status, StatusCode::OK, "{}", body);
     let paths = w.gateway_paths().await;
@@ -248,7 +248,7 @@ async fn a_gateway_5xx_on_one_part_moves_that_blob_on_and_leaves_the_others_alon
     h.directory.seed_blob_record(second);
     let config = w.blobs[0].digest.clone();
 
-    let (status, body) = spawn(
+    let (status, body, _) = spawn(
         &h,
         0x51,
         ImageRef::from_registry(manifest.clone(), w.address(), RELAY),
@@ -292,7 +292,7 @@ async fn an_image_already_cached_contacts_neither_the_relay_nor_a_gateway() {
     let (index, ..) = store_whole_image(&mut w).await;
     let h = harness(&w, vec![listing("basic", 1, 2)]).await;
     seed_blob_records(&w, &h.directory);
-    let (status, body) = spawn(&h, 0x61, ImageRef::by_digest(index.clone())).await;
+    let (status, body, _) = spawn(&h, 0x61, ImageRef::by_digest(index.clone())).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     let gateway_before = w.gateway_request_count().await;
     let lookups_before = h.directory.blob_record_lookups().len();
@@ -302,7 +302,7 @@ async fn an_image_already_cached_contacts_neither_the_relay_nor_a_gateway() {
         availability(&h, bare_image(&index)).await,
         json!({ "would_run": true })
     );
-    let (status, body) = spawn(&h, 0x62, ImageRef::by_digest(index)).await;
+    let (status, body, _) = spawn(&h, 0x62, ImageRef::by_digest(index)).await;
 
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(
@@ -339,7 +339,7 @@ async fn the_entrys_source_is_used_and_the_relay_set_is_never_asked() {
     h.directory.seed_image_entry(w.entry(&manifest, MANIFEST));
     seed_blob_records(&w, &h.directory);
 
-    let (status, body) = spawn(
+    let (status, body, _) = spawn(
         &h,
         0x71,
         ImageRef::from_registry(manifest, w.address(), RELAY),
@@ -386,7 +386,7 @@ async fn a_relay_record_whose_parts_fail_falls_through_to_the_next_relay_record(
     h.directory.seed_blob_record(lying);
     h.directory.seed_blob_record(honest);
 
-    let (status, body) = spawn(&h, 0x81, ImageRef::by_digest(manifest_digest)).await;
+    let (status, body, _) = spawn(&h, 0x81, ImageRef::by_digest(manifest_digest)).await;
 
     assert_eq!(status, StatusCode::OK, "{}", body);
     let paths = w.gateway_paths().await;
@@ -425,7 +425,7 @@ async fn an_upstream_registry_that_refuses_falls_through_to_the_relay_set() {
         .seed_image_entry(w.entry(&manifest_digest, MANIFEST));
     h.directory.seed_blob_record(rescue);
 
-    let (status, body) = spawn(
+    let (status, body, _) = spawn(
         &h,
         0x91,
         ImageRef::from_registry(manifest_digest, w.address(), RELAY),

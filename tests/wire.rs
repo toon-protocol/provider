@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::json;
+use toon_provider::nostr::continuation::{ContinuationToken, RootSecret};
 use toon_provider::nostr::directory_events::{
     takeover_event, EvictionContent, ListingContent, LivenessContent, ProfileContent, Settlement,
     TakeoverContent,
@@ -12,9 +13,8 @@ use toon_provider::nostr::image_events::{
     blob_record_event, image_entry_event, template_event, BlobRecord, BlobRecordContent,
     BlobSource, ImageEntry, ImageEntryContent, SpawnImage, Template, TemplateContent,
 };
-use toon_provider::nostr::kinds::{
-    K_BLOB, K_IMAGE, K_LEASE_REQUEST, K_TAKEOVER, K_TEMPLATE, TOON_LABEL,
-};
+use toon_provider::nostr::kinds::{K_BLOB, K_IMAGE, K_TAKEOVER, K_TEMPLATE, TOON_LABEL};
+use toon_provider::nostr::lease_request::Op;
 use toon_provider::nostr::wire::*;
 
 fn spawn_content() -> SpawnContent {
@@ -191,30 +191,66 @@ fn the_three_spawn_image_forms_are_told_apart_and_a_fourth_is_refused() {
 }
 
 #[test]
-fn lease_request_envelope_round_trips_a_signed_event() {
-    let keys = nostr_sdk::Keys::generate();
-    let event = nostr_sdk::EventBuilder::new(
-        nostr_sdk::Kind::Custom(K_LEASE_REQUEST),
-        serde_json::to_string(&spawn_content()).unwrap(),
-    )
-    .tags([
-        nostr_sdk::Tag::custom(nostr_sdk::TagKind::custom("op"), ["spawn"]),
-        nostr_sdk::Tag::expiration(nostr_sdk::Timestamp::from(1_700_000_300u64)),
-    ])
-    .sign_with_keys(&keys)
-    .unwrap();
-
-    let envelope = LeaseRequestEnvelope {
-        request: event.clone(),
+fn a_lease_request_round_trips_and_writes_the_spec_shape() {
+    let provider = nostr_sdk::Keys::generate().public_key();
+    let request = LeaseRequest {
+        request_id: "ef".repeat(32),
+        op: Op::Spawn,
+        provider: provider.to_hex(),
+        expiration: 1_700_000_300,
+        continuation: Some(RootSecret::from_bytes([7u8; 32]).continuation_for(&provider)),
+        content: serde_json::to_value(spawn_content()).unwrap(),
     };
-    let json = serde_json::to_string(&envelope).unwrap();
-    let back: LeaseRequestEnvelope = serde_json::from_str(&json).unwrap();
-    assert_eq!(back.request, event);
-    assert!(
-        back.request.verify().is_ok(),
-        "the signature survives the trip"
+    let envelope = serde_json::to_value(LeaseRequestEnvelope { request }).unwrap();
+
+    // The shape spec §6.1 writes: six keys, all plain JSON, nothing signed.
+    let sent = &envelope["request"];
+    assert_eq!(sent["op"], "spawn");
+    assert_eq!(sent["provider"], provider.to_hex());
+    assert_eq!(sent["expiration"], 1_700_000_300u64);
+    assert_eq!(sent["content"]["ports"][0]["container_port"], 443);
+    assert_eq!(
+        sent["continuation"].as_str().unwrap().len(),
+        64,
+        "a token on the wire is 64 lowercase hex characters"
     );
-    assert_eq!(back.request.kind.as_u16(), K_LEASE_REQUEST);
+    assert!(sent.get("sig").is_none(), "nothing here is signed");
+
+    let back: LeaseRequestEnvelope = serde_json::from_value(envelope).unwrap();
+    assert_eq!(back.request.op, Op::Spawn);
+    assert_eq!(back.request.request_id, "ef".repeat(32));
+}
+
+#[test]
+fn a_lease_request_with_no_continuation_still_parses() {
+    // Absence is a legal SHAPE and a refused one: `not_tenant` on `status`
+    // and `terminate`, `invalid_request` on a spawn (spec §6.1). Parsing it
+    // as `null`-that-is-not-there is what lets the refusal be about the
+    // authority rather than about the spelling.
+    let provider = nostr_sdk::Keys::generate().public_key();
+    let body = json!({ "request": {
+        "request_id": "ef".repeat(32),
+        "op": "status",
+        "provider": provider.to_hex(),
+        "expiration": 1_700_000_300u64,
+        "content": { "workload_id": "ab".repeat(32) },
+    }});
+    let parsed: LeaseRequestEnvelope = serde_json::from_value(body).unwrap();
+    assert!(parsed.request.continuation.is_none());
+}
+
+#[test]
+fn a_continuation_token_is_sixty_four_lowercase_hex_characters() {
+    let good = json!("ab".repeat(32));
+    assert!(serde_json::from_value::<ContinuationToken>(good).is_ok());
+    for bad in ["AB".repeat(32), "ab".repeat(31), "zz".repeat(32)] {
+        let refused = serde_json::from_value::<ContinuationToken>(json!(bad.clone())).unwrap_err();
+        assert!(
+            !refused.to_string().contains(&bad),
+            "a refusal never quotes a token back: {}",
+            refused
+        );
+    }
 }
 
 #[test]
@@ -266,7 +302,6 @@ fn every_error_code_serialises_as_the_spec_writes_it() {
         (ErrorCode::Expired, "expired"),
         (ErrorCode::NotStandby, "not_standby"),
         (ErrorCode::NotRunning, "not_running"),
-        (ErrorCode::BadSignature, "bad_signature"),
         (ErrorCode::StaleRequest, "stale_request"),
         (ErrorCode::BadGrant, "bad_grant"),
     ];
@@ -287,14 +322,16 @@ fn extend_status_and_terminate_shapes_round_trip() {
         serde_json::from_str(&serde_json::to_string(&extend).unwrap()).unwrap();
     assert_eq!(back, extend);
 
-    // No `grant`: the field is optional and absent, never `null`, so the
-    // body a tenant signs is the one it has always signed (spec §6.5).
+    // One field: the workload. Authority is the request's Continuation
+    // Token, which is not part of the content (spec §6.1).
     let content = WorkloadContent {
         workload_id: "ab".repeat(32),
-        grant: None,
     };
     let rendered = serde_json::to_string(&content).unwrap();
-    assert!(!rendered.contains("grant"), "{}", rendered);
+    assert_eq!(
+        rendered,
+        json!({ "workload_id": "ab".repeat(32) }).to_string()
+    );
     let back: WorkloadContent = serde_json::from_str(&rendered).unwrap();
     assert_eq!(back, content);
 

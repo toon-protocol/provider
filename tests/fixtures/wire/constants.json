@@ -1,20 +1,18 @@
 {
+  "continuation": {
+    "derivation": "continuation(provider) = HKDF-SHA256(ikm = root, salt = empty, info = \"toon-network-continuation:\" || <provider pubkey, 64 lowercase hex>, L = 32)",
+    "request_id": "32 random bytes per request. These fixtures derive theirs from a label so the files are reproducible; a real tenant draws them at random."
+  },
   "fixture": {
     "case": "test_keys",
     "description": "The fixed world every other fixture was generated in: the clock, the test-only keys, the kind numbers and the signing rule.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "constants"
   },
-  "gateway": {
-    "public_key": "7962d45b38e8bcf82fa8efa8432a01f20c9a53e24c7d3f11df197cb8e70926da",
-    "secret_key": "7777777777777777777777777777777777777777777777777777777777777777"
-  },
   "kinds": {
     "K_BLOB": 30435,
     "K_EVICTION": 4433,
-    "K_GATEWAY_GRANT": 30438,
     "K_IMAGE": 30434,
-    "K_LEASE_REQUEST": 4432,
     "K_LISTING": 30432,
     "K_LIVENESS": 10433,
     "K_PROFILE": 10432,
@@ -26,8 +24,8 @@
   "lease_request_ttl_s": 60,
   "now": 1700000000,
   "other_tenant": {
-    "public_key": "3c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
-    "secret_key": "3333333333333333333333333333333333333333333333333333333333333333"
+    "continuation_at_provider": "322e0a76e5bd865675d4a2d9b1cbfcec78af4abd68576759ef79162fdabcf3f2",
+    "root_secret": "3333333333333333333333333333333333333333333333333333333333333333"
   },
   "primary_provider": {
     "public_key": "9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b",
@@ -44,6 +42,7 @@
     "secret_key": "4444444444444444444444444444444444444444444444444444444444444444"
   },
   "signing": {
+    "applies_to": "the published events only. A Lease Request is signed by nobody (spec §6.1, ADR 0016).",
     "aux_rand": "32 zero bytes, so every fixture signature is reproducible; real signers use fresh randomness",
     "id": "sha256 over the NIP-01 serialization [0, pubkey, created_at, kind, tags, content]",
     "sig": "BIP-340 Schnorr over the id, by the event's pubkey"
@@ -54,8 +53,8 @@
     "secret_key": "6666666666666666666666666666666666666666666666666666666666666666"
   },
   "tenant": {
-    "public_key": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
-    "secret_key": "1111111111111111111111111111111111111111111111111111111111111111"
+    "continuation_at_provider": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+    "root_secret": "1111111111111111111111111111111111111111111111111111111111111111"
   },
   "warning": "TEST-ONLY KEYS, published on purpose. Never fund, trust or reuse them."
 }

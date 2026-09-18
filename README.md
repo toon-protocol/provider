@@ -15,8 +15,8 @@ tenant paying through hops is served identically to one paying directly.
 ## Status
 
 Milestone 1 is in progress. Today the app serves the whole lease lifecycle —
-a paid **spawn** (a tenant-signed Lease Request in, a running workload and its
-access details out), a paid **extension**, and the free **status**,
+a paid **spawn** (a Lease Request carrying a Continuation Token in, a running
+workload and its access details out), a paid **extension**, and the free **status**,
 **termination** and **availability** routes — applies its **image policy** to
 every spawn and every availability answer, sweeps expired leases, evicts a
 lease on an operator's command with a signed Eviction Notice, publishes its
@@ -91,8 +91,8 @@ parts:
   is how many leases of that name may run at once, across its versions.
 - `handler_base_url`: where the *connector* reaches this app; the origin of
   every `handler_url` in the route table.
-- `nostr_private_key`: the provider's identity. A Lease Request is addressed
-  to its public key, and it signs everything this provider publishes.
+- `nostr_private_key`: the provider's identity. A Lease Request names its
+  public key, and it signs everything this provider publishes.
 - `ended_retention_s`: how long an ended lease is still answerable by
   `status` before the sweep forgets it. Default 86400 (one day).
 - `[image_policy]`: what this provider refuses to run — `deny_digests`
@@ -475,11 +475,23 @@ compose restart provider-connector relay-connector` and a rebuild of the
 
 ## Spawning
 
-The spawn body is `{ "request": <Lease Request> }`: a Nostr event of kind
-`K_LEASE_REQUEST` signed by the tenant, with tags `p` (this provider's
-pubkey — one per member for a [Standby Set](#standby-sets), which is the only
-request that may name more than this provider), `op` = `spawn` and
-`expiration` (at most 300 s after `created_at`), whose content is
+The spawn body is `{ "request": <Lease Request> }`. A Lease Request is a plain
+JSON object, signed by nobody (spec §6.1, ADR 0016):
+
+```json
+{ "request_id": "<32 random bytes, hex>", "op": "spawn",
+  "provider": "<this provider's pubkey, hex>", "expiration": 1700000060,
+  "continuation": "<32 bytes, hex>", "content": { … } }
+```
+
+`provider` is one key on every op, a spawn forming a
+[Standby Set](#standby-sets) included: the tenant sends one request to each
+member. `expiration` is at most 300 s ahead of now, `request_id` is what the
+replay set keys on, and `continuation` is the lease's **Continuation Token** —
+the secret the tenant minted for this lease and derived for this provider,
+`HKDF-SHA256(root, "toon-network-continuation:" || <provider pubkey hex>)`. A
+spawn brings the token its lease will keep; every later request presents the
+same one. The content of a spawn is
 
 ```json
 { "workload_id": "<32 random bytes, hex>",
@@ -569,17 +581,20 @@ asked for, is mounted at `/data`.
 
 A tenant that wants a workload to survive its provider buys a **Standby Set**:
 one primary that runs it, and one or more **Warm Standbys** that hold capacity
-to take it over (spec §7). The tenant signs **one** spawn, whose content
-carries the members' pubkeys primary-first under one `workload_id` —
+to take it over (spec §7). The tenant sends **one spawn content** to every
+member, carrying their pubkeys primary-first under one `workload_id` —
 
 ```json
 { "workload_id": "…", "image": { … }, "ssh_public_key": "…",
   "standby_set": ["<primary pubkey>", "<standby pubkey>", "…"] }
 ```
 
-— gives it one `p` tag per member, and posts the same bytes to each. Nothing
-in the request singles out a member: a provider's role is its **position** in
-the set together with the **route** the packet was paid on.
+— in a request of its own per member: each names only that member in
+`provider`, presents only that member's Continuation Token, and carries the
+`op` its route serves. Nothing in the content singles out a member: a
+provider's role is its **position** in the set together with the **route**
+the packet was paid on. Deriving the token per provider is what keeps the set
+honest — one member cannot act as the tenant against another.
 
 | Position | Route | What this provider does | Answer |
 |---|---|---|---|
@@ -822,20 +837,11 @@ spawned on another listing version: a lease keeps the price it started at
 **`POST /status`** (free) and **`POST /terminate`** (free) both take
 `{ "request": <Lease Request> }` with `op` = `status` or `terminate` and the
 content `{ "workload_id": "…" }`. The request is validated exactly as a
-spawn's is, replay included, and **the signer must be the lease's tenant** —
-anyone else is refused `not_tenant`. The one exception is `status` carrying a
-**Gateway Grant**: the content may add `"grant": <kind 30438 event>`, a
-delegation the tenant signed and published that lets **one** Workload
-Gateway read this lease (spec §3.1.3, §6.5). The provider verifies it out of
-the request alone — its `id` and `sig`, that the lease's tenant signed it,
-that its `d` and `workload_id` are the request's, that its `gateway` is the
-request's signer, and `now <= expires_at` — and refuses any failure
-`bad_grant`, one code for all of them; it never reads a grant from a relay
-and never stores one. `terminate` parses the field and ignores it. A tenant
-signs and publishes a grant with the [grant tool](tools/grant/README.md);
-because the grant is addressable on the workload id, publishing it again
-with a later expiry renews it and with another gateway rotates it, and there
-is no revocation before expiry other than respawning under a new workload id.
+spawn's is, replay included, and then **its `continuation` must be the token
+the lease was taken with** — compared in constant time, and refused
+`not_tenant` otherwise. A wrong token and an absent one are the same answer:
+neither is the party that took this lease, and an absent token must never
+read as an unauthenticated success.
 
 Status answers:
 
@@ -1112,14 +1118,14 @@ It proves, in order:
 2. **Availability**, the free route, end to end: `{ "would_run": true }` for
    the listing and the smoke's sshd image; 0 arrives at the provider and the
    provider connector's book does not move.
-3. **Spawn**, paid: a tenant-signed Lease Request buys
+3. **Spawn**, paid: a Lease Request carrying a Continuation Token buys
    `g.toon.provider.<listing>.v1.spawn`; the answer names the workload,
    `expires_at = now + lease_interval_s` and the access block; the
    workload is running on the host as a `toon-<id>` container by
    `reference@digest`.
 4. **Extension**, paid, unsigned: `expires_at` grows by exactly one Lease
-   Interval; `ssh -i <tenant key>` opens the workload; the free,
-   tenant-signed **status** reports `running`, the new expiry and the same
+   Interval; `ssh -i <tenant key>` opens the workload; the free **status**,
+   presenting the lease's token, reports `running`, the new expiry and the same
    workload id, role and access; the next Liveness counts the lease.
 5. **Expiry**: once `expires_at` passes and the sweep (≤ 30 s) has run, the
    workload is gone from the host and status reports
@@ -1213,7 +1219,9 @@ cargo run -- --config provider.toml
 Two Node tools live beside the app under `tools/`, each with its own
 `npm install` and `npm test`: the [directory publisher](tools/publisher/README.md),
 the provider's payer for relay writes, and the [grant tool](tools/grant/README.md),
-the tenant-side command that signs and publishes a Gateway Grant.
+the tenant-side command for a Workload Gateway's delegation. The grant tool
+still signs and publishes a kind `30438` event and so does not work against
+this app any more; TOON_Network#59 replaces it with a handover tool.
 
 ## License
 

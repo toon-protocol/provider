@@ -8,26 +8,14 @@
   "http_path": "/status",
   "request_body": {
     "request": {
-      "content": "{\"workload_id\":\"a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0\"}",
-      "created_at": 1700000000,
-      "id": "55ecd731934f8e487304fd0ce96861a7957b10345c4072baf462f03addedf01b",
-      "kind": 4432,
-      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
-      "sig": "6a0085eb76d8648899d8fe00b5289fb1247cdf8d539a54c7f97b67c643fcc0e3040c9d815bbe8bd5596cfc6ea8f11ed353ca9f9485c407b9a6185da294b1d9a2",
-      "tags": [
-        [
-          "p",
-          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
-        ],
-        [
-          "op",
-          "status"
-        ],
-        [
-          "expiration",
-          "1700000060"
-        ]
-      ]
+      "content": {
+        "workload_id": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "status",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "89928ff501b7c5d26e4d4d0e5a4c61a1ecf47be67bb194007b5b172246bfddc0"
     }
   },
   "response_body": {

@@ -20,13 +20,15 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use common::harness::{
-    config_for, error_of, harness, harness_from, hidden_config, listing, post, socks_proxy_of,
-    spawn, spawn_content, Harness, RequestSpec, HIDDEN_CONNECTOR_URL, INTERVAL, NOW, PUBLIC_IP,
+    config_for, error_of, harness, harness_from, hidden_config, listing, mint, post,
+    socks_proxy_of, spawn, spawn_content, Harness, RequestSpec, HIDDEN_CONNECTOR_URL, INTERVAL,
+    NOW, PUBLIC_IP,
 };
 use common::{
     has_tag, stub_registry, BackendCall, FakeBackend, FakeClock, FakeDirectory, FakeHiddenService,
 };
 use nostr_sdk::{EventBuilder, Keys, Kind, Tag, Timestamp};
+use toon_provider::nostr::continuation::ContinuationToken;
 use toon_provider::nostr::directory_events::{ProfileContent, HIDDEN_LABEL};
 use toon_provider::nostr::kinds::{K_LISTING, K_PROFILE, TOON_LABEL};
 use toon_provider::nostr::wire::{EvictionReason, SpawnContent};
@@ -104,34 +106,32 @@ async fn restart(h: &Harness, listings: Vec<Listing>) -> Harness {
 }
 
 /// Buy one lease on `basic.v1.spawn` and answer the spawn's response beside
-/// the tenant that holds it.
-async fn spawn_lease(h: &Harness, seed: u8) -> (Keys, SpawnContent, Value) {
+/// the Continuation Token it was taken with.
+async fn spawn_lease(h: &Harness, seed: u8) -> (ContinuationToken, SpawnContent, Value) {
     let content = spawn_content(seed);
-    let spec = RequestSpec::spawn(h, &content);
-    let tenant = Keys::parse(&spec.tenant.secret_key().to_secret_hex()).unwrap();
-    let (status, body) = spawn(h, spec.sign()).await;
+    let token = mint().continuation_for(&h.provider);
+    let spec = RequestSpec::spawn(h, &content).with_token(&token);
+    let (status, body) = spawn(h, spec.request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
-    (tenant, content, body)
+    (token, content, body)
 }
 
-/// `status` for a lease, signed by the tenant that holds it.
-async fn status_of(h: &Harness, tenant: &Keys, workload_id: &str) -> Value {
-    let spec = RequestSpec {
-        tenant: Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::about(h, "status", workload_id)
-    };
-    post(&h.app, "/status", json!({ "request": spec.sign() }))
+/// `status` for a lease, presenting the token it was taken with.
+async fn status_of(h: &Harness, token: &ContinuationToken, workload_id: &str) -> Value {
+    let spec = RequestSpec::about(h, "status", workload_id).with_token(token);
+    post(&h.app, "/status", json!({ "request": spec.request() }))
         .await
         .1
 }
 
-/// `terminate` for a lease, signed by the tenant that holds it.
-async fn terminate(h: &Harness, tenant: &Keys, workload_id: &str) -> (StatusCode, Value) {
-    let spec = RequestSpec {
-        tenant: Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::about(h, "terminate", workload_id)
-    };
-    post(&h.app, "/terminate", json!({ "request": spec.sign() })).await
+/// `terminate` for a lease, presenting the token it was taken with.
+async fn terminate(
+    h: &Harness,
+    token: &ContinuationToken,
+    workload_id: &str,
+) -> (StatusCode, Value) {
+    let spec = RequestSpec::about(h, "terminate", workload_id).with_token(token);
+    post(&h.app, "/terminate", json!({ "request": spec.request() })).await
 }
 
 /// `POST /operator/evict` on the operator router, as `toon-provider evict`
@@ -270,7 +270,7 @@ async fn a_provider_that_is_not_hidden_publishes_exactly_what_it_did_before() {
 #[tokio::test]
 async fn a_spawn_gets_one_anyone_address_carrying_its_ssh_port_and_every_port() {
     let h = hidden_harness(vec![listing("basic", 1, 2)]).await;
-    let (tenant, content, body) = spawn_lease(&h, 1).await;
+    let (token, content, body) = spawn_lease(&h, 1).await;
 
     // One address, for THIS workload, mapping the SSH forward and the one
     // port the spawn published — each on the number the tenant was handed,
@@ -288,7 +288,7 @@ async fn a_spawn_gets_one_anyone_address_carrying_its_ssh_port_and_every_port() 
 
     // And `status` answers the same one: the lease is reached where the
     // spawn said it is.
-    let status = status_of(&h, &tenant, &content.workload_id).await;
+    let status = status_of(&h, &token, &content.workload_id).await;
     assert_eq!(status["state"], "running");
     assert_eq!(status["access"]["host"], host);
     mentions_no_ip(&status);
@@ -304,7 +304,7 @@ async fn a_spawn_gets_one_anyone_address_carrying_its_ssh_port_and_every_port() 
 #[tokio::test]
 async fn a_restart_re_establishes_the_same_address_rather_than_inventing_one() {
     let h = hidden_harness(vec![listing("basic", 1, 2)]).await;
-    let (tenant, content, body) = spawn_lease(&h, 1).await;
+    let (token, content, body) = spawn_lease(&h, 1).await;
     let host = body["access"]["host"].as_str().unwrap().to_string();
 
     // The key the daemon gave is on the lease table, which is the only
@@ -328,7 +328,7 @@ async fn a_restart_re_establishes_the_same_address_rather_than_inventing_one() {
         restarted.hidden_service.created().is_empty(),
         "a live lease is not given a different address"
     );
-    let status = status_of(&restarted, &tenant, &content.workload_id).await;
+    let status = status_of(&restarted, &token, &content.workload_id).await;
     assert_eq!(status["access"]["host"], host, "the same address");
     mentions_no_ip(&status);
 }
@@ -340,7 +340,7 @@ async fn a_live_lease_that_kept_no_key_is_given_a_fresh_address() {
     // unreachable: it gets a new address, and `status` is where its tenant
     // reads it.
     let h = hidden_harness(vec![listing("basic", 1, 2)]).await;
-    let (tenant, content, _) = spawn_lease(&h, 1).await;
+    let (token, content, _) = spawn_lease(&h, 1).await;
     forget_the_stored_key(&h.state_path);
 
     let restarted = restart(&h, vec![listing("basic", 1, 2)]).await;
@@ -349,7 +349,7 @@ async fn a_live_lease_that_kept_no_key_is_given_a_fresh_address() {
         restarted.hidden_service.created(),
         vec![(content.workload_id.clone(), lease_ports())]
     );
-    let status = status_of(&restarted, &tenant, &content.workload_id).await;
+    let status = status_of(&restarted, &token, &content.workload_id).await;
     let host = status["access"]["host"].as_str().unwrap();
     assert!(toon_provider::is_anyone_host(host), "{}", status);
     mentions_no_ip(&status);
@@ -363,7 +363,7 @@ async fn a_lease_whose_address_cannot_be_re_established_is_left_with_none() {
     // something this provider cannot account for, so `status` answers no
     // `access` at all — the truth, and what tells the tenant to look.
     let h = hidden_harness(vec![listing("basic", 1, 2)]).await;
-    let (tenant, content, _) = spawn_lease(&h, 1).await;
+    let (token, content, _) = spawn_lease(&h, 1).await;
     rewrite_the_stored_key(&h.state_path, "ED25519-V3:somebody-elses");
 
     let restarted = restart(&h, vec![listing("basic", 1, 2)]).await;
@@ -372,7 +372,7 @@ async fn a_lease_whose_address_cannot_be_re_established_is_left_with_none() {
         restarted.hidden_service.created().is_empty(),
         "and did not paper over it with a second address beside the daemon's"
     );
-    let status = status_of(&restarted, &tenant, &content.workload_id).await;
+    let status = status_of(&restarted, &token, &content.workload_id).await;
     assert_eq!(status["state"], "running", "{}", status);
     assert!(
         status.get("access").is_none(),
@@ -443,12 +443,12 @@ fn forget_the_stored_key(state_path: &str) {
 #[tokio::test]
 async fn expiry_terminate_and_eviction_each_destroy_the_leases_address_once() {
     let h = hidden_harness(vec![listing("basic", 1, 3)]).await;
-    let (tenant, terminated, _) = spawn_lease(&h, 1).await;
+    let (token, terminated, _) = spawn_lease(&h, 1).await;
     let (_, evicted, _) = spawn_lease(&h, 2).await;
     let (_, expired, _) = spawn_lease(&h, 3).await;
     assert_eq!(h.hidden_service.live().len(), 3);
 
-    let (status, body) = terminate(&h, &tenant, &terminated.workload_id).await;
+    let (status, body) = terminate(&h, &token, &terminated.workload_id).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(
         h.hidden_service.destroyed(),
@@ -490,11 +490,11 @@ async fn a_destroy_that_fails_leaves_the_lease_pending_and_a_later_sweep_retries
     // lease is over, but it is not reported destroyed until everything it
     // held is actually gone.
     let h = hidden_harness(vec![listing("basic", 1, 2)]).await;
-    let (tenant, content, _) = spawn_lease(&h, 1).await;
+    let (token, content, _) = spawn_lease(&h, 1).await;
 
     h.hidden_service
         .fail_next_destroy("the control port is not answering");
-    let (status, body) = terminate(&h, &tenant, &content.workload_id).await;
+    let (status, body) = terminate(&h, &token, &content.workload_id).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["state"], json!({ "ended": "termination" }));
 
@@ -529,14 +529,14 @@ async fn a_spawn_whose_address_the_daemon_refuses_starts_nothing() {
     let h = hidden_harness(vec![listing("basic", 1, 2)]).await;
     h.hidden_service.fail_next_create("ADD_ONION refused");
     let content = spawn_content(1);
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).request()).await;
     assert_eq!(status, StatusCode::CONFLICT, "{}", body);
     assert_eq!(error_of(&body), "no_capacity");
     assert!(h.backend.created().is_empty(), "no workload was made");
     assert!(persisted_leases(&h.state_path).is_empty(), "no slot held");
 
     // And the id is free again, so the tenant's next try succeeds.
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(
         body["access"]["host"],
@@ -551,7 +551,7 @@ async fn a_workload_that_would_not_start_takes_its_address_with_it() {
     let h = hidden_harness(vec![listing("basic", 1, 2)]).await;
     h.backend.fail_next_create("no room on the daemon");
     let content = spawn_content(1);
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).request()).await;
     assert_eq!(status, StatusCode::CONFLICT, "{}", body);
     assert_eq!(error_of(&body), "no_capacity");
     assert_eq!(h.hidden_service.created().len(), 1);
@@ -619,12 +619,12 @@ async fn a_self_stopped_primary_keeps_its_address() {
         standby_set: Some(set.iter().map(|k| k.to_hex()).collect()),
         ..spawn_content(1)
     };
-    let spec = RequestSpec::spawn(&h, &content).addressed_to(&set);
-    let tenant = Keys::parse(&spec.tenant.secret_key().to_secret_hex()).unwrap();
+    let token = mint().continuation_for(&h.provider);
+    let spec = RequestSpec::spawn(&h, &content).with_token(&token);
     let (status, body) = post(
         &h.app,
         "/listings/warm/v1/spawn",
-        json!({ "request": spec.sign() }),
+        json!({ "request": spec.request() }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", body);
@@ -644,7 +644,7 @@ async fn a_self_stopped_primary_keeps_its_address() {
         "{:?}",
         h.backend.calls()
     );
-    let stopped = status_of(&h, &tenant, &content.workload_id).await;
+    let stopped = status_of(&h, &token, &content.workload_id).await;
     assert_eq!(stopped["state"], "stopped");
     assert!(stopped.get("access").is_none(), "{}", stopped);
 
@@ -659,7 +659,7 @@ async fn a_self_stopped_primary_keeps_its_address() {
     );
 
     // Only the ENDING takes it: the lease is still a lease until then.
-    let (status, body) = terminate(&h, &tenant, &content.workload_id).await;
+    let (status, body) = terminate(&h, &token, &content.workload_id).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(
         h.hidden_service.destroyed(),
@@ -680,12 +680,12 @@ async fn a_reservation_has_no_address_until_the_takeover_it_wins_starts_its_work
         standby_set: Some(set.iter().map(|k| k.to_hex()).collect()),
         ..spawn_content(1)
     };
-    let spec = RequestSpec::spawn(&h, &content).addressed_to(&set);
-    let tenant = Keys::parse(&spec.tenant.secret_key().to_secret_hex()).unwrap();
+    let token = mint().continuation_for(&h.provider);
+    let spec = RequestSpec::standby(&h, &content).with_token(&token);
     let (status, body) = post(
         &h.app,
         "/listings/warm/v1/standby",
-        json!({ "request": spec.sign() }),
+        json!({ "request": spec.request() }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", body);
@@ -695,7 +695,7 @@ async fn a_reservation_has_no_address_until_the_takeover_it_wins_starts_its_work
         h.hidden_service.created().is_empty(),
         "a reservation is given no address"
     );
-    let reserved = status_of(&h, &tenant, &content.workload_id).await;
+    let reserved = status_of(&h, &token, &content.workload_id).await;
     assert_eq!(reserved["state"], "reserved");
     assert!(reserved.get("access").is_none(), "{}", reserved);
 
@@ -714,7 +714,7 @@ async fn a_reservation_has_no_address_until_the_takeover_it_wins_starts_its_work
         vec![(content.workload_id.clone(), lease_ports())],
         "the winner's start makes the address a spawn would have made"
     );
-    let won = status_of(&h, &tenant, &content.workload_id).await;
+    let won = status_of(&h, &token, &content.workload_id).await;
     assert_eq!(won["state"], "running", "{}", won);
     assert_eq!(won["role"], "standby", "the role never changes");
     assert_eq!(
@@ -769,7 +769,7 @@ async fn a_public_providers_workload_carries_no_egress_policy() {
     // hidden fills nothing in, so today's networking is what the backend
     // gets; a hidden lease's is filled from `HiddenService::egress_for`.
     let h = harness().await;
-    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).sign()).await;
+    let (status, body) = spawn(&h, RequestSpec::spawn(&h, &spawn_content(1)).request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["access"]["host"], PUBLIC_IP);
     let created = h.backend.created();
@@ -784,10 +784,10 @@ async fn a_provider_that_is_not_hidden_touches_the_port_at_no_point_of_a_lease()
     // nothing about hiding: `public_ip` is the host all the way through and
     // the `HiddenService` beside it is never asked for anything.
     let h = harness().await;
-    let (tenant, content, body) = spawn_lease(&h, 1).await;
+    let (token, content, body) = spawn_lease(&h, 1).await;
     assert_eq!(body["access"]["host"], PUBLIC_IP);
 
-    let running = status_of(&h, &tenant, &content.workload_id).await;
+    let running = status_of(&h, &token, &content.workload_id).await;
     assert_eq!(running["access"]["host"], PUBLIC_IP);
     assert_eq!(
         persisted(&h, &content.workload_id).hidden_address,
@@ -795,7 +795,7 @@ async fn a_provider_that_is_not_hidden_touches_the_port_at_no_point_of_a_lease()
         "and nothing about an address is written down"
     );
 
-    let (status, body) = terminate(&h, &tenant, &content.workload_id).await;
+    let (status, body) = terminate(&h, &token, &content.workload_id).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     h.service.sweep_expired_leases(NOW + INTERVAL).await;
     assert!(h.hidden_service.created().is_empty());

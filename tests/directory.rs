@@ -18,15 +18,16 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use nostr_sdk::{EventBuilder, Keys, Kind, PublicKey, Tag, TagKind, Timestamp};
+use nostr_sdk::{Keys, PublicKey};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+use common::harness::RequestSpec;
 use common::{has_tag, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory};
 use toon_provider::nostr::directory_events::{
     ListingContent, LivenessContent, ProfileContent, Settlement, LIVENESS_EXPIRY_CADENCES,
 };
-use toon_provider::nostr::kinds::{K_LEASE_REQUEST, K_LISTING, K_LIVENESS, K_PROFILE, TOON_LABEL};
+use toon_provider::nostr::kinds::{K_LISTING, K_LIVENESS, K_PROFILE, TOON_LABEL};
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, Resources, SpawnContent};
 use toon_provider::provider::ImagePolicyConfig;
 use toon_provider::{router, Clock, Directory, Listing, ProviderConfig, ProviderService};
@@ -526,20 +527,30 @@ async fn query_liveness_answers_for_the_provider_that_published_it_and_nobody_el
 // ── what must never be published ────────────────────────────────────────────
 
 #[tokio::test]
-async fn a_lease_request_is_never_published() {
+async fn nothing_a_tenant_sent_is_ever_published() {
+    // A Lease Request is not a Nostr event any more (ADR 0016), so there is
+    // no tenant-signed thing here to leak — and the lease it bought must not
+    // reach a relay by any other route either. Everything published is the
+    // PROVIDER's own, carries the label, and says nothing about this lease.
     let h = harness().await;
     spawn_a_lease(&h).await;
     h.service.publish_directory().await.unwrap();
     h.service.publish_liveness(NOW).await.unwrap();
 
-    assert!(
-        h.directory.of_kind(K_LEASE_REQUEST).is_empty(),
-        "a Lease Request travels in a request body and is never published"
-    );
     for event in h.directory.published() {
+        assert_eq!(
+            event.pubkey, h.provider,
+            "a provider publishes only what it signs itself: {:?}",
+            event.kind
+        );
         assert!(
             has_tag(&event, &["L", TOON_LABEL]),
             "every directory event carries the toon.network label: {:?}",
+            event.kind
+        );
+        assert!(
+            !event.content.contains(&"ab".repeat(32)),
+            "the workload id of a live lease appears in nothing published: {:?}",
             event.kind
         );
     }
@@ -564,20 +575,7 @@ async fn spawn_a_lease(h: &Harness) -> (StatusCode, Value) {
         template: None,
     };
 
-    let tenant = Keys::generate();
-    let request = EventBuilder::new(
-        Kind::Custom(K_LEASE_REQUEST),
-        serde_json::to_value(&content).unwrap().to_string(),
-    )
-    .tags([
-        Tag::public_key(h.provider),
-        Tag::custom(TagKind::custom("op"), ["spawn"]),
-        Tag::expiration(Timestamp::from(h.clock.now() + 60)),
-    ])
-    .custom_created_at(Timestamp::from(h.clock.now()))
-    .sign_with_keys(&tenant)
-    .unwrap();
-
+    let request = RequestSpec::new(h.provider, h.clock.now(), "spawn", json!(content)).request();
     let body = json!({ "request": request });
     let response = h
         .app

@@ -5,8 +5,8 @@
 //! JSON request into `operator_router`, JSON out — asserting on the answer,
 //! on what the faked `ComputeBackend` was asked to do, and on the Eviction
 //! Notice the faked `Directory` was handed. Never on the provider's internal
-//! state. The operator endpoint carries no signature, so unlike every other
-//! route here there is no Lease Request to sign.
+//! state. The operator endpoint is not a tenant route, so unlike every other
+//! route here there is no Lease Request and no Continuation Token.
 
 mod common;
 
@@ -16,9 +16,10 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use common::harness::{
-    error_of, harness, post, spawn, spawn_content, workload_id, Harness, RequestSpec,
+    error_of, harness, mint, post, spawn, spawn_content, workload_id, Harness, RequestSpec,
 };
 use common::{has_tag, BackendCall};
+use toon_provider::nostr::continuation::ContinuationToken;
 use toon_provider::nostr::directory_events::EvictionContent;
 use toon_provider::nostr::kinds::{K_EVICTION, TOON_LABEL};
 use toon_provider::operator_router;
@@ -26,7 +27,7 @@ use toon_provider::operator_router;
 /// A lease that exists, spawned exactly as `tests/lease_lifecycle.rs` does.
 async fn spawn_lease(h: &Harness, seed: u8) -> String {
     let content = spawn_content(seed);
-    let (status, body) = spawn(h, RequestSpec::spawn(h, &content).sign()).await;
+    let (status, body) = spawn(h, RequestSpec::spawn(h, &content).request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     content.workload_id
 }
@@ -69,12 +70,9 @@ async fn evict_for(
     .await
 }
 
-async fn status_of(h: &Harness, tenant: &nostr_sdk::Keys, workload_id: &str) -> Value {
-    let spec = RequestSpec {
-        tenant: nostr_sdk::Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::about(h, "status", workload_id)
-    };
-    let (_, body) = post(&h.app, "/status", json!({ "request": spec.sign() })).await;
+async fn status_of(h: &Harness, token: &ContinuationToken, workload_id: &str) -> Value {
+    let spec = RequestSpec::about(h, "status", workload_id).with_token(token);
+    let (_, body) = post(&h.app, "/status", json!({ "request": spec.request() })).await;
     body
 }
 
@@ -125,16 +123,21 @@ async fn eviction_publishes_exactly_one_signed_eviction_notice() {
 #[tokio::test]
 async fn status_after_eviction_reports_ended_eviction_and_no_access() {
     let h = harness().await;
-    let tenant_spec = RequestSpec::spawn(&h, &spawn_content(1));
-    let tenant = tenant_spec.tenant.clone();
+    let token = mint().continuation_for(&h.provider);
     let content = spawn_content(1);
-    let (status, body) = spawn(&h, tenant_spec.sign()).await;
+    let (status, body) = spawn(
+        &h,
+        RequestSpec::spawn(&h, &content)
+            .with_token(&token)
+            .request(),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     let workload_id = content.workload_id;
 
     evict_for(&h, &workload_id, "policy", "").await;
 
-    let status_body = status_of(&h, &tenant, &workload_id).await;
+    let status_body = status_of(&h, &token, &workload_id).await;
     assert_eq!(status_body["state"], json!({ "ended": "eviction" }));
     assert!(
         status_body["access"].is_null(),

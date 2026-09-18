@@ -1,0 +1,20 @@
+{
+  "algorithm": "HKDF-SHA256 (RFC 5869)",
+  "at_other_provider": {
+    "continuation": "6cb520deda69804e609a7acd5d2bbb6f0de422ece143d417a14e1396d75955e1",
+    "provider_public_key": "9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b"
+  },
+  "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+  "fixture": {
+    "case": "vector",
+    "description": "The Continuation Token derivation (spec §6.1): HKDF-SHA256 over the tenant's 32-byte root secret, with an empty salt and an ASCII `info` of the domain string followed by the provider's 64 lowercase hex public key, for 32 bytes of output. A tenant derives one token per provider from one root secret per lease; the provider stores the token and nothing else about the tenant. `at_other_provider` is the same root secret against a DIFFERENT provider key, which is why one member of a Standby Set cannot act as the tenant against another (§7).",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "continuation"
+  },
+  "info_encoding": "the prefix above, as ASCII, followed by the provider's public key as 64 lowercase hex characters",
+  "info_prefix": "toon-network-continuation:",
+  "output_bytes": 32,
+  "provider_public_key": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+  "root_secret": "1111111111111111111111111111111111111111111111111111111111111111",
+  "salt": "empty (RFC 5869 then extracts with 32 zero bytes)"
+}

@@ -97,7 +97,7 @@ async fn spawn_on(h: &Harness, version: u32, seed: u8) -> (StatusCode, Value) {
     post(
         &h.app,
         &format!("/listings/basic/v{}/spawn", version),
-        json!({ "request": RequestSpec::spawn(h, &content).sign() }),
+        json!({ "request": RequestSpec::spawn(h, &content).request() }),
     )
     .await
 }

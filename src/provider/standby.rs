@@ -1,14 +1,15 @@
 // Standby Sets: which role a spawn gives THIS provider, and what the lease it
 // creates remembers about the set (spec §6.2 step 3, §7).
 //
-// A tenant forms a Standby Set by signing ONE spawn — `standby_set` lists the
-// members' public keys, primary first, under one `workload_id` — and posting
-// that same signed request to every member. So nothing in the request says
-// what any single provider should do; the role comes from two things
-// together: this provider's POSITION in the list, and WHICH ROUTE the request
-// arrived on. Index 0 runs the workload and arrives on `.spawn`; every other
-// index holds capacity and arrives on `.standby`. A mismatch between the two
-// is a mis-addressed spawn and does nothing (spec §6.2 step 3).
+// A tenant forms a Standby Set by sending one spawn to each member —
+// `standby_set` lists the members' public keys, primary first, under one
+// `workload_id`, and every member gets a request naming only itself. The
+// CONTENT is still the same at every member, so nothing in it says what any
+// single provider should do; the role comes from two things together: this
+// provider's POSITION in the list, and WHICH ROUTE the request arrived on.
+// Index 0 runs the workload and arrives on `.spawn`; every other index holds
+// capacity and arrives on `.standby`. A mismatch between the two is a
+// mis-addressed spawn and does nothing (spec §6.2 step 3).
 //
 // Membership never changes: a new set is a new spawn under a new workload id
 // (spec §7), so nothing here ever updates a set.
@@ -16,18 +17,31 @@
 use nostr_sdk::PublicKey;
 use serde::{Deserialize, Serialize};
 
+use crate::nostr::lease_request::Op;
 use crate::nostr::wire::{ErrorCode, ErrorResponse, Role};
 
 /// Which of the two paid spawn routes a request arrived on.
 ///
 /// Not a detail of the HTTP layer: the route is half of the role rule above,
-/// because the request itself is identical at every member of the set.
+/// because a spawn's CONTENT is identical at every member of the set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnRoute {
     /// `<addr>.<listing>.v<n>.spawn`, at the listing's `price`.
     Spawn,
     /// `<addr>.<listing>.v<n>.standby`, at its `standby_price`.
     Standby,
+}
+
+impl SpawnRoute {
+    /// The `op` a Lease Request must carry to be served here (spec §6.1).
+    /// One op per route, so a request meant to reserve capacity can never be
+    /// served as one meant to run a workload.
+    pub(super) fn op(self) -> Op {
+        match self {
+            SpawnRoute::Spawn => Op::Spawn,
+            SpawnRoute::Standby => Op::Standby,
+        }
+    }
 }
 
 /// The Standby Set a lease serves in, kept with the lease (spec §7).
@@ -88,14 +102,12 @@ fn invalid(message: impl Into<String>) -> ErrorResponse {
 /// than one this provider could serve at another time or price. The refusal
 /// is still billed (ADR 0003), so each says exactly what was wrong.
 ///
-/// `addressees` are the request's `p` tags. A spawn forming a Standby Set is
-/// addressed to every member — that is what lets ONE signed request reach all
-/// of them (§6.1) — so the `p` tags must name members and nobody else; every
-/// other request names exactly this provider and nobody else.
+/// Who the request was addressed to is not asked here any more: a Lease
+/// Request names exactly one provider on every op (§6.1), and step 1 has
+/// already refused one that names anybody but this provider.
 pub(super) fn membership(
     standby_set: Option<&[String]>,
     provider: &PublicKey,
-    addressees: &[PublicKey],
     route: SpawnRoute,
 ) -> Result<Membership, ErrorResponse> {
     let Some(members) = standby_set else {
@@ -103,12 +115,6 @@ pub(super) fn membership(
         if route == SpawnRoute::Standby {
             return Err(invalid(
                 "a spawn with no standby_set buys a standalone lease; buy it on .spawn",
-            ));
-        }
-        if addressees.len() > 1 {
-            return Err(invalid(
-                "a spawn with no standby_set names one provider; this one is addressed to \
-                 more than this provider",
             ));
         }
         return Ok(Membership {
@@ -124,13 +130,6 @@ pub(super) fn membership(
              providers the set names",
         ));
     };
-    if let Some(stranger) = addressees.iter().find(|a| !keys.contains(a)) {
-        return Err(invalid(format!(
-            "the spawn is addressed to {}, which the standby_set does not name",
-            stranger.to_hex()
-        )));
-    }
-
     let role = match (index, route) {
         (0, SpawnRoute::Spawn) => Role::Primary,
         (0, SpawnRoute::Standby) => {
@@ -200,7 +199,7 @@ mod tests {
         route: SpawnRoute,
     ) -> Result<Membership, ErrorResponse> {
         let members: Vec<String> = set.iter().map(|k| k.to_hex()).collect();
-        membership(Some(&members), me, &[*me], route)
+        membership(Some(&members), me, route)
     }
 
     #[test]
@@ -241,15 +240,15 @@ mod tests {
         // `[]` is not "a set of one, me": a spawn with no members has no
         // index 0 to be the primary, so it describes no Standby Set at all.
         let me = key().public_key();
-        assert!(membership(Some(&[]), &me, &[me], SpawnRoute::Spawn).is_err());
-        assert!(membership(Some(&[]), &me, &[me], SpawnRoute::Standby).is_err());
+        assert!(membership(Some(&[]), &me, SpawnRoute::Spawn).is_err());
+        assert!(membership(Some(&[]), &me, SpawnRoute::Standby).is_err());
     }
 
     #[test]
     fn a_member_listed_twice_has_no_single_position() {
         let me = key().public_key();
         let hex = me.to_hex();
-        assert!(membership(Some(&[hex.clone(), hex]), &me, &[me], SpawnRoute::Spawn).is_err());
+        assert!(membership(Some(&[hex.clone(), hex]), &me, SpawnRoute::Spawn).is_err());
     }
 
     #[test]
@@ -257,29 +256,26 @@ mod tests {
         // A tenant may ship either spelling; the record keeps hex.
         let me = key().public_key();
         let set = vec![me.to_bech32().unwrap(), key().public_key().to_hex()];
-        let mine = membership(Some(&set), &me, &[me], SpawnRoute::Spawn).unwrap();
+        let mine = membership(Some(&set), &me, SpawnRoute::Spawn).unwrap();
         assert_eq!(mine.set.unwrap().members[0], me.to_hex());
     }
 
     #[test]
     fn a_standalone_spawn_belongs_to_no_set() {
         let me = key().public_key();
-        let mine = membership(None, &me, &[me], SpawnRoute::Spawn).unwrap();
+        let mine = membership(None, &me, SpawnRoute::Spawn).unwrap();
         assert_eq!(mine.role, Role::Standalone);
         assert!(mine.set.is_none());
         // …and buys nothing on the standby route.
-        assert!(membership(None, &me, &[me], SpawnRoute::Standby).is_err());
+        assert!(membership(None, &me, SpawnRoute::Standby).is_err());
     }
 
     #[test]
-    fn a_spawn_addressed_beyond_its_set_is_refused() {
-        let me = key().public_key();
-        let peer = key().public_key();
-        let stranger = key().public_key();
-        let set = vec![me.to_hex(), peer.to_hex()];
-        assert!(membership(Some(&set), &me, &[me, peer], SpawnRoute::Spawn).is_ok());
-        assert!(membership(Some(&set), &me, &[me, stranger], SpawnRoute::Spawn).is_err());
-        // The same rule for a standalone spawn: one provider, no others.
-        assert!(membership(None, &me, &[me, stranger], SpawnRoute::Spawn).is_err());
+    fn each_route_serves_one_op() {
+        // A request meant to reserve capacity can never be served as one
+        // meant to run a workload: the op says which, and `lease_request`
+        // refuses a mismatch before this module is reached (spec §6.1).
+        assert_eq!(SpawnRoute::Spawn.op(), Op::Spawn);
+        assert_eq!(SpawnRoute::Standby.op(), Op::Standby);
     }
 }

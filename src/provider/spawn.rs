@@ -2,15 +2,17 @@
 // Interval (spec §6.2).
 //
 // ONE function serves both paid spawn routes, because they are one request:
-// a tenant forming a Standby Set signs a single spawn and posts it to every
-// member, and only the route it arrives on says whether this provider was
-// meant to run the workload (`.spawn`) or to hold capacity for it
-// (`.standby`). Splitting them would be two copies of the same six
-// validation steps that could drift apart on the one thing they must agree
-// about — what the set means.
+// a tenant forming a Standby Set sends the same spawn content to every
+// member, and only the route it arrives on — with the `op` that names it —
+// says whether this provider was meant to run the workload (`.spawn`) or to
+// hold capacity for it (`.standby`). Splitting them would be two copies of
+// the same six validation steps that could drift apart on the one thing they
+// must agree about — what the set means.
 //
 // Validation runs in the spec's order and refuses with the FIRST failing
-// code: (1) the Lease Request — signature, addressee, freshness, replay;
+// code: (1) the Lease Request — shape, op, addressee, freshness, replay (a
+// spawn has no stored Continuation Token to check against yet: it brings
+// the one the lease will keep);
 // (2) the listing version — it must exist AND be the one on sale
 // (`ProviderConfig::sellable_listing`, shared with `availability`), it must
 // price standbys when the route is `.standby`, and the volume and ports must
@@ -47,7 +49,7 @@ use super::standby::{self, SpawnRoute};
 use crate::compute::{container_name, ContainerConfig, EgressPolicy, PortMapping};
 use crate::hidden_service::HiddenAddress;
 use crate::nostr::image_events::SpawnImage;
-use crate::nostr::lease_request::{self, Op};
+use crate::nostr::lease_request;
 use crate::nostr::wire::{
     is_lower_hex, Access, ErrorCode, ErrorResponse, PortAccess, PortRequest, Role, SpawnContent,
     SpawnResponse,
@@ -99,12 +101,16 @@ async fn serve(
     let request = lease_request::accept(
         body,
         &state.keys.public_key(),
-        Op::Spawn,
+        route.op(),
         now,
         &state.accepted_requests,
     )?;
-    let content: SpawnContent = serde_json::from_str(&request.content)
+    let content: SpawnContent = serde_json::from_value(request.content.clone())
         .map_err(|e| invalid(format!("spawn content: {}", e)))?;
+    // Step 4 is skipped on a spawn — there is no stored token to compare
+    // with — so the token this request presented becomes the lease's, and
+    // every later request about it presents the same one (spec §6.1).
+    let continuation = lease_request::continuation_to_store(&request)?;
     check_shape(&content)?;
     // A Hidden Provider with no daemon to make addresses on starts no lease
     // (spec §10). Before the slot and before the money's work: the free
@@ -138,7 +144,6 @@ async fn serve(
     let membership = standby::membership(
         content.standby_set.as_deref(),
         &state.keys.public_key(),
-        &request.addressees,
         route,
     )?;
     let role = membership.role;
@@ -147,7 +152,6 @@ async fn serve(
     // ── 4. the workload id, 5. the image, 6. capacity ───────────────────
     // Held under one lock with the insert, so two spawns racing for the
     // last slot or the same id cannot both pass.
-    let tenant_hex = request.tenant.to_hex();
     let ssh_port;
     let ports;
     let id;
@@ -227,7 +231,7 @@ async fn serve(
             LeaseRecord {
                 id,
                 workload_id: content.workload_id.clone(),
-                tenant: tenant_hex.clone(),
+                continuation: continuation.clone(),
                 listing: listing.name.clone(),
                 listing_version: listing.version,
                 role,
@@ -280,11 +284,10 @@ async fn serve(
     // the tenant bought.
     if reserving {
         info!(
-            "reserved {} ({} v{}) for tenant {} as a Warm Standby until {}",
+            "reserved {} ({} v{}) as a Warm Standby until {}",
             content.workload_id,
             listing.name,
             listing.version,
-            tenant_hex,
             now + listing.lease_interval_s
         );
         return Ok(SpawnResponse {
@@ -300,11 +303,10 @@ async fn serve(
     // shared with `settle`): a standby that won starts from the image
     // exactly as this spawn does (ADR 0010).
     info!(
-        "spawning workload {} ({} v{}) for tenant {} as {}",
+        "spawning workload {} ({} v{}) as {}",
         content.workload_id,
         listing.name,
         listing.version,
-        tenant_hex,
         container_name(id)
     );
     let launch = Launch {

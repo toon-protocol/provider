@@ -60,7 +60,7 @@ async fn every_workload_of_a_hidden_provider_carries_the_egress_policy_the_port_
 
     for seed in [1, 2] {
         let content = spawn_content(seed);
-        let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).sign()).await;
+        let (status, body) = spawn(&h, RequestSpec::spawn(&h, &content).request()).await;
         assert_eq!(status, StatusCode::OK, "{}", body);
     }
 

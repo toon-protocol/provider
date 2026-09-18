@@ -1,16 +1,19 @@
-//! Standby Sets: one signed spawn, two providers, two roles — and what a
+//! Standby Sets: one spawn content, two providers, two roles — and what a
 //! Warm Standby's reservation is worth once it exists (spec §6.2 step 3,
 //! §6.7, §7).
 //!
-//! The first test runs TWO in-process providers over ONE signed request,
-//! because that is the whole of what a Standby Set is: the tenant sends the
-//! same bytes to every member, and each learns its role from its own position
-//! in the set and from the route the request arrived on. Everything after it
-//! is what the reservation then costs this provider — it holds a capacity
-//! slot nobody else is sold, it survives a restart, it expires unpaid, and
-//! its tenant can give it back — and nearly every assertion ends with the
-//! fake backend having been asked for NOTHING, since a standby runs nothing
-//! until a Takeover.
+//! The first tests run TWO in-process providers over ONE set, because that is
+//! the whole of what a Standby Set is: the tenant sends the same CONTENT to
+//! every member, and each learns its role from its own position in the set
+//! and from the route the request arrived on. Each member gets a request of
+//! its own, naming only itself and presenting only its own Continuation
+//! Token, derived from the one root secret the tenant minted for the lease
+//! (spec §6.1) — so one member cannot act as the tenant against another.
+//! Everything after that is what the reservation then costs this provider —
+//! it holds a capacity slot nobody else is sold, it survives a restart, it
+//! expires unpaid, and its tenant can give it back — and nearly every
+//! assertion ends with the fake backend having been asked for NOTHING, since
+//! a standby runs nothing until a Takeover.
 
 mod common;
 
@@ -19,10 +22,11 @@ use nostr_sdk::{Keys, PublicKey};
 use serde_json::{json, Value};
 
 use common::harness::{
-    digest, error_of, harness_with, listing, post, restart, spawn_content, workload_id, Harness,
-    RequestSpec, INTERVAL, NOW,
+    digest, error_of, harness_with, listing, mint, post, restart, spawn_content, workload_id,
+    Harness, RequestSpec, INTERVAL, NOW,
 };
 use common::{stub_registry, BackendCall, FakeBackend, FakeDirectory};
+use toon_provider::nostr::continuation::{ContinuationToken, RootSecret};
 use toon_provider::nostr::wire::SpawnContent;
 use toon_provider::provider::{ImagePolicyConfig, LeaseRecord, Listing};
 use toon_provider::Clock;
@@ -44,73 +48,88 @@ async fn warm_harness() -> Harness {
 const SPAWN: &str = "/listings/warm/v1/spawn";
 const STANDBY: &str = "/listings/warm/v1/standby";
 
-/// One spawn as a tenant signs it for a whole Standby Set: one
-/// `workload_id`, the members primary-first in `standby_set`, and one `p` tag
-/// per member so the same signed bytes are addressed to all of them (spec
-/// §6.1, §7). The tenant key comes back, because it is the only key that may
-/// then ask any member for `status`.
+/// One Standby Set's spawn as a tenant makes it: one `workload_id`, the
+/// members primary-first in `standby_set`, and one ROOT SECRET the tenant
+/// holds (spec §6.1, §7). Every member's request is derived from it here,
+/// because the token each member gets is its own.
 struct SetSpawn {
-    tenant: Keys,
+    root: RootSecret,
     content: SpawnContent,
-    event: Value,
 }
 
-fn set_spawn(h: &Harness, seed: u8, set: &[PublicKey]) -> SetSpawn {
-    let content = SpawnContent {
-        standby_set: Some(set.iter().map(|k| k.to_hex()).collect()),
-        ..spawn_content(seed)
-    };
-    let spec = RequestSpec::spawn(h, &content).addressed_to(set);
+impl SetSpawn {
+    /// This set's Continuation Token at `h`: what `h` stores, and what only
+    /// a request to `h` ever carries.
+    fn token_at(&self, h: &Harness) -> ContinuationToken {
+        self.root.continuation_for(&h.provider)
+    }
+
+    /// The request this member is sent: its own `op`, its own `provider`,
+    /// its own token, and the set's shared content.
+    fn request_for(&self, h: &Harness, op: &'static str) -> Value {
+        RequestSpec::op(h, op, json!(self.content))
+            .with_token(&self.token_at(h))
+            .request()
+    }
+}
+
+fn set_spawn(seed: u8, set: &[PublicKey]) -> SetSpawn {
     SetSpawn {
-        tenant: Keys::parse(&spec.tenant.secret_key().to_secret_hex()).unwrap(),
-        content,
-        event: spec.sign(),
+        root: mint(),
+        content: SpawnContent {
+            standby_set: Some(set.iter().map(|k| k.to_hex()).collect()),
+            ..spawn_content(seed)
+        },
     }
 }
 
 /// A Warm Standby's own spawn: this provider at index 1 behind some other
 /// provider, which is the only shape `.standby` accepts.
 fn standby_spawn(h: &Harness, seed: u8) -> SetSpawn {
-    set_spawn(h, seed, &[Keys::generate().public_key(), h.provider])
+    set_spawn(seed, &[Keys::generate().public_key(), h.provider])
 }
 
-async fn post_spawn(h: &Harness, path: &str, event: &Value) -> (StatusCode, Value) {
-    post(&h.app, path, json!({ "request": event.clone() })).await
+/// Post `spawn` to `h` on `path`, with the `op` that path serves.
+async fn post_spawn(h: &Harness, path: &str, spawn: &SetSpawn) -> (StatusCode, Value) {
+    let op = if path.ends_with("/standby") {
+        "standby"
+    } else {
+        "spawn"
+    };
+    post(&h.app, path, json!({ "request": spawn.request_for(h, op) })).await
 }
 
 /// A reservation this provider holds, made through the paid route.
 async fn reserve(h: &Harness, seed: u8) -> SetSpawn {
     let spawn = standby_spawn(h, seed);
-    let (status, body) = post_spawn(h, STANDBY, &spawn.event).await;
+    let (status, body) = post_spawn(h, STANDBY, &spawn).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     spawn
 }
 
-/// `status` signed by the lease's own tenant.
+/// `status` presenting this member's own Continuation Token.
 async fn status_of(h: &Harness, spawn: &SetSpawn) -> Value {
-    let spec = RequestSpec {
-        tenant: Keys::parse(&spawn.tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::about(h, "status", &spawn.content.workload_id)
-    };
-    post(&h.app, "/status", json!({ "request": spec.sign() }))
+    let spec =
+        RequestSpec::about(h, "status", &spawn.content.workload_id).with_token(&spawn.token_at(h));
+    post(&h.app, "/status", json!({ "request": spec.request() }))
         .await
         .1
 }
 
 // ── the set forms ────────────────────────────────────────────────────────
 
-/// The heart of the ticket: ONE signed spawn, posted to the two providers it
-/// names, makes a running primary at index 0 and a Warm Standby at index 1.
-/// Nothing in the request says which; the position and the route do.
+/// The heart of the ticket: ONE set, one request per member, makes a running
+/// primary at index 0 and a Warm Standby at index 1. Nothing in the content
+/// says which; the position and the route do.
 #[tokio::test]
-async fn one_signed_spawn_makes_a_primary_and_a_standby() {
+async fn one_spawn_content_makes_a_primary_and_a_standby() {
     let primary = warm_harness().await;
     let standby = warm_harness().await;
-    let spawn = set_spawn(&primary, 1, &[primary.provider, standby.provider]);
+    let spawn = set_spawn(1, &[primary.provider, standby.provider]);
 
     // Index 0, on `.spawn`: a lease that runs, exactly as a standalone one
     // does today.
-    let (status, body) = post_spawn(&primary, SPAWN, &spawn.event).await;
+    let (status, body) = post_spawn(&primary, SPAWN, &spawn).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["role"], "primary");
     assert_eq!(body["expires_at"].as_u64().unwrap(), NOW + INTERVAL);
@@ -120,10 +139,10 @@ async fn one_signed_spawn_makes_a_primary_and_a_standby() {
         [BackendCall::Create(_), BackendCall::Start(_)]
     ));
 
-    // The SAME bytes, at index 1's provider, on `.standby`: capacity held, an
-    // expiry set, and nothing started. The absence of `access` is the
+    // The same CONTENT, at index 1's provider, on `.standby`: capacity held,
+    // an expiry set, and nothing started. The absence of `access` is the
     // tenant's proof that nothing runs there.
-    let (status, body) = post_spawn(&standby, STANDBY, &spawn.event).await;
+    let (status, body) = post_spawn(&standby, STANDBY, &spawn).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["role"], "standby");
     assert_eq!(body["workload_id"], spawn.content.workload_id);
@@ -146,13 +165,10 @@ async fn one_signed_spawn_makes_a_primary_and_a_standby() {
 async fn status_reports_each_members_role() {
     let primary = warm_harness().await;
     let standby = warm_harness().await;
-    let spawn = set_spawn(&primary, 2, &[primary.provider, standby.provider]);
+    let spawn = set_spawn(2, &[primary.provider, standby.provider]);
+    assert_eq!(post_spawn(&primary, SPAWN, &spawn).await.0, StatusCode::OK);
     assert_eq!(
-        post_spawn(&primary, SPAWN, &spawn.event).await.0,
-        StatusCode::OK
-    );
-    assert_eq!(
-        post_spawn(&standby, STANDBY, &spawn.event).await.0,
+        post_spawn(&standby, STANDBY, &spawn).await.0,
         StatusCode::OK
     );
 
@@ -173,6 +189,53 @@ async fn status_reports_each_members_role() {
         body.get("access").is_none(),
         "a reservation runs nothing to reach: {}",
         body
+    );
+}
+
+/// The regression per-provider derivation exists to prevent (spec §6.1, §7).
+///
+/// Every member of a Standby Set holds a DIFFERENT Continuation Token, each
+/// derived from the tenant's one root secret under that member's own key. So
+/// the primary's token is no more use at a standby than a stranger's would
+/// be, and a member cannot read or end another member's lease — which is
+/// what one shared token would have let it do.
+#[tokio::test]
+async fn each_member_accepts_only_its_own_token() {
+    let primary = warm_harness().await;
+    let standby = warm_harness().await;
+    let spawn = set_spawn(3, &[primary.provider, standby.provider]);
+    assert_eq!(post_spawn(&primary, SPAWN, &spawn).await.0, StatusCode::OK);
+    assert_eq!(
+        post_spawn(&standby, STANDBY, &spawn).await.0,
+        StatusCode::OK
+    );
+
+    let at_primary = spawn.token_at(&primary);
+    let at_standby = spawn.token_at(&standby);
+    assert_ne!(
+        serde_json::to_value(&at_primary).unwrap(),
+        serde_json::to_value(&at_standby).unwrap(),
+        "one root secret, one token per member"
+    );
+
+    // The primary's token at the standby, and the standby's at the primary,
+    // on both authenticated routes.
+    for (h, wrong) in [(&standby, &at_primary), (&primary, &at_standby)] {
+        for (op, path) in [("status", "/status"), ("terminate", "/terminate")] {
+            let spec = RequestSpec::about(h, op, &spawn.content.workload_id).with_token(wrong);
+            let (status, body) = post(&h.app, path, json!({ "request": spec.request() })).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{} {}", op, body);
+            assert_eq!(error_of(&body), "not_tenant", "{}", op);
+        }
+    }
+
+    // Both leases are untouched, and each member's own token still reads it.
+    assert_eq!(status_of(&primary, &spawn).await["state"], "running");
+    assert_eq!(status_of(&standby, &spawn).await["state"], "reserved");
+    assert!(
+        standby.backend.calls().is_empty(),
+        "nothing ran at the standby: {:?}",
+        standby.backend.calls()
     );
 }
 
@@ -200,62 +263,38 @@ async fn a_mis_addressed_spawn_does_nothing() {
 
     // No `standby_set` at all: `.standby` sells a role this spawn never asked
     // for.
-    let plain = RequestSpec::spawn(&h, &spawn_content(10)).sign();
-    let (status, body) = post_spawn(&h, STANDBY, &plain).await;
+    let plain = RequestSpec::standby(&h, &spawn_content(10)).request();
+    let (status, body) = post(&h.app, STANDBY, json!({ "request": plain })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
     refused(&body, "standalone");
 
     // A set that does not name this provider, though the request was sent
     // here: the spawn belongs to the members it does name, on either route.
     for path in [SPAWN, STANDBY] {
-        let content = SpawnContent {
-            standby_set: Some(vec![peer.to_hex(), stranger.to_hex()]),
-            ..spawn_content(11)
-        };
-        let elsewhere = RequestSpec::spawn(&h, &content).sign();
+        let elsewhere = set_spawn(11, &[peer, stranger]);
         let (status, body) = post_spawn(&h, path, &elsewhere).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
         refused(&body, "not in the standby_set");
     }
 
-    // A `p` tag naming a provider the set does not: the tenant addressed the
-    // spawn beyond its own Standby Set, and a member cannot tell what the
-    // stranger was meant to do with it.
-    let content = SpawnContent {
-        standby_set: Some(vec![h.provider.to_hex(), peer.to_hex()]),
-        ..spawn_content(16)
-    };
-    let addressed_beyond = RequestSpec::spawn(&h, &content)
-        .addressed_to(&[h.provider, peer, stranger])
-        .sign();
-    let (status, body) = post_spawn(&h, SPAWN, &addressed_beyond).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
-    refused(&body, "the standby_set does not name");
-
     // A member listed twice would hold two positions in one set, and so two
     // roles.
-    let twice = SpawnContent {
-        standby_set: Some(vec![peer.to_hex(), h.provider.to_hex(), peer.to_hex()]),
-        ..spawn_content(17)
-    };
-    let twice = RequestSpec::spawn(&h, &twice)
-        .addressed_to(&[peer, h.provider])
-        .sign();
+    let twice = set_spawn(17, &[peer, h.provider, peer]);
     let (status, body) = post_spawn(&h, STANDBY, &twice).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
     refused(&body, "listed twice");
 
     // Index 0 is the primary and runs the workload, so it is not bought on
     // `.standby` whatever was paid there.
-    let as_primary = set_spawn(&h, 12, &[h.provider, peer]);
-    let (status, body) = post_spawn(&h, STANDBY, &as_primary.event).await;
+    let as_primary = set_spawn(12, &[h.provider, peer]);
+    let (status, body) = post_spawn(&h, STANDBY, &as_primary).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
     refused(&body, "index 0");
 
     // …and any other index is a Warm Standby, so a tenant that paid the
     // running price on `.spawn` still gets no running workload.
-    let as_standby = set_spawn(&h, 13, &[peer, h.provider]);
-    let (status, body) = post_spawn(&h, SPAWN, &as_standby.event).await;
+    let as_standby = set_spawn(13, &[peer, h.provider]);
+    let (status, body) = post_spawn(&h, SPAWN, &as_standby).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
     refused(&body, "index 1");
 
@@ -280,8 +319,8 @@ async fn a_standby_spawn_on_a_listing_that_prices_none_is_refused() {
     let h = harness_with(vec![listing("basic", 1, 2)]).await;
     let peer = Keys::generate().public_key();
 
-    let as_standby = set_spawn(&h, 14, &[peer, h.provider]);
-    let (status, body) = post_spawn(&h, "/listings/basic/v1/standby", &as_standby.event).await;
+    let as_standby = set_spawn(14, &[peer, h.provider]);
+    let (status, body) = post_spawn(&h, "/listings/basic/v1/standby", &as_standby).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{}", body);
     assert_eq!(error_of(&body), "wrong_listing_version");
     assert!(body["message"]
@@ -290,8 +329,8 @@ async fn a_standby_spawn_on_a_listing_that_prices_none_is_refused() {
         .contains("prices no Warm Standby"));
     assert!(h.backend.calls().is_empty());
 
-    let as_primary = set_spawn(&h, 15, &[h.provider, peer]);
-    let (status, body) = post_spawn(&h, "/listings/basic/v1/spawn", &as_primary.event).await;
+    let as_primary = set_spawn(15, &[h.provider, peer]);
+    let (status, body) = post_spawn(&h, "/listings/basic/v1/spawn", &as_primary).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(
         body["role"], "primary",
@@ -324,7 +363,7 @@ async fn a_reservation_counts_against_capacity() {
         assert_eq!(answer["error"], "no_capacity", "{}", answer);
     }
     let third = standby_spawn(&h, 22);
-    let (status, body) = post_spawn(&h, STANDBY, &third.event).await;
+    let (status, body) = post_spawn(&h, STANDBY, &third).await;
     assert_eq!(status, StatusCode::CONFLICT, "{}", body);
     assert_eq!(error_of(&body), "no_capacity");
 
@@ -442,11 +481,14 @@ async fn a_tenant_terminates_a_reservation() {
     let h = warm_harness().await;
     let spawn = reserve(&h, 32).await;
 
-    let terminate = RequestSpec {
-        tenant: Keys::parse(&spawn.tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::about(&h, "terminate", &spawn.content.workload_id)
-    };
-    let (status, body) = post(&h.app, "/terminate", json!({ "request": terminate.sign() })).await;
+    let terminate = RequestSpec::about(&h, "terminate", &spawn.content.workload_id)
+        .with_token(&spawn.token_at(&h));
+    let (status, body) = post(
+        &h.app,
+        "/terminate",
+        json!({ "request": terminate.request() }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["state"], json!({ "ended": "termination" }));
 
@@ -505,7 +547,12 @@ async fn standby_extend_refuses_a_running_lease_of_any_role() {
     let h = warm_harness().await;
 
     let standalone = spawn_content(41);
-    let (status, body) = post_spawn(&h, SPAWN, &RequestSpec::spawn(&h, &standalone).sign()).await;
+    let (status, body) = post(
+        &h.app,
+        SPAWN,
+        json!({ "request": RequestSpec::spawn(&h, &standalone).request() }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["role"], "standalone");
 
@@ -514,8 +561,8 @@ async fn standby_extend_refuses_a_running_lease_of_any_role() {
     assert_eq!(error_of(&body), "not_standby");
 
     let peer = Keys::generate().public_key();
-    let primary = set_spawn(&h, 42, &[h.provider, peer]);
-    let (status, body) = post_spawn(&h, SPAWN, &primary.event).await;
+    let primary = set_spawn(42, &[h.provider, peer]);
+    let (status, body) = post_spawn(&h, SPAWN, &primary).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["role"], "primary");
 
@@ -583,7 +630,7 @@ async fn standby_extend_refuses_a_reservation_through_the_wrong_listing_version(
     ])
     .await;
     let spawn = standby_spawn(&h, 44);
-    let (status, body) = post_spawn(&h, "/listings/warm/v2/standby", &spawn.event).await;
+    let (status, body) = post_spawn(&h, "/listings/warm/v2/standby", &spawn).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
 
     let (status, body) = post(
@@ -614,11 +661,14 @@ async fn standby_extend_refuses_an_ended_reservation() {
     let h = warm_harness().await;
     let spawn = reserve(&h, 45).await;
 
-    let terminate = RequestSpec {
-        tenant: Keys::parse(&spawn.tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::about(&h, "terminate", &spawn.content.workload_id)
-    };
-    let (status, body) = post(&h.app, "/terminate", json!({ "request": terminate.sign() })).await;
+    let terminate = RequestSpec::about(&h, "terminate", &spawn.content.workload_id)
+        .with_token(&spawn.token_at(&h));
+    let (status, body) = post(
+        &h.app,
+        "/terminate",
+        json!({ "request": terminate.request() }),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{}", body);
 
     let (status, body) = standby_extend_workload(&h, &spawn.content.workload_id).await;

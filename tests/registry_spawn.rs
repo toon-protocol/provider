@@ -16,12 +16,12 @@ mod common;
 use std::collections::BTreeSet;
 
 use axum::http::StatusCode;
-use nostr_sdk::Keys;
 use serde_json::{json, Value};
 
-use common::harness::{listing, INTERVAL};
+use common::harness::{listing, mint, INTERVAL};
 use common::store::*;
 use common::{loaded_image_id, BackendCall};
+use toon_provider::nostr::continuation::ContinuationToken;
 use toon_provider::nostr::wire::ImageRef;
 use toon_provider::Clock;
 
@@ -78,7 +78,7 @@ async fn a_paid_spawn_fetches_every_layer_through_the_entry_and_runs_the_loaded_
         json!({ "would_run": true })
     );
 
-    let (status, body) = spawn(&h, 0x11, image(&w, &manifest)).await;
+    let (status, body, _) = spawn(&h, 0x11, image(&w, &manifest)).await;
 
     assert_ok_spawn(status, &body, 0x11);
     // Every blob came from where the entry said: the manifest, the config
@@ -123,12 +123,12 @@ async fn a_second_spawn_of_the_same_image_makes_no_gateway_or_registry_request()
     let (manifest, ..) = store_mixed_image(&mut w).await;
     let h = harness(&w, vec![listing("basic", 1, 2)]).await;
     h.directory.seed_image_entry(w.entry(&manifest, MANIFEST));
-    let (status, body) = spawn(&h, 0x21, image(&w, &manifest)).await;
+    let (status, body, _) = spawn(&h, 0x21, image(&w, &manifest)).await;
     assert_ok_spawn(status, &body, 0x21);
     let gateway_before = w.gateway_request_count().await;
     let registry_before = w.registry_paths().await.len();
 
-    let (status, body) = spawn(&h, 0x22, image(&w, &manifest)).await;
+    let (status, body, _) = spawn(&h, 0x22, image(&w, &manifest)).await;
 
     assert_ok_spawn(status, &body, 0x22);
     assert_eq!(w.gateway_request_count().await, gateway_before);
@@ -147,7 +147,7 @@ async fn a_spawn_of_an_image_sharing_a_layer_fetches_only_the_new_layer() {
     let h = harness(&w, vec![listing("basic", 1, 4)]).await;
     h.directory
         .seed_image_entry(w.entry_named("web", "1.0", &first_manifest, MANIFEST));
-    let (status, body) = spawn(&h, 0x31, image(&w, &first_manifest)).await;
+    let (status, body, _) = spawn(&h, 0x31, image(&w, &first_manifest)).await;
     assert_ok_spawn(status, &body, 0x31);
     let fetched_before = w.gateway_paths().await;
 
@@ -168,7 +168,7 @@ async fn a_spawn_of_an_image_sharing_a_layer_fetches_only_the_new_layer() {
     h.directory
         .seed_image_entry(w.entry_named("web", "2.0", &second_manifest, MANIFEST));
 
-    let (status, body) = spawn(
+    let (status, body, _) = spawn(
         &h,
         0x32,
         ImageRef::from_registry(second_manifest.clone(), w.address_of("web", "2.0"), RELAY),
@@ -220,7 +220,7 @@ async fn a_layer_whose_parts_fail_verification_is_refused_image_with_no_containe
         json!({ "would_run": true })
     );
 
-    let (status, body) = spawn(&h, 0x41, image(&w, &manifest_digest)).await;
+    let (status, body, _) = spawn(&h, 0x41, image(&w, &manifest_digest)).await;
 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
     assert_eq!(body["error"], "refused_image", "{}", body);
@@ -242,7 +242,7 @@ async fn a_layer_whose_parts_fail_verification_is_refused_image_with_no_containe
     let (status, body) = post(
         &h.app,
         "/status",
-        json!({ "request": signed(&h, "status", json!({ "workload_id": "41".repeat(32) }), None) }),
+        json!({ "request": request(&h, "status", json!({ "workload_id": "41".repeat(32) }), None) }),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{}", body);
@@ -270,7 +270,7 @@ async fn a_layer_no_source_serves_is_refused_image_with_no_container() {
     h.directory
         .seed_image_entry(w.entry(&manifest_digest, MANIFEST));
 
-    let (status, body) = spawn(&h, 0x51, image(&w, &manifest_digest)).await;
+    let (status, body, _) = spawn(&h, 0x51, image(&w, &manifest_digest)).await;
 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
     assert_eq!(body["error"], "refused_image", "{}", body);
@@ -303,7 +303,7 @@ async fn a_cache_with_no_room_for_the_image_is_no_capacity() {
         json!({ "would_run": true })
     );
 
-    let (status, body) = spawn(&h, 0x61, image(&w, &manifest)).await;
+    let (status, body, _) = spawn(&h, 0x61, image(&w, &manifest)).await;
 
     assert_eq!(status, StatusCode::CONFLICT, "{}", body);
     assert_eq!(body["error"], "no_capacity", "{}", body);
@@ -325,7 +325,7 @@ async fn the_blob_cache_survives_a_provider_restart() {
     let (manifest, ..) = store_mixed_image(&mut w).await;
     let h = harness(&w, vec![listing("basic", 1, 2)]).await;
     h.directory.seed_image_entry(w.entry(&manifest, MANIFEST));
-    let (status, body) = spawn(&h, 0x71, image(&w, &manifest)).await;
+    let (status, body, _) = spawn(&h, 0x71, image(&w, &manifest)).await;
     assert_ok_spawn(status, &body, 0x71);
     let gateway_before = w.gateway_request_count().await;
     let registry_before = w.registry_paths().await.len();
@@ -336,16 +336,17 @@ async fn the_blob_cache_survives_a_provider_restart() {
     let (status, body) = post(
         &h.app,
         "/status",
-        json!({ "request": signed(&h, "status", json!({ "workload_id": "71".repeat(32) }), None) }),
+        json!({ "request": request(&h, "status", json!({ "workload_id": "71".repeat(32) }), None) }),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{}", body);
     assert_eq!(
         body["error"], "not_tenant",
-        "the lease is still held (by its tenant)"
+        "the lease is still held: a stranger's token is refused, which a \
+         forgotten lease would not be"
     );
     // ...and so did every verified blob: a new spawn fetches nothing.
-    let (status, body) = spawn(&h, 0x72, image(&w, &manifest)).await;
+    let (status, body, _) = spawn(&h, 0x72, image(&w, &manifest)).await;
     assert_ok_spawn(status, &body, 0x72);
     assert_eq!(w.gateway_request_count().await, gateway_before);
     assert_eq!(w.registry_paths().await.len(), registry_before);
@@ -354,53 +355,28 @@ async fn the_blob_cache_survives_a_provider_restart() {
 /// Everything after the spawn, for one lease: status, extension, status
 /// again, termination, status after. What a tenant sees of a lease once it
 /// runs, with nothing that names the image in it.
-async fn lifecycle(h: &StoreHarness, tenant: &Keys, workload_id: &str) -> Vec<Value> {
-    let tenant = || Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap();
+async fn lifecycle(h: &StoreHarness, token: &ContinuationToken, workload_id: &str) -> Vec<Value> {
     let about = json!({ "workload_id": workload_id });
     let mut seen = Vec::new();
-    let status = |h: &StoreHarness, ttl: u64| {
-        let about = about.clone();
-        let tenant = tenant();
-        let provider = h.provider;
-        let now = h.clock.now();
+    let status = |h: &StoreHarness| {
+        let request = request(h, "status", about.clone(), Some(token));
         let app = h.app.clone();
-        async move {
-            let request = common::harness::RequestSpec {
-                tenant,
-                providers: vec![provider],
-                op: "status",
-                content: about,
-                created_at: now,
-                expiration: Some(now + ttl),
-                kind: toon_provider::nostr::kinds::K_LEASE_REQUEST,
-            }
-            .sign();
-            post(&app, "/status", json!({ "request": request })).await
-        }
+        async move { post(&app, "/status", json!({ "request": request })).await }
     };
-    seen.push(status(h, 60).await.1);
+    seen.push(status(h).await.1);
     seen.push(
         post(&h.app, "/listings/basic/v1/extend", about.clone())
             .await
             .1,
     );
-    seen.push(status(h, 61).await.1);
-    let request = common::harness::RequestSpec {
-        tenant: tenant(),
-        providers: vec![h.provider],
-        op: "terminate",
-        content: about.clone(),
-        created_at: h.clock.now(),
-        expiration: Some(h.clock.now() + 60),
-        kind: toon_provider::nostr::kinds::K_LEASE_REQUEST,
-    }
-    .sign();
+    seen.push(status(h).await.1);
+    let terminate = request(h, "terminate", about.clone(), Some(token));
     seen.push(
-        post(&h.app, "/terminate", json!({ "request": request }))
+        post(&h.app, "/terminate", json!({ "request": terminate }))
             .await
             .1,
     );
-    seen.push(status(h, 62).await.1);
+    seen.push(status(h).await.1);
     seen
 }
 
@@ -413,23 +389,17 @@ async fn the_lease_lifecycle_is_the_same_for_a_registry_entry_image_as_for_a_ref
     let h = harness(&w, vec![listing("basic", 1, 2)]).await;
     h.directory.seed_image_entry(w.entry(&manifest, MANIFEST));
 
-    let by_reference = Keys::generate();
+    let by_reference = mint().continuation_for(&h.provider);
     let (status, body) = spawn_as(
         &h,
         0x81,
         ImageRef::upstream("docker.io/library/alpine", common::valid_digest()),
-        Keys::parse(&by_reference.secret_key().to_secret_hex()).unwrap(),
+        &by_reference,
     )
     .await;
     assert_ok_spawn(status, &body, 0x81);
-    let by_entry = Keys::generate();
-    let (status, body) = spawn_as(
-        &h,
-        0x82,
-        image(&w, &manifest),
-        Keys::parse(&by_entry.secret_key().to_secret_hex()).unwrap(),
-    )
-    .await;
+    let by_entry = mint().continuation_for(&h.provider);
+    let (status, body) = spawn_as(&h, 0x82, image(&w, &manifest), &by_entry).await;
     assert_ok_spawn(status, &body, 0x82);
 
     let reference = lifecycle(&h, &by_reference, &"81".repeat(32)).await;
@@ -464,14 +434,14 @@ async fn the_lease_lifecycle_is_the_same_for_a_registry_entry_image_as_for_a_ref
 
     // And expiry: a third lease of each kind, left to run out, is reaped
     // by the same sweep.
-    let (status, _) = spawn(
+    let (status, ..) = spawn(
         &h,
         0x83,
         ImageRef::upstream("docker.io/library/alpine", common::valid_digest()),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _) = spawn(&h, 0x84, image(&w, &manifest)).await;
+    let (status, ..) = spawn(&h, 0x84, image(&w, &manifest)).await;
     assert_eq!(status, StatusCode::OK);
     h.clock.advance(INTERVAL + 1);
     h.service.sweep_expired_leases(h.clock.now()).await;

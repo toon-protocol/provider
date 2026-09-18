@@ -12,17 +12,19 @@ use nostr_sdk::Keys;
 use serde_json::{json, Value};
 
 use common::harness::{
-    error_of, harness, harness_with, listing, post, spawn, spawn_content, workload_id, Harness,
-    RequestSpec, INTERVAL, NOW, PUBLIC_IP,
+    error_of, harness, harness_with, listing, mint, post, spawn, spawn_content, workload_id,
+    Harness, RequestSpec, INTERVAL, NOW, PUBLIC_IP,
 };
 use common::{BackendCall, FakeBackend, FakeClock, FakeDirectory};
 use std::sync::Arc;
+use toon_provider::nostr::continuation::ContinuationToken;
 use toon_provider::nostr::wire::SpawnContent;
 use toon_provider::Clock;
 
-/// A lease that exists, and the tenant that owns it.
+/// A lease that exists, and the Continuation Token it was taken with — the
+/// whole of what a tenant needs to act on it afterwards (spec §6.1).
 struct Lease {
-    tenant: Keys,
+    token: ContinuationToken,
     workload_id: String,
     expires_at: u64,
 }
@@ -32,12 +34,12 @@ async fn spawn_lease(h: &Harness, seed: u8) -> Lease {
 }
 
 async fn spawn_lease_from(h: &Harness, content: SpawnContent) -> Lease {
-    let spec = RequestSpec::spawn(h, &content);
-    let tenant = Keys::parse(&spec.tenant.secret_key().to_secret_hex()).unwrap();
-    let (status, body) = spawn(h, spec.sign()).await;
+    let token = mint().continuation_for(&h.provider);
+    let spec = RequestSpec::spawn(h, &content).with_token(&token);
+    let (status, body) = spawn(h, spec.request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     Lease {
-        tenant,
+        token,
         workload_id: content.workload_id,
         expires_at: body["expires_at"].as_u64().unwrap(),
     }
@@ -96,9 +98,9 @@ async fn extensions_stack() {
 
 #[tokio::test]
 async fn a_second_payer_may_extend_a_lease_it_did_not_spawn() {
-    // ADR 0005: an extension carries no signature and reveals nothing, so a
-    // sponsor pays for someone else's lease with its own channel. There is
-    // nothing in the request that says who paid.
+    // ADR 0005: an extension carries no Lease Request and reveals nothing,
+    // so a sponsor pays for someone else's lease with its own channel. There
+    // is nothing in the request that says who paid.
     let h = harness().await;
     let lease = spawn_lease(&h, 1).await;
 
@@ -108,6 +110,37 @@ async fn a_second_payer_may_extend_a_lease_it_did_not_spawn() {
         body["expires_at"].as_u64().unwrap(),
         lease.expires_at + INTERVAL
     );
+}
+
+/// An extension gained no Continuation Token check, and could not carry one
+/// if it wanted to. It only adds time (ADR 0005), so a payer that never
+/// learnt the token still buys an interval for the lease — and a body that
+/// offers one is an unknown field like any other.
+#[tokio::test]
+async fn an_extension_takes_no_token_and_refuses_one() {
+    let h = harness().await;
+    let lease = spawn_lease(&h, 1).await;
+
+    // No token, from a payer that holds none: accepted.
+    let (status, body) = extend(&h, &lease.workload_id).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(
+        body["expires_at"].as_u64().unwrap(),
+        lease.expires_at + INTERVAL
+    );
+
+    // The lease's OWN token, offered anyway: `.extend` names no such field.
+    let (status, body) = post(
+        &h.app,
+        "/listings/basic/v1/extend",
+        json!({
+            "workload_id": lease.workload_id,
+            "continuation": lease.token,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+    assert_eq!(error_of(&body), "invalid_request");
 }
 
 #[tokio::test]
@@ -145,7 +178,7 @@ async fn an_expiry_the_sweep_has_not_reached_yet_still_refuses_an_extension() {
     assert_eq!(error_of(&body), "expired");
 
     // And so does a termination: the lease is already over.
-    let (status, body) = terminate_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    let (status, body) = terminate_with(&h, &lease.token, &lease.workload_id).await;
     assert_eq!(status, StatusCode::CONFLICT, "{}", body);
     assert_eq!(error_of(&body), "expired");
 }
@@ -161,7 +194,7 @@ async fn extending_on_another_listing_version_is_wrong_listing_version() {
     let (status, body) = post(
         &h.app,
         "/listings/basic/v2/spawn",
-        json!({ "request": RequestSpec::spawn(&h, &content).sign() }),
+        json!({ "request": RequestSpec::spawn(&h, &content).request() }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", body);
@@ -186,12 +219,13 @@ async fn an_extension_body_that_is_not_a_workload_id_is_invalid() {
 
 // ── status (spec §6.5) ──────────────────────────────────────────────────
 
-async fn status_signed_by(h: &Harness, tenant: &Keys, workload_id: &str) -> (StatusCode, Value) {
-    let spec = RequestSpec {
-        tenant: Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::about(h, "status", workload_id)
-    };
-    post(&h.app, "/status", json!({ "request": spec.sign() })).await
+async fn status_with(
+    h: &Harness,
+    token: &ContinuationToken,
+    workload_id: &str,
+) -> (StatusCode, Value) {
+    let spec = RequestSpec::about(h, "status", workload_id).with_token(token);
+    post(&h.app, "/status", json!({ "request": spec.request() })).await
 }
 
 #[tokio::test]
@@ -199,7 +233,7 @@ async fn status_reports_the_state_the_expiry_and_the_access_details() {
     let h = harness().await;
     let lease = spawn_lease(&h, 1).await;
 
-    let (status, body) = status_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    let (status, body) = status_with(&h, &lease.token, &lease.workload_id).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["workload_id"], lease.workload_id);
     assert_eq!(body["role"], "standalone");
@@ -235,11 +269,11 @@ async fn status_reports_the_template_a_spawn_carried_and_says_nothing_when_it_ca
     let expanded = spawn_lease_from(&h, from_template(1)).await;
     let by_hand = spawn_lease(&h, 2).await;
 
-    let (status, body) = status_signed_by(&h, &expanded.tenant, &expanded.workload_id).await;
+    let (status, body) = status_with(&h, &expanded.token, &expanded.workload_id).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["template"], TEMPLATE);
 
-    let (status, body) = status_signed_by(&h, &by_hand.tenant, &by_hand.workload_id).await;
+    let (status, body) = status_with(&h, &by_hand.token, &by_hand.workload_id).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(
         body.get("template"),
@@ -279,7 +313,7 @@ async fn a_restart_keeps_the_template_a_lease_was_spawned_from() {
     let h2 = restarted(&h, NOW + 10, backend).await;
     h2.service.restore_leases().await;
 
-    let (status, body) = status_signed_by(&h2, &lease.tenant, &lease.workload_id).await;
+    let (status, body) = status_with(&h2, &lease.token, &lease.workload_id).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["template"], TEMPLATE);
 }
@@ -290,27 +324,53 @@ async fn status_follows_the_expiry_an_extension_bought() {
     let lease = spawn_lease(&h, 1).await;
     extend(&h, &lease.workload_id).await;
 
-    let (_, body) = status_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    let (_, body) = status_with(&h, &lease.token, &lease.workload_id).await;
     assert_eq!(
         body["expires_at"].as_u64().unwrap(),
         lease.expires_at + INTERVAL
     );
 }
 
+/// A wrong token, no token at all, and a token that belongs to another
+/// lease of this same provider: three ways of not being the party that took
+/// this lease, and one answer to all three (spec §6.1). An absent token is
+/// never read as an unauthenticated success, and none of the three answers
+/// says which of them it was.
 #[tokio::test]
-async fn status_signed_by_anyone_but_the_tenant_is_not_tenant() {
+async fn a_status_with_a_wrong_an_absent_or_another_leases_token_is_not_tenant() {
     let h = harness().await;
     let lease = spawn_lease(&h, 1).await;
+    let other = spawn_lease(&h, 2).await;
 
-    let (status, body) = status_signed_by(&h, &Keys::generate(), &lease.workload_id).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{}", body);
-    assert_eq!(error_of(&body), "not_tenant");
+    let stranger = mint().continuation_for(&h.provider);
+    for spec in [
+        RequestSpec::about(&h, "status", &lease.workload_id).with_token(&stranger),
+        RequestSpec::about(&h, "status", &lease.workload_id).with_no_token(),
+        RequestSpec::about(&h, "status", &lease.workload_id).with_token(&other.token),
+    ] {
+        let (status, body) = post(&h.app, "/status", json!({ "request": spec.request() })).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{}", body);
+        assert_eq!(error_of(&body), "not_tenant");
+        assert!(
+            !body["message"]
+                .as_str()
+                .unwrap()
+                .contains(&lease.workload_id),
+            "a refusal says nothing about the lease: {}",
+            body
+        );
+    }
+
+    // And the lease's own token still reads it.
+    let (status, body) = status_with(&h, &lease.token, &lease.workload_id).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
 }
 
 #[tokio::test]
 async fn status_for_a_lease_this_provider_never_had_is_unknown_workload() {
     let h = harness().await;
-    let (status, body) = status_signed_by(&h, &Keys::generate(), &workload_id(9)).await;
+    let (status, body) =
+        status_with(&h, &mint().continuation_for(&h.provider), &workload_id(9)).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{}", body);
     assert_eq!(error_of(&body), "unknown_workload");
 }
@@ -319,44 +379,38 @@ async fn status_for_a_lease_this_provider_never_had_is_unknown_workload() {
 async fn a_replayed_status_request_is_refused() {
     let h = harness().await;
     let lease = spawn_lease(&h, 1).await;
-    let spec = RequestSpec {
-        tenant: Keys::parse(&lease.tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::about(&h, "status", &lease.workload_id)
-    };
-    let event = spec.sign();
+    let spec = RequestSpec::about(&h, "status", &lease.workload_id).with_token(&lease.token);
+    let request = spec.request();
 
-    let (status, _) = post(&h.app, "/status", json!({ "request": event.clone() })).await;
+    let (status, _) = post(&h.app, "/status", json!({ "request": request.clone() })).await;
     assert_eq!(status, StatusCode::OK);
-    let (status, body) = post(&h.app, "/status", json!({ "request": event })).await;
+    let (status, body) = post(&h.app, "/status", json!({ "request": request })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
     assert_eq!(error_of(&body), "stale_request");
 }
 
-/// Only a spawn may name more than one provider, because one signed spawn
-/// forms a whole Standby Set (§6.1, §7). A status or a termination is about
-/// one lease on one provider, so naming a second one is a request addressed
-/// to somebody else as much as to us.
+/// A Lease Request names ONE provider, on every op (§6.1). A request naming
+/// somebody else is a request for somebody else, and is never accepted here
+/// however good its token is.
 #[tokio::test]
-async fn a_status_or_terminate_naming_a_second_provider_is_refused() {
+async fn a_status_or_terminate_naming_another_provider_is_refused() {
     let h = harness().await;
     let lease = spawn_lease(&h, 1).await;
     for op in ["status", "terminate"] {
-        let spec = RequestSpec {
-            tenant: Keys::parse(&lease.tenant.secret_key().to_secret_hex()).unwrap(),
-            ..RequestSpec::about(&h, op, &lease.workload_id)
-        }
-        .addressed_to(&[h.provider, Keys::generate().public_key()]);
+        let spec = RequestSpec::about(&h, op, &lease.workload_id)
+            .with_token(&lease.token)
+            .addressed_to(Keys::generate().public_key());
         let (status, body) = post(
             &h.app,
             &format!("/{}", op),
-            json!({ "request": spec.sign() }),
+            json!({ "request": spec.request() }),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
         assert_eq!(error_of(&body), "invalid_request");
     }
     // The lease is untouched: still running, still reachable.
-    let (_, body) = status_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    let (_, body) = status_with(&h, &lease.token, &lease.workload_id).await;
     assert_eq!(body["state"], "running", "{}", body);
     assert!(matches!(
         h.backend.calls().as_slice(),
@@ -368,11 +422,8 @@ async fn a_status_or_terminate_naming_a_second_provider_is_refused() {
 async fn a_status_request_signed_for_another_op_is_invalid() {
     let h = harness().await;
     let lease = spawn_lease(&h, 1).await;
-    let spec = RequestSpec {
-        tenant: Keys::parse(&lease.tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::about(&h, "terminate", &lease.workload_id)
-    };
-    let (_, body) = post(&h.app, "/status", json!({ "request": spec.sign() })).await;
+    let spec = RequestSpec::about(&h, "terminate", &lease.workload_id).with_token(&lease.token);
+    let (_, body) = post(&h.app, "/status", json!({ "request": spec.request() })).await;
     assert_eq!(error_of(&body), "invalid_request");
 }
 
@@ -387,7 +438,7 @@ async fn status_reports_a_lease_that_ended_by_expiry() {
     h.clock.set(lease.expires_at);
     h.service.sweep_expired_leases(h.clock.now()).await;
 
-    let (status, body) = status_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    let (status, body) = status_with(&h, &lease.token, &lease.workload_id).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["state"], json!({ "ended": "expiry" }));
     assert!(
@@ -398,12 +449,13 @@ async fn status_reports_a_lease_that_ended_by_expiry() {
 
 // ── termination (spec §6.6) ─────────────────────────────────────────────
 
-async fn terminate_signed_by(h: &Harness, tenant: &Keys, workload_id: &str) -> (StatusCode, Value) {
-    let spec = RequestSpec {
-        tenant: Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::about(h, "terminate", workload_id)
-    };
-    post(&h.app, "/terminate", json!({ "request": spec.sign() })).await
+async fn terminate_with(
+    h: &Harness,
+    token: &ContinuationToken,
+    workload_id: &str,
+) -> (StatusCode, Value) {
+    let spec = RequestSpec::about(h, "terminate", workload_id).with_token(token);
+    post(&h.app, "/terminate", json!({ "request": spec.request() })).await
 }
 
 #[tokio::test]
@@ -411,7 +463,7 @@ async fn terminate_destroys_the_workload_immediately() {
     let h = harness().await;
     let lease = spawn_lease(&h, 1).await;
 
-    let (status, body) = terminate_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    let (status, body) = terminate_with(&h, &lease.token, &lease.workload_id).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["workload_id"], lease.workload_id);
     assert_eq!(body["state"], json!({ "ended": "termination" }));
@@ -421,29 +473,40 @@ async fn terminate_destroys_the_workload_immediately() {
         "stopped and deleted now, not at the next sweep"
     );
 
-    let (_, body) = status_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    let (_, body) = status_with(&h, &lease.token, &lease.workload_id).await;
     assert_eq!(body["state"], json!({ "ended": "termination" }));
 }
 
+/// The same three refusals `status` gives, on the route that would destroy
+/// the workload. Nothing reaches the backend for any of them.
 #[tokio::test]
-async fn terminate_signed_by_anyone_but_the_tenant_is_not_tenant() {
+async fn a_terminate_with_a_wrong_an_absent_or_another_leases_token_is_not_tenant() {
     let h = harness().await;
     let lease = spawn_lease(&h, 1).await;
+    let other = spawn_lease(&h, 2).await;
 
-    let (status, body) = terminate_signed_by(&h, &Keys::generate(), &lease.workload_id).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{}", body);
-    assert_eq!(error_of(&body), "not_tenant");
+    let stranger = mint().continuation_for(&h.provider);
+    for spec in [
+        RequestSpec::about(&h, "terminate", &lease.workload_id).with_token(&stranger),
+        RequestSpec::about(&h, "terminate", &lease.workload_id).with_no_token(),
+        RequestSpec::about(&h, "terminate", &lease.workload_id).with_token(&other.token),
+    ] {
+        let (status, body) = post(&h.app, "/terminate", json!({ "request": spec.request() })).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{}", body);
+        assert_eq!(error_of(&body), "not_tenant");
+    }
     assert_eq!(
         h.backend.calls().len(),
-        2,
-        "the spawn's create and start, and nothing else"
+        4,
+        "two spawns' create and start, and nothing else"
     );
 }
 
 #[tokio::test]
 async fn terminate_for_a_lease_this_provider_never_had_is_unknown_workload() {
     let h = harness().await;
-    let (status, body) = terminate_signed_by(&h, &Keys::generate(), &workload_id(9)).await;
+    let (status, body) =
+        terminate_with(&h, &mint().continuation_for(&h.provider), &workload_id(9)).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{}", body);
     assert_eq!(error_of(&body), "unknown_workload");
 }
@@ -454,7 +517,7 @@ async fn an_extension_after_a_termination_is_refused() {
     // buy time on a workload that no longer exists.
     let h = harness().await;
     let lease = spawn_lease(&h, 1).await;
-    terminate_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    terminate_with(&h, &lease.token, &lease.workload_id).await;
 
     let (status, body) = extend(&h, &lease.workload_id).await;
     assert_eq!(status, StatusCode::CONFLICT, "{}", body);
@@ -465,11 +528,11 @@ async fn an_extension_after_a_termination_is_refused() {
 async fn terminating_an_ended_lease_again_is_refused() {
     let h = harness().await;
     let lease = spawn_lease(&h, 1).await;
-    terminate_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    terminate_with(&h, &lease.token, &lease.workload_id).await;
 
     // A second later, so this is a new request and not a replay of the first.
     h.clock.advance(1);
-    let (status, body) = terminate_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    let (status, body) = terminate_with(&h, &lease.token, &lease.workload_id).await;
     assert_eq!(status, StatusCode::CONFLICT, "{}", body);
     assert_eq!(error_of(&body), "expired");
     assert_eq!(
@@ -551,19 +614,19 @@ async fn a_workload_the_backend_refused_to_delete_is_retried_on_later_sweeps() {
 async fn an_ended_lease_is_forgotten_once_its_retention_runs_out() {
     let h = harness().await;
     let lease = spawn_lease(&h, 1).await;
-    terminate_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    terminate_with(&h, &lease.token, &lease.workload_id).await;
 
     // Still answerable a day after it ENDED, to the second — the expiry it
     // would have had is not what retention counts from.
     h.clock.set(NOW + 86_400 - 1);
     h.service.sweep_expired_leases(h.clock.now()).await;
-    let (status, body) = status_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    let (status, body) = status_with(&h, &lease.token, &lease.workload_id).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
 
     // ...and pruned after it.
     h.clock.advance(1);
     h.service.sweep_expired_leases(h.clock.now()).await;
-    let (status, body) = status_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    let (status, body) = status_with(&h, &lease.token, &lease.workload_id).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{}", body);
     assert_eq!(error_of(&body), "unknown_workload");
 }
@@ -588,7 +651,7 @@ async fn restarted(h: &Harness, at: u64, backend: Arc<FakeBackend>) -> Harness {
 }
 
 #[tokio::test]
-async fn a_restart_keeps_a_running_lease_with_its_expiry_tenant_and_access() {
+async fn a_restart_keeps_a_running_lease_with_its_expiry_token_and_access() {
     let h = harness().await;
     let lease = spawn_lease(&h, 1).await;
     extend(&h, &lease.workload_id).await;
@@ -598,7 +661,7 @@ async fn a_restart_keeps_a_running_lease_with_its_expiry_tenant_and_access() {
     let h2 = restarted(&h, NOW + 10, backend).await;
     h2.service.restore_leases().await;
 
-    let (status, body) = status_signed_by(&h2, &lease.tenant, &lease.workload_id).await;
+    let (status, body) = status_with(&h2, &lease.token, &lease.workload_id).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["state"], "running");
     assert_eq!(
@@ -608,8 +671,14 @@ async fn a_restart_keeps_a_running_lease_with_its_expiry_tenant_and_access() {
     );
     assert_eq!(body["access"]["ssh_port"], 40000);
 
-    // Its tenant is still the only one that may ask.
-    let (_, body) = status_signed_by(&h2, &Keys::generate(), &lease.workload_id).await;
+    // Its token is still the only one that may ask: the restart restored it
+    // with the lease (spec §6.1).
+    let (_, body) = status_with(
+        &h2,
+        &mint().continuation_for(&h2.provider),
+        &lease.workload_id,
+    )
+    .await;
     assert_eq!(error_of(&body), "not_tenant");
 
     // And it can still be extended on the route it was spawned on.
@@ -625,14 +694,14 @@ async fn a_restart_keeps_a_running_lease_with_its_expiry_tenant_and_access() {
 async fn a_restart_keeps_an_ended_lease_ended() {
     let h = harness().await;
     let lease = spawn_lease(&h, 1).await;
-    terminate_signed_by(&h, &lease.tenant, &lease.workload_id).await;
+    terminate_with(&h, &lease.token, &lease.workload_id).await;
 
     // Nothing is seeded on the new backend: the workload really is gone.
     let backend = FakeBackend::new();
     let h2 = restarted(&h, NOW + 10, backend.clone()).await;
     h2.service.restore_leases().await;
 
-    let (status, body) = status_signed_by(&h2, &lease.tenant, &lease.workload_id).await;
+    let (status, body) = status_with(&h2, &lease.token, &lease.workload_id).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(
         body["state"],

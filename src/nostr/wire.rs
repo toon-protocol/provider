@@ -1,7 +1,7 @@
 // The request and response shapes on the provider's HTTP surface, as the
 // spec writes them (§5, §6). Everything here is plain serde: a Lease Request
-// arrives as a signed Nostr event inside `{ "request": ... }`, its content is
-// one of the per-op JSON shapes below, and every answer is JSON.
+// arrives as a JSON object inside `{ "request": ... }`, its `content` is one
+// of the per-op JSON shapes below, and every answer is JSON.
 //
 // Deserialisation DENIES UNKNOWN FIELDS on purpose. A spawn may set only the
 // image, env, ports, a volume, an SSH key and the entrypoint/args (ADR 0004):
@@ -14,12 +14,48 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// The body of every signed route (`.spawn`, `status`, `terminate`): one
-/// Lease Request event. Validation of the event is `nostr::lease_request`.
+use super::continuation::ContinuationToken;
+use super::lease_request::Op;
+
+/// The body of every authenticated route (`.spawn`, `.standby`, `status`,
+/// `terminate`): one Lease Request. Validating it is `nostr::lease_request`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseRequestEnvelope {
-    pub request: nostr_sdk::Event,
+    pub request: LeaseRequest,
+}
+
+/// A Lease Request (spec §6.1): a plain JSON object, signed by nobody.
+///
+/// Nothing here is hashed or canonically serialised, which is why
+/// `request_id` is the tenant's own 32 random bytes rather than a digest of
+/// the rest: two implementations cannot disagree about what was hashed if
+/// nothing was. `provider` replaces the old `p` tag and is singular on every
+/// op, a spawn forming a Standby Set included (§7).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaseRequest {
+    /// 32 random bytes, hex, chosen by the tenant. The replay set's key.
+    pub request_id: String,
+    pub op: Op,
+    /// The provider this request is for: its Nostr public key, hex. Exactly
+    /// one; a provider refuses a request naming any other.
+    pub provider: String,
+    /// Unix seconds. Past it, or further ahead than the request window, the
+    /// request is `stale_request`.
+    pub expiration: u64,
+    /// The lease's Continuation Token (§6.1, ADR 0016). On a spawn it is
+    /// what the new lease stores; on every other op it is what the stored
+    /// one is compared against.
+    ///
+    /// Optional in the SHAPE so that a request presenting no token is
+    /// refused on its authority rather than on its spelling: `not_tenant` on
+    /// `status` and `terminate`, `invalid_request` on a spawn, which would
+    /// otherwise buy a lease nobody could act on (§6.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation: Option<ContinuationToken>,
+    /// The op's own JSON object: `SpawnContent` or `WorkloadContent` below.
+    pub content: serde_json::Value,
 }
 
 /// The resources one lease gets. Shared by the listing config, the Listing
@@ -179,24 +215,13 @@ pub struct SpawnContent {
     pub template: Option<String>,
 }
 
-/// Content of a Lease Request with `op = status` or `op = terminate`.
-///
-/// `grant` is read by `status` ALONE (spec §6.5): it is how a Workload
-/// Gateway that is not the tenant signs for itself and still gets an answer.
-/// `terminate` parses it and ignores it — a grant delegates reading a lease
-/// and nothing more, so a gateway's termination is still `not_tenant` — and
-/// it is a field of this content and of no other, so a `grant` on `spawn`,
-/// `extend`, `standby.extend` or `availability` stays the `invalid_request`
-/// any unknown field is.
+/// Content of a Lease Request with `op = status` or `op = terminate`: the
+/// workload it is about, and nothing else. Authority is the request's
+/// Continuation Token (spec §6.1), which is not part of the content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkloadContent {
     pub workload_id: String,
-    /// The whole signed Gateway Grant event (`K_GATEWAY_GRANT`, §3.1.3), as
-    /// JSON. Verified out of this request and nowhere else: the provider
-    /// never reads a grant from a relay and never stores one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grant: Option<nostr_sdk::Event>,
 }
 
 /// Body of `.extend`: no signature, any payer may extend any lease (ADR 0005).
@@ -524,13 +549,12 @@ pub enum ErrorCode {
     /// A lease is always billed at the price for what it is doing, and a
     /// reservation is not running — it is paid on `.standby.extend` instead.
     NotRunning,
-    BadSignature,
     StaleRequest,
-    /// A `status` carried a Gateway Grant that does not admit its signer
-    /// (spec §6.5): unsigned or mis-signed, signed by someone who is not
-    /// this lease's tenant, about another workload, naming another gateway,
-    /// or expired. Distinct from `NotTenant`, which is what a signer with no
-    /// grant at all still hears, so the two refusals stay tellable apart.
+    /// A `status` asserted a gateway delegation that does not apply here
+    /// (spec §6.5). Distinct from `NotTenant`, which is what a request
+    /// asserting no delegation hears, so the two refusals stay tellable
+    /// apart: one says *you are not the tenant*, the other *your delegation
+    /// does not apply here*.
     BadGrant,
 }
 

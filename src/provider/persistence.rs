@@ -17,6 +17,7 @@ use super::settle::TakeoverSettlement;
 use super::standby::StandbySet;
 use super::watchdog::TakeoverAnnouncement;
 use crate::hidden_service::HiddenAddress;
+use crate::nostr::continuation::ContinuationToken;
 use crate::nostr::wire::{Access, PortAccess, Role, SpawnContent};
 
 /// How many live (`Provisioning`, `Reserved` or `Running`) leases of
@@ -51,9 +52,15 @@ pub struct LeaseRecord {
     /// The tenant-chosen workload id from the spawn (32 bytes, hex).
     pub workload_id: String,
 
-    /// The tenant: the hex public key that signed the spawn. A payer need
-    /// not be the tenant, so this is never derived from who paid.
-    pub tenant: String,
+    /// The lease's Continuation Token: the secret its spawn presented, and
+    /// the only thing this provider holds about whoever took the lease (spec
+    /// §6.1, ADR 0016). A payer need not be the tenant, so it is never
+    /// derived from who paid; and it is not an identity, so there is nothing
+    /// here to leak or to be compelled for.
+    ///
+    /// Persisted, because a restart that forgot it would leave a paid
+    /// workload running that nobody could read, extend or stop.
+    pub continuation: ContinuationToken,
 
     /// The listing and version this lease was spawned from. An extension
     /// must buy time on the same version (ADR 0009).
@@ -267,7 +274,7 @@ mod tests {
         LeaseRecord {
             id,
             workload_id: format!("wid-{}", id),
-            tenant: "ee6afe4b4a6e4fe49d6c35359d1161a6fd26fbe5d6eefcbab1c9c147731bf08a".to_string(),
+            continuation: ContinuationToken::from_hex(&"ee".repeat(32)).unwrap(),
             listing: "basic".to_string(),
             listing_version: 1,
             role: Role::Standalone,
@@ -308,9 +315,9 @@ mod tests {
 
         let loaded = load_leases(&p);
         assert_eq!(loaded.len(), 2);
-        // expires_at drives the expiry sweep, tenant says whose lease it is,
-        // and the access details are what status answers; losing any would
-        // strand or misassign a paid workload.
+        // expires_at drives the expiry sweep, the continuation token says
+        // who may act on the lease, and the access details are what status
+        // answers; losing any would strand or misassign a paid workload.
         assert_eq!(loaded[&2000], map[&2000]);
         assert_eq!(loaded[&2001].expires_at, 1234567999);
         assert_eq!(loaded[&2000].state, LeaseState::Running);
@@ -353,7 +360,7 @@ mod tests {
             serde_json::json!({ "2000": {
                 "id": 2000,
                 "workload_id": "aa".repeat(32),
-                "tenant": "ee6afe4b4a6e4fe49d6c35359d1161a6fd26fbe5d6eefcbab1c9c147731bf08a",
+                "continuation": "ee".repeat(32),
                 "listing": "basic",
                 "listing_version": 1,
                 "role": "standalone",

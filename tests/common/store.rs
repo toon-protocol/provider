@@ -17,14 +17,15 @@ use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use super::harness::{RequestSpec, SSH_KEY};
+use super::harness::{mint, RequestSpec, SSH_KEY};
 use super::{sha256_hex, FakeBackend, FakeClock, FakeDirectory};
 use toon_provider::compute::ComputeBackend;
+use toon_provider::nostr::continuation::ContinuationToken;
 use toon_provider::nostr::image_events::{
     blob_record_event, image_entry_event, BlobPart, BlobRecordContent, BlobSource, EntryBlob,
     ImageEntryContent,
 };
-use toon_provider::nostr::kinds::{K_IMAGE, K_LEASE_REQUEST};
+use toon_provider::nostr::kinds::K_IMAGE;
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, SpawnContent};
 use toon_provider::provider::ImagePolicyConfig;
 use toon_provider::{router, Clock, Listing, ProviderConfig, ProviderService};
@@ -649,37 +650,44 @@ pub fn spawn_content(seed: u8, image: ImageRef) -> SpawnContent {
     }
 }
 
-/// A tenant-signed request for `op` about `content`, as the tenant's tooling
-/// would send it. `tenant` is a fresh key unless given.
-pub fn signed(h: &StoreHarness, op: &'static str, content: Value, tenant: Option<Keys>) -> Value {
-    RequestSpec {
-        tenant: tenant.unwrap_or_else(Keys::generate),
-        providers: vec![h.provider],
-        op,
-        content,
-        created_at: h.clock.now(),
-        expiration: Some(h.clock.now() + 60),
-        kind: K_LEASE_REQUEST,
+/// A Lease Request for `op` about `content`, as the tenant's tooling would
+/// send it. It presents `token`, or a freshly minted one nobody has seen.
+pub fn request(
+    h: &StoreHarness,
+    op: &'static str,
+    content: Value,
+    token: Option<&ContinuationToken>,
+) -> Value {
+    let spec = RequestSpec::new(h.provider, h.clock.now(), op, content);
+    match token {
+        Some(token) => spec.with_token(token).request(),
+        None => spec.request(),
     }
-    .sign()
 }
 
-/// Pay a spawn of `image` on `basic` v1 as a fresh tenant.
-pub async fn spawn(h: &StoreHarness, seed: u8, image: ImageRef) -> (StatusCode, Value) {
-    spawn_as(h, seed, image, Keys::generate()).await
+/// Pay a spawn of `image` on `basic` v1, minting the lease's Continuation
+/// Token here: the token comes back so the caller can act on the lease.
+pub async fn spawn(
+    h: &StoreHarness,
+    seed: u8,
+    image: ImageRef,
+) -> (StatusCode, Value, ContinuationToken) {
+    let token = mint().continuation_for(&h.provider);
+    let (status, body) = spawn_as(h, seed, image, &token).await;
+    (status, body, token)
 }
 
 pub async fn spawn_as(
     h: &StoreHarness,
     seed: u8,
     image: ImageRef,
-    tenant: Keys,
+    token: &ContinuationToken,
 ) -> (StatusCode, Value) {
     let content = serde_json::to_value(spawn_content(seed, image)).unwrap();
     post(
         &h.app,
         "/listings/basic/v1/spawn",
-        json!({ "request": signed(h, "spawn", content, Some(tenant)) }),
+        json!({ "request": request(h, "spawn", content, Some(token)) }),
     )
     .await
 }
