@@ -76,9 +76,11 @@ describe('a dry run', () => {
     assert.equal(report.workload_id, WORKLOAD);
     assert.deepEqual(report.gateway, { route: ROUTE, seal_key: SEAL_KEY });
     assert.deepEqual(Object.keys(report.handover), [
-      'workload_id', 'standby_set', 'grants', 'http_port', 'expires_at', 'name',
+      'workload_id', 'standby_set', 'http_port', 'expires_at', 'name',
     ]);
-    assert.match(report.handover.grants[PROVIDER], /^[0-9a-f]{64}$/);
+    assert.deepEqual(Object.keys(report.handover.standby_set[0]), ['provider', 'grant']);
+    assert.equal(report.handover.standby_set[0].provider, PROVIDER);
+    assert.match(report.handover.standby_set[0].grant, /^[0-9a-f]{64}$/);
     assert.equal(stderr.includes(ROOT_SECRET), false, 'the root secret is never printed');
   });
 
@@ -91,11 +93,11 @@ describe('a dry run', () => {
 
     assert.equal(code, 0);
     const report = JSON.parse(stdout);
-    assert.deepEqual(Object.keys(report.withdrawal), ['workload_id', 'expires_at', 'grants']);
+    assert.deepEqual(Object.keys(report.withdrawal), ['workload_id', 'expires_at', 'standby_set']);
     assert.deepEqual(
-      report.withdrawal.grants,
-      handover.handover.grants,
-      'the same grant, re-derived, not stored',
+      report.withdrawal.standby_set,
+      handover.handover.standby_set,
+      'the same members and the same grants, re-derived, not stored',
     );
   });
 
@@ -103,7 +105,9 @@ describe('a dry run', () => {
     const args = ['handover', ...FLAGS, '--http-port', '443', '--expires-in', '24h', '--dry-run'];
     const { code, stdout } = await seal([...args, '--root-secret', ROOT_SECRET]);
     assert.equal(code, 0);
-    assert.ok(JSON.parse(stdout).handover.grants[PROVIDER]);
+    const [member] = JSON.parse(stdout).handover.standby_set;
+    assert.equal(member.provider, PROVIDER);
+    assert.match(member.grant, /^[0-9a-f]{64}$/);
   });
 });
 

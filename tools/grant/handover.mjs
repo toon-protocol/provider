@@ -165,16 +165,26 @@ export function checkHandover({ rootSecret, workloadId, standbySet, httpPort, po
 }
 
 /**
- * One Gateway Grant per member of `standbySet`, keyed by the member's key
- * and in the set's order, primary first.
+ * The Standby Set as a message carries it (spec §12.1): one entry per member,
+ * in the set's own order and primary first, each carrying the Gateway Grant
+ * derived for that member's OWN key.
+ *
+ *   [ { provider: "<pubkey hex>", grant: "<64 hex>" }, … ]
  *
  * Per MEMBER, because a grant derives from the lease's Continuation Token
  * and that token is per provider (spec §6.1.1, §7): the grant that reads the
  * lease at the primary is `bad_grant` at a standby. A gateway resolving a
  * workload asks every member (§12.4), so it needs one for each.
+ *
+ * One structure and not two parallel ones, because a member and the grant it
+ * is asked with are one fact: there is no list to fall out of step with, and
+ * a member cannot reach a gateway without the value that reads its lease.
  */
-const grantsFor = (rootSecret, standbySet, expiresAt) =>
-  Object.fromEntries(standbySet.map((member) => [member, gatewaySub(continuationFor(rootSecret, member), expiresAt)]));
+const standbySetFor = (rootSecret, providers, expiresAt) =>
+  providers.map((provider) => ({
+    provider,
+    grant: gatewaySub(continuationFor(rootSecret, provider), expiresAt),
+  }));
 
 /**
  * The Gateway Handover for these inputs: what the removed Gateway Grant
@@ -183,7 +193,7 @@ const grantsFor = (rootSecret, standbySet, expiresAt) =>
  * it anywhere. Refused with a thrown explanation when `checkHandover` would
  * refuse it. `now` is the clock the expiry is checked against.
  *
- *   { workload_id, standby_set, grants, http_port, expires_at, name? }
+ *   { workload_id, standby_set: [{ provider, grant }, …], http_port, expires_at, name? }
  *
  * Nothing about a run but its inputs decides the grant: the same root secret,
  * Standby Set and `expires_at` give the same handover on any machine.
@@ -194,8 +204,7 @@ export function handoverFor(handover, now) {
   const { rootSecret, workloadId, standbySet, httpPort, expiresAt, name } = handover;
   return {
     workload_id: workloadId,
-    standby_set: [...standbySet],
-    grants: grantsFor(rootSecret, standbySet, expiresAt),
+    standby_set: standbySetFor(rootSecret, standbySet, expiresAt),
     http_port: httpPort,
     expires_at: expiresAt,
     ...(name === undefined ? {} : { name }),
@@ -353,7 +362,10 @@ export function checkWithdrawal({ rootSecret, workloadId, standbySet, expiresAt 
  * nothing, from the same root secret and the moment the handover named.
  * Refused with a thrown explanation when `checkWithdrawal` would refuse it.
  *
- *   { workload_id, expires_at, grants }
+ *   { workload_id, expires_at, standby_set: [{ provider, grant }, …] }
+ *
+ * The members are spelled exactly as a handover spells them, because they are
+ * the same fact: a gateway reading one message has learned to read the other.
  *
  * A WITHDRAWAL ENDS SERVING, NOT READING. Bearing the grant is what makes it
  * safe without a signature — only the holder of the lease's token can derive
@@ -368,7 +380,7 @@ export function withdrawalFor(withdrawal) {
   return {
     workload_id: workloadId,
     expires_at: expiresAt,
-    grants: grantsFor(rootSecret, standbySet, expiresAt),
+    standby_set: standbySetFor(rootSecret, standbySet, expiresAt),
   };
 }
 

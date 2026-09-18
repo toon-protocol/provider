@@ -142,16 +142,68 @@ async fn handover_for(workload_id: &str, members: &[String], expires_at: u64) ->
     report["handover"].clone()
 }
 
-/// The grant the handover derived for `provider`, as the value a request
-/// presents.
-fn grant_at(handover: &Value, provider: &str) -> ContinuationToken {
-    let hex = handover["grants"][provider].as_str().unwrap_or_else(|| {
+/// The `standby_set` a handover carries, as the list of members it must be.
+fn standby_set_of(handover: &Value) -> &Vec<Value> {
+    handover["standby_set"].as_array().unwrap_or_else(|| {
         panic!(
-            "the handover carries no grant for {}: {}",
-            provider, handover
+            "a handover's `standby_set` is a list of members: {}",
+            handover
         )
-    });
-    ContinuationToken::from_hex(hex).expect("a grant is 64 lowercase hex characters")
+    })
+}
+
+/// The members a handover names, in the order it names them — primary first.
+///
+/// An entry is exactly `{ provider, grant }` and is checked to be: a gateway
+/// REFUSES a field no member names rather than dropping it (spec §12.1), so a
+/// stray one would be a handover no gateway admits, however well the grant
+/// inside it reads a lease here.
+fn members_of(handover: &Value) -> Vec<String> {
+    standby_set_of(handover)
+        .iter()
+        .map(|member| {
+            let fields = member
+                .as_object()
+                .unwrap_or_else(|| panic!("a member is a JSON object: {}", handover));
+            let mut named: Vec<&str> = fields.keys().map(String::as_str).collect();
+            named.sort_unstable();
+            assert_eq!(
+                named,
+                ["grant", "provider"],
+                "a member names its provider and bears its grant, and carries nothing a gateway would refuse: {}",
+                handover
+            );
+            fields["provider"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a member names its `provider`: {}", handover))
+                .to_owned()
+        })
+        .collect()
+}
+
+/// The grant the handover derived for `provider`, out of that member's OWN
+/// entry (spec §12.1) — where the gateway reads it.
+///
+/// A member the handover does not name PANICS rather than answering nothing:
+/// a missing grant compared against another missing one is two `null`s that
+/// agree, and this file's whole business is that they must not.
+fn grant_hex<'a>(handover: &'a Value, provider: &str) -> &'a str {
+    standby_set_of(handover)
+        .iter()
+        .find(|member| member["provider"] == json!(provider))
+        .and_then(|member| member["grant"].as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "the handover carries no grant for {}: {}",
+                provider, handover
+            )
+        })
+}
+
+/// That grant as the value a request presents.
+fn grant_at(handover: &Value, provider: &str) -> ContinuationToken {
+    ContinuationToken::from_hex(grant_hex(handover, provider))
+        .expect("a grant is 64 lowercase hex characters")
 }
 
 /// `status` for `workload_id`, presenting `token` and asserting the
@@ -208,7 +260,7 @@ async fn the_handover_a_run_produces_is_accepted_as_a_delegated_status() {
 
     // What the tool says the gateway must serve is what this lease is.
     assert_eq!(handover["workload_id"], json!(content.workload_id));
-    assert_eq!(handover["standby_set"], json!([h.provider.to_hex()]));
+    assert_eq!(members_of(&handover), vec![h.provider.to_hex()]);
     assert_eq!(handover["expires_at"], json!(expires_at));
     assert!(
         tenants_answer["access"]["ports"]
@@ -242,7 +294,8 @@ async fn the_handover_a_run_produces_is_accepted_as_a_delegated_status() {
 /// per provider (spec §6.1.1, §7) — so a single grant would read at one
 /// member and be `bad_grant` at every other, and a gateway asking all of
 /// them (§12.4) would learn nothing from the rest. The tool derives one for
-/// each, keyed by the member, and each member takes its own and no other.
+/// each, in the member's own entry, and each member takes its own and no
+/// other.
 #[tokio::test]
 async fn each_member_of_a_standby_set_takes_its_own_grant_and_refuses_the_others() {
     let primary = harness_now().await;
@@ -258,12 +311,13 @@ async fn each_member_of_a_standby_set_takes_its_own_grant_and_refuses_the_others
 
     let handover = handover_for(&content.workload_id, &members, expires_at).await;
     assert_eq!(
-        handover["standby_set"],
-        json!(members),
+        members_of(&handover),
+        members,
         "the set is carried primary first, as the tenant gave it"
     );
     assert_ne!(
-        handover["grants"][&members[0]], handover["grants"][&members[1]],
+        grant_hex(&handover, &members[0]),
+        grant_hex(&handover, &members[1]),
         "one grant per member, and no member's reads at another"
     );
 
@@ -314,7 +368,8 @@ async fn a_second_run_derives_the_same_grant_and_a_later_moment_another_that_als
 
     let later = handover_for(&content.workload_id, &members, expires_at + GRANT_TTL).await;
     assert_ne!(
-        later["grants"][&provider], first["grants"][&provider],
+        grant_hex(&later, &provider),
+        grant_hex(&first, &provider),
         "a later moment is a different grant"
     );
 

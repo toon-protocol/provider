@@ -35,12 +35,18 @@ gateway needs and can read nowhere else:
 ```json
 { "handover": {
     "workload_id": "…",
-    "standby_set": ["<primary>", "<standby>"],
-    "grants": { "<primary>": "<64 hex>", "<standby>": "<64 hex>" },
+    "standby_set": [
+      { "provider": "<primary>", "grant": "<64 hex>" },
+      { "provider": "<standby>", "grant": "<64 hex>" }
+    ],
     "http_port": 443,
     "expires_at": 1700086400,
     "name": "blog" } }
 ```
+
+Neither message carries a `gateway` field: being sealed to that connector is
+what names it. The report this tool prints does name one, for the tenant's own
+record — it is not part of what is sealed.
 
 **Gateway Withdrawal** — the tenant stops this gateway serving the workload.
 It names the workload and bears the grant currently in force, which is what
@@ -48,18 +54,28 @@ makes it safe with no signature: only a party holding the lease's root secret
 can derive that value.
 
 ```json
-{ "withdrawal": { "workload_id": "…", "expires_at": 1700086400, "grants": { "…": "…" } } }
+{ "withdrawal": {
+    "workload_id": "…",
+    "expires_at": 1700086400,
+    "standby_set": [ { "provider": "…", "grant": "<64 hex>" } ] } }
 ```
+
+The members are spelled exactly as a handover spells them: the same fact, so
+a gateway that can read one can read the other.
 
 ### One grant per member of the Standby Set
 
-`grants` is keyed by provider, in the set's order, primary first — and there
-is one **per member** because `gateway_sub` derives from
-`continuation(provider)`, which is per provider (spec §6.1.1, §7). A single
-value would read the lease at one member and be `bad_grant` at every other,
-and a gateway resolving a workload asks **all** of them (§12.4). The
+`standby_set` is the set in its own order, primary first, and **each entry
+carries the grant derived for its own key** — because `gateway_sub` derives
+from `continuation(provider)`, which is per provider (spec §6.1.1, §7). A
+single value would read the lease at one member and be `bad_grant` at every
+other, and a gateway resolving a workload asks **all** of them (§12.4). The
 per-member derivation is what stops one member of a set acting as the tenant
 against another, and the tool does not undo it.
+
+A member and its grant are **one entry** rather than two lists to line up, so
+there is nothing to fall out of step and no member that can reach a gateway
+without the value that reads its lease (spec §12.1).
 
 ## A withdrawal ends serving, not reading
 

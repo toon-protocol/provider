@@ -56,6 +56,19 @@ const FIXTURE_INPUTS = {
 /** A fresh, valid set of inputs for the cases that vary one thing. */
 const inputs = (overrides = {}) => ({ ...FIXTURE_INPUTS, ...overrides });
 
+/**
+ * The grant a message carries for `provider`, read the way a gateway reads
+ * it: out of that member's own entry in `standby_set` (spec §12.1).
+ *
+ * A member the message does not name FAILS here rather than answering
+ * nothing, so that a missing member is never reported as a wrong grant.
+ */
+const grantAt = (message, provider) => {
+  const member = message.standby_set.find((entry) => entry.provider === provider);
+  assert.ok(member, `the message names no member ${provider}: ${JSON.stringify(message.standby_set)}`);
+  return member.grant;
+};
+
 /** A gateway's connector as a tenant is given it: the route it terminates and its pinned sealing key. */
 const GATEWAY = {
   route: 'g.toon.workload-gateway.handover',
@@ -119,7 +132,7 @@ describe('the handover a run produces', () => {
 
     // What the gateway presents as its request's `continuation`, and the
     // moment it names in `gateway_expires_at`, are this tool's output.
-    assert.equal(handover.grants[constants.provider.public_key], request.continuation);
+    assert.equal(grantAt(handover, constants.provider.public_key), request.continuation);
     assert.equal(handover.expires_at, request.content.gateway_expires_at);
     assert.equal(handover.workload_id, request.content.workload_id);
     // And the provider's own HTTP surface answered that request 200, with
@@ -134,26 +147,32 @@ describe('the handover a run produces', () => {
 
   it('carries what the gateway needs and nothing else: the removed event\'s content, less the tenant', () => {
     const handover = handoverFor(inputs({ name: 'blog' }), NOW);
-    assert.deepEqual(Object.keys(handover), ['workload_id', 'standby_set', 'grants', 'http_port', 'expires_at', 'name']);
-    assert.deepEqual(handover.standby_set, [constants.provider.public_key]);
+    assert.deepEqual(Object.keys(handover), ['workload_id', 'standby_set', 'http_port', 'expires_at', 'name']);
+    assert.deepEqual(Object.keys(handover.standby_set[0]), ['provider', 'grant']);
+    assert.deepEqual(handover.standby_set.map((member) => member.provider), [constants.provider.public_key]);
     assert.equal(handover.http_port, 443);
     assert.equal(handover.name, 'blog');
     assert.equal('name' in handoverFor(FIXTURE_INPUTS, NOW), false, 'no name, no field');
   });
 
-  it('derives one grant per member of a Standby Set, primary first, because the token it derives from is per provider', () => {
+  it('carries each member with the grant derived for its own key, primary first, because the token it derives from is per provider', () => {
     const members = [constants.primary_provider.public_key, constants.standby_provider.public_key];
     const handover = handoverFor(inputs({ standbySet: members }), NOW);
 
-    assert.deepEqual(handover.standby_set, members);
-    assert.deepEqual(Object.keys(handover.grants), members);
-    for (const member of members) {
-      assert.equal(
-        handover.grants[member],
-        gatewaySub(continuationFor(FIXTURE_INPUTS.rootSecret, member), FIXTURE_INPUTS.expiresAt),
-      );
-    }
-    assert.notEqual(handover.grants[members[0]], handover.grants[members[1]], 'one member cannot read at another');
+    // Each entry is a member and the grant derived under that member's own
+    // key, in the set's order — which is the order a gateway asks them in.
+    assert.deepEqual(
+      handover.standby_set,
+      members.map((member) => ({
+        provider: member,
+        grant: gatewaySub(continuationFor(FIXTURE_INPUTS.rootSecret, member), FIXTURE_INPUTS.expiresAt),
+      })),
+    );
+    assert.notEqual(
+      handover.standby_set[0].grant,
+      handover.standby_set[1].grant,
+      'one member cannot read at another',
+    );
   });
 
   it('derives rather than stores: the same root secret and moment give the same grant; a later moment another', () => {
@@ -162,7 +181,7 @@ describe('the handover a run produces', () => {
     assert.deepEqual(again, first, 'nothing about a run but its inputs decides the grant');
 
     const later = handoverFor(inputs({ expiresAt: FIXTURE_INPUTS.expiresAt + 86_400 }), NOW);
-    assert.notEqual(later.grants[constants.provider.public_key], first.grants[constants.provider.public_key]);
+    assert.notEqual(grantAt(later, constants.provider.public_key), grantAt(first, constants.provider.public_key));
     assert.equal(later.expires_at, FIXTURE_INPUTS.expiresAt + 86_400);
   });
 });
@@ -264,7 +283,10 @@ describe('handing over', () => {
     });
     assert.equal(refused.delivered, false);
     assert.equal(refused.failed, 'g.toon.workload-gateway.handover refused by destination: F00 no such workload');
-    assert.ok(refused.handover.grants, 'the handover is still reported, so a tenant can see what it derived');
+    assert.ok(
+      grantAt(refused.handover, constants.provider.public_key),
+      'the handover is still reported, so a tenant can see what it derived',
+    );
 
     const dropped = await handOver({
       handover: FIXTURE_INPUTS,
@@ -298,11 +320,15 @@ describe('withdrawing', () => {
     const withdrawal = withdrawalFor(WITHDRAWAL_INPUTS);
     const handover = handoverFor(FIXTURE_INPUTS, NOW);
 
-    assert.deepEqual(Object.keys(withdrawal), ['workload_id', 'expires_at', 'grants']);
+    assert.deepEqual(Object.keys(withdrawal), ['workload_id', 'expires_at', 'standby_set']);
     assert.equal(withdrawal.workload_id, FIXTURE_INPUTS.workloadId);
     assert.equal(withdrawal.expires_at, FIXTURE_INPUTS.expiresAt);
-    assert.deepEqual(withdrawal.grants, handover.grants, 'the same grant, because the same root secret and moment');
-    assert.equal(withdrawal.grants[constants.provider.public_key], DELEGATED.request_body.request.continuation);
+    assert.deepEqual(
+      withdrawal.standby_set,
+      handover.standby_set,
+      'member for member, the same grants: the same root secret and the same moment, and the same encoding as a handover',
+    );
+    assert.equal(grantAt(withdrawal, constants.provider.public_key), DELEGATED.request_body.request.continuation);
   });
 
   it('seals one withdrawal to the gateway\'s route and reports it delivered', async () => {
