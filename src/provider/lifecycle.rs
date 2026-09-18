@@ -2,17 +2,17 @@
 // (spec §6.3, §6.5, §6.6).
 //
 // The three differ in who may ask. An Extension only ADDS time and reveals
-// nothing, so it carries no signature and any payer may buy one for any lease
-// (ADR 0005) — a sponsor pays for a lease it does not own. Status and
-// Termination reveal or destroy, so both carry a tenant-signed Lease Request
-// and refuse anyone else with `not_tenant`.
+// nothing, so it carries no Lease Request at all and any payer may buy one
+// for any lease (ADR 0005) — a sponsor pays for a lease it does not own.
+// Status and Termination reveal or destroy, so both carry a Lease Request
+// presenting the lease's Continuation Token, and refuse anyone else with
+// `not_tenant`.
 //
-// Status has ONE other reader: a Workload Gateway the tenant granted (spec
-// §6.5, §3.1.3). It signs for itself and carries the tenant's signed
-// Gateway Grant in the request, and the provider checks the grant out of
-// that request alone — `may_read`. Nothing else in this module reads a
-// grant: a termination by a granted gateway is `not_tenant` like anyone
-// else's, because a grant delegates reading a lease and nothing more.
+// The question the two ask is NOT who is this. It is whether whoever is
+// asking holds the token this lease was taken with (ADR 0016), which is the
+// only question the provider ever needed answered and the one that leaks
+// nothing: the comparison is constant time, and the token reaches no log,
+// no metric and no message.
 //
 // A lease is named by the tenant's own `workload_id`, never by the backend id
 // this provider keys its table on: the tenant chose that id and it is the only
@@ -20,16 +20,14 @@
 
 use std::collections::HashMap;
 
-use nostr_sdk::PublicKey;
 use tracing::error;
 
 use super::cleanup::end_lease;
 use super::persistence::{persist_leases, LeaseEnd, LeaseRecord, LeaseState};
 use crate::nostr::directory_events::eviction_event;
-use crate::nostr::gateway_grant;
-use crate::nostr::lease_request::{self, Op};
+use crate::nostr::lease_request::{self, ValidLeaseRequest};
 use crate::nostr::wire::{
-    ErrorCode, ErrorResponse, EvictResponse, EvictionReason, ExtendRequest, ExtendResponse,
+    ErrorCode, ErrorResponse, EvictResponse, EvictionReason, ExtendRequest, ExtendResponse, Op,
     StatusResponse, TakeoverStatus, TerminateResponse, WorkloadContent,
 };
 use crate::provider_http::AppState;
@@ -220,13 +218,12 @@ async fn extend_lease(
 
 /// Serve one status on the free `<addr>.status`.
 pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, ErrorResponse> {
-    let (signer, content) = authenticate(state, body, Op::Status).await?;
-    let now = state.clock.now();
+    let (request, content) = authenticate(state, body, Op::Status).await?;
 
     let leases = state.leases.lock().await;
     let id = lease_id_for(&leases, &content.workload_id).ok_or_else(unknown_workload)?;
     let lease = leases.get(&id).ok_or_else(unknown_workload)?;
-    may_read(lease, &signer, &content, now)?;
+    lease_request::check_continuation(&request, &lease.continuation)?;
 
     Ok(StatusResponse {
         workload_id: lease.workload_id.clone(),
@@ -264,7 +261,7 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
 /// destroyed now, and nothing is refunded (ADR 0003).
 pub async fn terminate(state: &AppState, body: &[u8]) -> Result<TerminateResponse, ErrorResponse> {
     let received = std::time::Instant::now();
-    let (tenant, content) = authenticate(state, body, Op::Terminate).await?;
+    let (request, content) = authenticate(state, body, Op::Terminate).await?;
     let workload_id = content.workload_id;
     let now = state.clock.now();
 
@@ -272,7 +269,7 @@ pub async fn terminate(state: &AppState, body: &[u8]) -> Result<TerminateRespons
         let leases = state.leases.lock().await;
         let id = lease_id_for(&leases, &workload_id).ok_or_else(unknown_workload)?;
         let lease = leases.get(&id).ok_or_else(unknown_workload)?;
-        check_tenant(lease, &tenant)?;
+        lease_request::check_continuation(&request, &lease.continuation)?;
         still_running(lease, now)?;
         id
     };
@@ -302,7 +299,7 @@ pub async fn terminate(state: &AppState, body: &[u8]) -> Result<TerminateRespons
 }
 
 /// Evict a lease: an operator decision, not a tenant one, so it carries no
-/// Lease Request and no signature — the caller is `provider_http`'s loopback
+/// Lease Request and no token — the caller is `provider_http`'s loopback
 /// operator endpoint, reached only by whoever already controls this host.
 ///
 /// The workload is stopped and deleted NOW, exactly like a termination
@@ -382,13 +379,17 @@ pub async fn evict(
     })
 }
 
-/// The Lease Request on a signed free route: validated exactly as a spawn's
-/// is, replay included, and parsed down to the workload id it names.
+/// The Lease Request on an authenticated free route: validated exactly as a
+/// spawn's is, replay included, and parsed down to the workload id it names.
+///
+/// Steps 1 to 3 only. The token it presented rides back in the request, for
+/// `lease_request::check_continuation` to weigh against the lease once the
+/// caller has found it — there is no lease to weigh it against until then.
 async fn authenticate(
     state: &AppState,
     body: &[u8],
     op: Op,
-) -> Result<(PublicKey, WorkloadContent), ErrorResponse> {
+) -> Result<(ValidLeaseRequest, WorkloadContent), ErrorResponse> {
     let now = state.clock.now();
     let request = lease_request::accept(
         body,
@@ -397,62 +398,7 @@ async fn authenticate(
         now,
         &state.accepted_requests,
     )?;
-    let content: WorkloadContent = serde_json::from_str(&request.content)
+    let content: WorkloadContent = serde_json::from_value(request.content.clone())
         .map_err(|e| invalid(format!("{} content: {}", op.as_str(), e)))?;
-    Ok((request.tenant, content))
-}
-
-/// Who may read this lease's status: its tenant, or a Workload Gateway the
-/// tenant granted (spec §6.5).
-///
-/// The tenant is checked FIRST and the grant only if that fails, so a grant
-/// is read at most once per request and never at all for the tenant's own —
-/// and so the two refusals stay apart: a signer carrying no grant hears
-/// `not_tenant` exactly as before, and only one that brought a grant that
-/// does not admit it hears `bad_grant`.
-///
-/// Everything the grant is checked against is already here: the lease's
-/// tenant, the workload id the request named, the key that signed the
-/// request and the clock. Nothing is fetched and nothing is kept.
-fn may_read(
-    lease: &LeaseRecord,
-    signer: &PublicKey,
-    content: &WorkloadContent,
-    now: u64,
-) -> Result<(), ErrorResponse> {
-    let refusal = match check_tenant(lease, signer) {
-        Ok(()) => return Ok(()),
-        Err(refusal) => refusal,
-    };
-    let Some(grant) = &content.grant else {
-        return Err(refusal);
-    };
-    gateway_grant::check(
-        grant,
-        &lease_tenant(lease)?,
-        &content.workload_id,
-        signer,
-        now,
-    )
-}
-
-/// The signer must be the lease's tenant. Compared as public keys, not as
-/// strings: the same key has more than one hex spelling.
-fn check_tenant(lease: &LeaseRecord, signer: &PublicKey) -> Result<(), ErrorResponse> {
-    if lease_tenant(lease)? == *signer {
-        Ok(())
-    } else {
-        Err(not_tenant())
-    }
-}
-
-/// The lease's tenant as a key. A record whose stored tenant does not parse
-/// belongs to nobody this request can prove it is, so it is `not_tenant` —
-/// the same answer either caller would reach on its own.
-fn lease_tenant(lease: &LeaseRecord) -> Result<PublicKey, ErrorResponse> {
-    PublicKey::parse(&lease.tenant).map_err(|_| not_tenant())
-}
-
-fn not_tenant() -> ErrorResponse {
-    ErrorResponse::new(ErrorCode::NotTenant, "this lease belongs to another tenant")
+    Ok((request, content))
 }

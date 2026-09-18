@@ -8,30 +8,40 @@
   "http_path": "/listings/warm/v1/standby",
   "request_body": {
     "request": {
-      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd\",\"reference\":\"docker.io/library/alpine\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"standby_set\":[\"9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b\",\"466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27\"],\"volume_gb\":2,\"workload_id\":\"a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0\"}",
-      "created_at": 1700000000,
-      "id": "1dbb95d67cf8f1210f55460ca5eceb5320648e2644a2528d2b38e0dda5363ce2",
-      "kind": 4432,
-      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
-      "sig": "8a7d1438e1df1d865e4d7666e2bed8cc379d720ad5a03f7ac18755af46916697d75d7f2be35eae98ad2e44a5ce7ecd43ae0bcd701287989c6642904e51862750",
-      "tags": [
-        [
-          "p",
-          "9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b"
+      "content": {
+        "args": [
+          "-c",
+          "sleep 300"
         ],
-        [
-          "p",
+        "entrypoint": [
+          "/bin/sh"
+        ],
+        "env": {
+          "GREETING": "hello"
+        },
+        "image": {
+          "digest": "sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd",
+          "reference": "docker.io/library/alpine"
+        },
+        "ports": [
+          {
+            "container_port": 443,
+            "protocol": "tcp"
+          }
+        ],
+        "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
+        "standby_set": [
+          "9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b",
           "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
         ],
-        [
-          "op",
-          "spawn"
-        ],
-        [
-          "expiration",
-          "1700000060"
-        ]
-      ]
+        "volume_gb": 2,
+        "workload_id": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "standby",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "8c7414bc46c647016eaee40a01592c48e55853b8964503a6880f5309a0cc8c07"
     }
   },
   "response_body": {

@@ -8,31 +8,19 @@
   "http_path": "/status",
   "request_body": {
     "request": {
-      "content": "{\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
-      "created_at": 1700000000,
-      "id": "8ba305703e82035baa21ece13cec60cbd0ed411ed70ecbe7f2de3efc52c0fd86",
-      "kind": 4432,
-      "pubkey": "3c72addb4fdf09af94f0c94d7fe92a386a7e70cf8a1d85916386bb2535c7b1b1",
-      "sig": "125958c5265a4b62e12350e33f237f78784e36fde4c756449338bac5de101679a4a5df63a9be10e578dfba5ff6eac1bd791ec22a9b982e2a9a4a092bf8f99492",
-      "tags": [
-        [
-          "p",
-          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
-        ],
-        [
-          "op",
-          "status"
-        ],
-        [
-          "expiration",
-          "1700000060"
-        ]
-      ]
+      "content": {
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "322e0a76e5bd865675d4a2d9b1cbfcec78af4abd68576759ef79162fdabcf3f2",
+      "expiration": 1700000060,
+      "op": "status",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "d1ea51546a2d1d32bb897d4e69dc1a3fe6d0d4cc79af1a841dc846cd113fab46"
     }
   },
   "response_body": {
     "error": "not_tenant",
-    "message": "this lease belongs to another tenant"
+    "message": "this lease was taken with another continuation token"
   },
   "response_status": 403,
   "route": "g.fixture.status",

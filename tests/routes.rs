@@ -6,6 +6,7 @@
 //! running lease (ADR 0009), so the table is a function of the config AND the
 //! lease table — which is why every assertion here hands it both.
 
+use toon_provider::nostr::continuation::ContinuationToken;
 use toon_provider::nostr::wire::{LeaseState, Resources, Role};
 use toon_provider::provider::{render_routes, LeaseRecord, Listing, ProviderConfig};
 
@@ -54,7 +55,7 @@ fn live_lease(id: u32, listing: &str, version: u32) -> LeaseRecord {
     LeaseRecord {
         id,
         workload_id: format!("{:02x}", id as u8).repeat(32),
-        tenant: "00".repeat(32),
+        continuation: ContinuationToken::from_hex(&"00".repeat(32)).unwrap(),
         listing: listing.to_string(),
         listing_version: version,
         role: Role::Standalone,

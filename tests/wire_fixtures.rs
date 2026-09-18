@@ -27,9 +27,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use nostr_sdk::secp256k1::rand::{CryptoRng, RngCore};
 use nostr_sdk::secp256k1::SECP256K1;
-use nostr_sdk::{
-    Event, EventBuilder, Keys, Kind, PublicKey, Tag, TagKind, Timestamp, UnsignedEvent,
-};
+use nostr_sdk::{Event, EventBuilder, Keys, Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -40,17 +38,17 @@ use common::{
     sha256_hex, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory,
     FakeHiddenService,
 };
+use toon_provider::nostr::continuation::{RootSecret, CONTINUATION_DOMAIN};
 use toon_provider::nostr::directory_events::{
     takeover_event, ProfileContent, Settlement, HIDDEN_LABEL,
 };
-use toon_provider::nostr::gateway_grant::{gateway_grant_event, GrantContent};
 use toon_provider::nostr::image_events::{
     blob_record_event, image_entry_event, template_event, BlobPart, BlobRecordContent, BlobSource,
     EntryBlob, ImageEntryContent, TemplateContent, TemplateImage,
 };
 use toon_provider::nostr::kinds::{
-    K_BLOB, K_EVICTION, K_GATEWAY_GRANT, K_IMAGE, K_LEASE_REQUEST, K_LISTING, K_LIVENESS,
-    K_PROFILE, K_TAKEOVER, K_TEMPLATE, TOON_LABEL,
+    K_BLOB, K_EVICTION, K_IMAGE, K_LISTING, K_LIVENESS, K_PROFILE, K_TAKEOVER, K_TEMPLATE,
+    TOON_LABEL,
 };
 use toon_provider::nostr::wire::{
     EvictionReason, ImageRef, PortRequest, Protocol, RegistryEntryRef, Resources, SpawnContent,
@@ -68,10 +66,17 @@ const INTERVAL: u64 = 3600;
 /// `lease_request::MAX_REQUEST_WINDOW_SECS`.
 const TTL: u64 = 60;
 
-/// TEST-ONLY secret keys, chosen to be obviously synthetic.
-const TENANT_SECRET: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+/// TEST-ONLY secrets, chosen to be obviously synthetic.
+///
+/// The TENANT's is not a key: after ADR 0016 a tenant signs nothing, and what
+/// it holds is one 32-byte ROOT SECRET per lease, from which it derives a
+/// Continuation Token per provider (spec §6.1). The fixtures reuse the old
+/// tenant numbers so the fixed world stays recognisable.
+const TENANT_ROOT_SECRET: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const PROVIDER_SECRET: &str = "2222222222222222222222222222222222222222222222222222222222222222";
-const OTHER_TENANT_SECRET: &str =
+/// A SECOND tenant's root secret: whoever holds no lease here, and whose
+/// token is therefore refused (`error.not_tenant`).
+const OTHER_TENANT_ROOT_SECRET: &str =
     "3333333333333333333333333333333333333333333333333333333333333333";
 /// The PUBLISHER: whoever signs an Image Registry entry, a Blob Record or a
 /// Template. Never a provider — spec §8's events are a publisher's, and the
@@ -85,12 +90,6 @@ const PRIMARY_SECRET: &str = "55555555555555555555555555555555555555555555555555
 /// stands beside when IT is the primary. It signs nothing here either; it is
 /// index 1 of the set `spawn.primary` forms.
 const STANDBY_SECRET: &str = "6666666666666666666666666666666666666666666666666666666666666666";
-/// The WORKLOAD GATEWAY (spec §3.1.3, §6.5): the key a tenant grants, and
-/// the key that signs the granted `status` requests here. Never a provider
-/// and never the tenant — that is the whole point of a grant — so it gets a
-/// key of its own.
-const GATEWAY_SECRET: &str = "7777777777777777777777777777777777777777777777777777777777777777";
-
 const PROVIDER_NAME: &str = "Fixture Provider";
 const ILP_ADDRESS: &str = "g.fixture";
 const PUBLIC_IP: &str = "203.0.113.7";
@@ -282,6 +281,19 @@ fn keys(secret: &str) -> Keys {
     Keys::parse(secret).expect("a fixture secret key parses")
 }
 
+/// One of the fixed 32-byte root secrets above, as a tenant holds it.
+fn root(secret: &str) -> RootSecret {
+    RootSecret::from_hex(secret).expect("a fixture root secret is 64 lowercase hex characters")
+}
+
+/// A fixture's `request_id`. A real tenant draws 32 random bytes for every
+/// request (spec §6.1); the fixtures derive them from a label instead, so
+/// the files are byte-reproducible and every request in them is still
+/// distinct — which is what the replay set needs.
+fn fixture_request_id(label: &str) -> String {
+    sha256_hex(format!("toon-fixture-request:{}", label).as_bytes())
+}
+
 fn workload_id(seed: u8) -> String {
     format!("{:02x}", seed).repeat(32)
 }
@@ -324,70 +336,40 @@ fn standby_set_content(seed: u8, set: &[PublicKey]) -> Value {
     content
 }
 
-/// A Lease Request exactly as spec §6.1 has a tenant sign it: kind
-/// `K_LEASE_REQUEST`, one `p` tag per addressee, `op` and `expiration`, the
-/// op's content object as the JSON `content` string.
+/// A Lease Request exactly as spec §6.1 writes one: a plain JSON object with
+/// six keys, signed by nobody, presenting the Continuation Token this tenant
+/// derived for THIS provider.
 ///
-/// `providers` is ordinarily one. A spawn that forms a Standby Set names
-/// every member of it, because the tenant signs the request ONCE and sends
-/// the same bytes to all of them (§6.1, §7); each member then reads its role
-/// off its own position and the route it was paid on.
+/// `provider` is one key on every op, a spawn forming a Standby Set included
+/// (§6.1, §7): the tenant sends one request to each member, and each member
+/// reads its role off its own position in `standby_set` and the route it was
+/// paid on.
 fn lease_request(
-    tenant: &Keys,
-    providers: &[PublicKey],
+    root: &RootSecret,
+    provider: &PublicKey,
     op: &str,
     content: &Value,
-    created_at: u64,
     expiration: u64,
-) -> Event {
-    let mut tags: Vec<Tag> = providers.iter().copied().map(Tag::public_key).collect();
-    tags.push(Tag::custom(TagKind::custom("op"), [op]));
-    tags.push(Tag::expiration(Timestamp::from(expiration)));
-    let unsigned = EventBuilder::new(Kind::Custom(K_LEASE_REQUEST), content.to_string())
-        .tags(tags)
-        .custom_created_at(Timestamp::from(created_at))
-        .build(tenant.public_key());
-    sign_reproducibly(unsigned, tenant)
+    label: &str,
+) -> Value {
+    json!({
+        "request_id": fixture_request_id(label),
+        "op": op,
+        "provider": provider.to_hex(),
+        "expiration": expiration,
+        "continuation": root.continuation_for(provider),
+        "content": content,
+    })
 }
 
-/// The body of every signed route: the event under the single key
-/// `request`, nothing else (`nostr::wire::LeaseRequestEnvelope`).
-fn envelope(event: &Event) -> Value {
-    json!({ "request": event_json(event) })
+/// The body of every authenticated route: the request object under the
+/// single key `request`, nothing else (`nostr::wire::LeaseRequestEnvelope`).
+fn envelope(request: &Value) -> Value {
+    json!({ "request": request })
 }
 
 fn about(seed: u8) -> Value {
     json!({ "workload_id": workload_id(seed) })
-}
-
-/// The HTTP port of `spawn_content`'s one published port: which of a spawn's
-/// ports a gateway forwards to is exactly what a grant says (spec §3.1.3).
-const GRANT_HTTP_PORT: u16 = 443;
-/// How long past `NOW` a fixture grant is good for. Longer than a Lease
-/// Request's 60 s on purpose: a grant is meant to be reused for as long as
-/// the tenant trusts the gateway, and a request that carries one is still
-/// bound by its own window (§6.1).
-const GRANT_TTL: u64 = 86_400;
-
-/// The Gateway Grant a tenant signs for a standalone lease on the fixture
-/// provider: one gateway, one workload, a `standby_set` of one member (§7).
-fn grant_content(gateway: &Keys, seed: u8, expires_at: u64) -> GrantContent {
-    GrantContent {
-        workload_id: workload_id(seed),
-        gateway: gateway.public_key().to_hex(),
-        http_port: GRANT_HTTP_PORT,
-        standby_set: vec![keys(PROVIDER_SECRET).public_key().to_hex()],
-        expires_at,
-        name: None,
-    }
-}
-
-/// That grant, signed by `tenant` with reproducible auxiliary randomness.
-fn gateway_grant(content: &GrantContent, tenant: &Keys) -> Event {
-    with_reproducible_sig(
-        &gateway_grant_event(content, tenant, NOW).expect("a grant builds"),
-        tenant,
-    )
 }
 
 // ── the provider's side: a fixed configuration over faked I/O ────────────────
@@ -467,11 +449,13 @@ struct Fixture {
     service: ProviderService,
     directory: Arc<FakeDirectory>,
     /// Stopped at `NOW`, and moved only to drive the watchdog through a
-    /// Takeover — then set back, so every request is signed at `NOW`.
+    /// Takeover — then set back, so every request is minted at `NOW`.
     clock: Arc<FakeClock>,
     provider: Keys,
-    tenant: Keys,
-    other_tenant: Keys,
+    /// The tenant's ROOT SECRET for the leases in these fixtures, and a
+    /// second tenant's, who holds none here (spec §6.1).
+    tenant: RootSecret,
+    other_tenant: RootSecret,
     /// Keeps the stubbed registry answering while the app may still ask it.
     _registry: MockServer,
     /// The TOON store as the provider reads it (`/raw/<txid>`), holding the
@@ -484,45 +468,28 @@ impl Fixture {
         self.provider.public_key()
     }
 
-    fn spawn_request(&self, seed: u8, ttl: u64) -> Event {
+    fn spawn_request(&self, seed: u8, label: &str) -> Value {
         lease_request(
             &self.tenant,
-            &[self.provider_pubkey()],
+            &self.provider_pubkey(),
             "spawn",
             &spawn_content(seed),
-            NOW,
-            NOW + ttl,
+            NOW + TTL,
+            label,
         )
     }
 
-    /// `op = status` or `op = terminate` about one workload. `ttl` also makes
-    /// two requests about the same workload distinct events, since the
-    /// provider refuses a replayed id (§6.1).
-    fn about_request(&self, tenant: &Keys, op: &str, seed: u8, ttl: u64) -> Event {
+    /// `op = status` or `op = terminate` about one workload. `label` is what
+    /// makes two requests about the same workload distinct requests, since
+    /// the provider refuses a replayed `request_id` (§6.1).
+    fn about_request(&self, root: &RootSecret, op: &str, seed: u8, label: &str) -> Value {
         lease_request(
-            tenant,
-            &[self.provider_pubkey()],
+            root,
+            &self.provider_pubkey(),
             op,
             &about(seed),
-            NOW,
-            NOW + ttl,
-        )
-    }
-
-    /// A `status` signed by a WORKLOAD GATEWAY, carrying the tenant's grant
-    /// in its content (spec §6.5). The gateway signs for itself: nothing of
-    /// the tenant's is here but the grant it published. `ttl` distinguishes
-    /// two such requests the same way `about_request`'s does.
-    fn granted_request(&self, gateway: &Keys, seed: u8, grant: &Event, ttl: u64) -> Event {
-        let mut content = about(seed);
-        content["grant"] = event_json(grant);
-        lease_request(
-            gateway,
-            &[self.provider_pubkey()],
-            "status",
-            &content,
-            NOW,
-            NOW + ttl,
+            NOW + TTL,
+            label,
         )
     }
 }
@@ -578,8 +545,8 @@ async fn fixture_provider_configured(
         directory,
         clock,
         provider: keys(PROVIDER_SECRET),
-        tenant: keys(TENANT_SECRET),
-        other_tenant: keys(OTHER_TENANT_SECRET),
+        tenant: root(TENANT_ROOT_SECRET),
+        other_tenant: root(OTHER_TENANT_ROOT_SECRET),
         _registry: registry,
         _gateway: gateway,
     }
@@ -627,12 +594,20 @@ fn with_validation_step(mut doc: Value, step: &str) -> Value {
 #[test]
 fn constants_and_test_keys() {
     let provider = keys(PROVIDER_SECRET);
-    let tenant = keys(TENANT_SECRET);
-    let other = keys(OTHER_TENANT_SECRET);
     let key = |k: &Keys| {
         json!({
             "secret_key": k.secret_key().to_secret_hex(),
             "public_key": k.public_key().to_hex(),
+        })
+    };
+    // A tenant's secret is not a key: it is the 32-byte root secret every
+    // Continuation Token of its leases derives from (spec §6.1). What it
+    // derives to at THIS provider is published beside it, so a second
+    // implementation can check its own derivation against a fixture request.
+    let tenant_root = |secret: &str| {
+        json!({
+            "root_secret": secret,
+            "continuation_at_provider": root(secret).continuation_for(&provider.public_key()),
         })
     };
     golden(
@@ -654,23 +629,20 @@ fn constants_and_test_keys() {
                 "secret_key": provider.secret_key().to_secret_hex(),
                 "public_key": provider.public_key().to_hex(),
             },
-            "tenant": key(&tenant),
-            "other_tenant": key(&other),
+            "tenant": tenant_root(TENANT_ROOT_SECRET),
+            "other_tenant": tenant_root(OTHER_TENANT_ROOT_SECRET),
             "publisher": key(&keys(PUBLISHER_SECRET)),
             "primary_provider": key(&keys(PRIMARY_SECRET)),
             "standby_provider": key(&keys(STANDBY_SECRET)),
-            "gateway": key(&keys(GATEWAY_SECRET)),
             "kinds": {
                 "K_PROFILE": K_PROFILE,
                 "K_LISTING": K_LISTING,
                 "K_LIVENESS": K_LIVENESS,
-                "K_LEASE_REQUEST": K_LEASE_REQUEST,
                 "K_EVICTION": K_EVICTION,
                 "K_TAKEOVER": K_TAKEOVER,
                 "K_IMAGE": K_IMAGE,
                 "K_BLOB": K_BLOB,
                 "K_TEMPLATE": K_TEMPLATE,
-                "K_GATEWAY_GRANT": K_GATEWAY_GRANT,
             },
             "standby_price": STANDBY_PRICE,
             "label": TOON_LABEL,
@@ -679,6 +651,18 @@ fn constants_and_test_keys() {
                 "sig": "BIP-340 Schnorr over the id, by the event's pubkey",
                 "aux_rand": "32 zero bytes, so every fixture signature is reproducible; \
                              real signers use fresh randomness",
+                "applies_to": "the published events only. A Lease Request is signed by \
+                               nobody (spec §6.1, ADR 0016).",
+            },
+            "continuation": {
+                "derivation": format!(
+                    "continuation(provider) = HKDF-SHA256(ikm = root, salt = empty, \
+                     info = \"{}\" || <provider pubkey, 64 lowercase hex>, L = 32)",
+                    CONTINUATION_DOMAIN,
+                ),
+                "request_id": "32 random bytes per request. These fixtures derive theirs \
+                               from a label so the files are reproducible; a real tenant \
+                               draws them at random.",
             },
         }),
     );
@@ -687,12 +671,23 @@ fn constants_and_test_keys() {
 #[test]
 fn a_lease_request_per_op() {
     let provider = keys(PROVIDER_SECRET).public_key();
-    let tenant = keys(TENANT_SECRET);
+    let tenant = root(TENANT_ROOT_SECRET);
     let cases = [
         (
             "spawn",
             spawn_content(0xaa),
             "Buys a lease on `<addr>.basic.v1.spawn`. The body of `spawn.ok`.",
+        ),
+        (
+            "standby",
+            standby_set_content(
+                STANDBY_SET_WORKLOAD,
+                &[keys(PRIMARY_SECRET).public_key(), provider],
+            ),
+            "Reserves a Warm Standby on `<addr>.warm.v1.standby` (spec §7). The same content \
+             a primary's spawn carries, under the op that names the route: each member of a \
+             Standby Set is sent its own request, naming only itself. The body of \
+             `spawn.standby`.",
         ),
         (
             "status",
@@ -706,18 +701,77 @@ fn a_lease_request_per_op() {
         ),
     ];
     for (op, content, description) in cases {
-        let event = lease_request(&tenant, &[provider], op, &content, NOW, NOW + TTL);
-        assert!(event.verify().is_ok());
-        let mut doc = event_fixture("lease_request", op, description, "K_LEASE_REQUEST", &event);
-        doc["packet_body"] = envelope(&event);
-        doc["packet_body_encoding"] = json!(
-            "The HTTP request body is this JSON object: the signed event, unmodified, as the \
-             value of the single key `request`. No other key is allowed. The connector \
-             carries the whole HTTP request inside its sealed envelope; the provider app \
-             receives this body as plaintext JSON."
+        let request = lease_request(
+            &tenant,
+            &provider,
+            op,
+            &content,
+            NOW + TTL,
+            &format!("lease_request.{}", op),
         );
+        let mut doc = json!({
+                   "fixture": header("lease_request", op, description),
+                   "request": request,
+                   "packet_body": envelope(&request),
+                   "packet_body_encoding":
+        "The HTTP request body is this JSON object: the request, unmodified, as the \
+                        value of the single key `request`. No other key is allowed, and nothing is \
+                        signed — a Lease Request is a plain JSON object carrying the lease's \
+                        Continuation Token (spec §6.1, ADR 0016). The connector carries the whole \
+                        HTTP request inside its sealed envelope; the provider app receives this body \
+                        as plaintext JSON.",
+               });
+        doc["content"] = content;
         golden(&format!("lease_request.{}.json", op), doc);
     }
+}
+
+/// The derivation vector (spec §6.1): one fixed root secret, one fixed
+/// provider key, and the Continuation Token they produce.
+///
+/// No route can show this — a provider only ever compares a token it was
+/// handed — so it is a vector rather than an exchange, and it is here so a
+/// second implementation can check its own HKDF against the reference's
+/// before it sends anything.
+#[test]
+fn the_continuation_derivation_vector() {
+    let provider = keys(PROVIDER_SECRET).public_key();
+    let derived = root(TENANT_ROOT_SECRET).continuation_for(&provider);
+    // Derived per PROVIDER, so every member of a Standby Set holds a
+    // different token and one member cannot act as the tenant against
+    // another (spec §7).
+    let at_primary = root(TENANT_ROOT_SECRET).continuation_for(&keys(PRIMARY_SECRET).public_key());
+    assert_ne!(derived, at_primary);
+    golden(
+        "continuation.vector.json",
+        json!({
+                   "fixture": header(
+                       "continuation",
+                       "vector",
+        "The Continuation Token derivation (spec §6.1): HKDF-SHA256 over the tenant's \
+                        32-byte root secret, with an empty salt and an ASCII `info` of the domain \
+                        string followed by the provider's 64 lowercase hex public key, for 32 bytes \
+                        of output. A tenant derives one token per provider from one root secret per \
+                        lease; the provider stores the token and nothing else about the tenant. \
+                        `at_other_provider` is the same root secret against a DIFFERENT provider \
+                        key, which is why one member of a Standby Set cannot act as the tenant \
+                        against another (§7).",
+                   ),
+                   "algorithm": "HKDF-SHA256 (RFC 5869)",
+                   "salt": "empty (RFC 5869 then extracts with 32 zero bytes)",
+                   "info_prefix": CONTINUATION_DOMAIN,
+                   "info_encoding": "the prefix above, as ASCII, followed by the provider's \
+                                     public key as 64 lowercase hex characters",
+                   "output_bytes": 32,
+                   "root_secret": TENANT_ROOT_SECRET,
+                   "provider_public_key": provider.to_hex(),
+                   "continuation": derived,
+                   "at_other_provider": {
+                       "provider_public_key": keys(PRIMARY_SECRET).public_key().to_hex(),
+                       "continuation": at_primary,
+                   },
+               }),
+    );
 }
 
 #[test]
@@ -851,7 +905,7 @@ async fn one_directory_event_per_kind() {
     let (status, _) = post(
         &f.app,
         "/listings/basic/v1/spawn",
-        envelope(&f.spawn_request(0xbb, TTL)),
+        envelope(&f.spawn_request(0xbb, "wrong_listing_version")),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -1026,7 +1080,7 @@ async fn a_hidden_providers_lease_is_reached_at_its_own_anyone_address() {
         ),
         &route("basic.v1.spawn"),
         "/listings/basic/v1/spawn",
-        envelope(&f.spawn_request(aa, TTL)),
+        envelope(&f.spawn_request(aa, "spawn.ok")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -1051,7 +1105,7 @@ async fn a_hidden_providers_lease_is_reached_at_its_own_anyone_address() {
         ),
         &route("status"),
         "/status",
-        envelope(&f.about_request(&f.tenant, "status", aa, TTL)),
+        envelope(&f.about_request(&f.tenant, "status", aa, "status.running")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -1141,7 +1195,7 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
         ),
         &route("basic.v1.spawn"),
         "/listings/basic/v1/spawn",
-        envelope(&f.spawn_request(aa, TTL)),
+        envelope(&f.spawn_request(aa, "spawn.ok")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -1159,96 +1213,12 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
         ),
         &route("status"),
         "/status",
-        envelope(&f.about_request(&f.tenant, "status", aa, TTL)),
+        envelope(&f.about_request(&f.tenant, "status", aa, "status.running")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
     assert_eq!(response["state"], "running");
     golden("status.running.json", doc);
-    let tenants_answer = response;
-
-    // The same status, asked by a WORKLOAD GATEWAY the tenant granted.
-    let gateway = keys(GATEWAY_SECRET);
-    let grant = gateway_grant(&grant_content(&gateway, aa, NOW + GRANT_TTL), &f.tenant);
-    golden(
-        "gateway_grant.json",
-        event_fixture(
-            "gateway_grant",
-            "grant",
-            "The Gateway Grant (spec §3.1.3): a TENANT-signed, addressable event that lets ONE \
-             Workload Gateway read ONE workload's lease state until it expires. `d` is the \
-             workload id, so republishing under the same id — a new `expires_at`, a different \
-             `gateway` — REPLACES the grant: renewal and rotation are the same act as \
-             publishing. The `p` tag names the gateway, so a gateway finds every grant naming \
-             it with one relay filter, and `L toon.network` is the label every published TOON \
-             Network event carries. `http_port` and `standby_set` are for the GATEWAY — which \
-             of the spawn's ports is the HTTP one, and which providers to ask — and a provider \
-             reads neither. It is carried inside the `status` request below; a provider never \
-             fetches one from a relay and never stores one.",
-            "K_GATEWAY_GRANT",
-            &grant,
-        ),
-    );
-
-    let (status, response, doc) = exchange(
-        &f,
-        (
-            "status",
-            "granted",
-            "Status of the same running lease, signed by the GATEWAY rather than the tenant \
-             and carrying `gateway_grant` as the content's `grant` (spec §6.5). The answer is \
-             byte-for-byte what the tenant was told in `status.running` — `role`, `state`, \
-             `expires_at`, `access`, and `template` and `takeover` where there are any — \
-             because a grant delegates reading this lease and changes nothing about what \
-             reading it says. The request is an ordinary Lease Request in every other way: \
-             the gateway's own signature, one `p` tag for this provider, `op=status`, and the \
-             same 60 s window and replay rule as any other (§6.1). The grant itself is not a \
-             replay concern — it is meant to be reused — and it is verified out of this \
-             request alone, so a Hidden Provider answers one without opening anything (§10).",
-        ),
-        &route("status"),
-        "/status",
-        envelope(&f.granted_request(&gateway, aa, &grant, TTL)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{}", response);
-    assert_eq!(
-        response, tenants_answer,
-        "a granted gateway is answered exactly what the tenant is answered"
-    );
-    golden("status.granted.json", doc);
-
-    // And the refusal that keeps a grant a delegation rather than a bearer
-    // credential: one signed by somebody who does not hold this lease.
-    let stolen = gateway_grant(
-        &grant_content(&gateway, aa, NOW + GRANT_TTL),
-        &f.other_tenant,
-    );
-    let (status, response, doc) = exchange(
-        &f,
-        (
-            "error",
-            "bad_grant",
-            "A `status` signed by the gateway, carrying a grant for this workload that names \
-             this gateway and has not expired — but signed by somebody who is not this \
-             lease's tenant, so it delegates nothing here (spec §6.5). Every other defect is \
-             the same code and the same shape: an `id` or `sig` that does not verify, a `d` or \
-             a content `workload_id` that is not the request's, a `gateway` that is not the \
-             request's signer, and `now > expires_at`. One code on purpose — a gateway learns \
-             that its grant does not apply and nothing about the lease — and distinct from \
-             `not_tenant`, which is still what a signer carrying no grant at all is told.",
-        ),
-        &route("status"),
-        "/status",
-        envelope(&f.granted_request(&gateway, aa, &stolen, TTL + 1)),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "{}", response);
-    assert_eq!(error_of(&response), "bad_grant");
-    golden(
-        "error.bad_grant.json",
-        with_validation_step(doc, "§6.5: a grant MUST be signed by the lease's tenant"),
-    );
 
     // Extend.
     let (status, response, doc) = exchange(
@@ -1278,7 +1248,7 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
         ),
         &route("status"),
         "/status",
-        envelope(&f.about_request(&f.other_tenant, "status", aa, TTL)),
+        envelope(&f.about_request(&f.other_tenant, "status", aa, "error.not_tenant")),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -1297,7 +1267,7 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
         ),
         &route("status"),
         "/status",
-        envelope(&f.about_request(&f.tenant, "status", 0xff, TTL)),
+        envelope(&f.about_request(&f.tenant, "status", 0xff, "error.unknown_workload")),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1319,7 +1289,7 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
         ),
         &route("terminate"),
         "/terminate",
-        envelope(&f.about_request(&f.tenant, "terminate", aa, TTL)),
+        envelope(&f.about_request(&f.tenant, "terminate", aa, "terminate.ok")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -1336,7 +1306,7 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
         ),
         &route("status"),
         "/status",
-        envelope(&f.about_request(&f.tenant, "status", aa, TTL + 30)),
+        envelope(&f.about_request(&f.tenant, "status", aa, "status.ended")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -1370,43 +1340,14 @@ async fn one_refusal_per_spawn_validation_step() {
     let spawn_route = route("basic.v1.spawn");
     let spawn_path = "/listings/basic/v1/spawn";
 
-    // Step 1: the signature.
-    let mut tampered = event_json(&f.spawn_request(0xaa, TTL));
-    let sig = tampered["sig"].as_str().unwrap().to_string();
-    let flipped = format!(
-        "{}{}",
-        if sig.starts_with('0') { "1" } else { "0" },
-        &sig[1..]
-    );
-    tampered["sig"] = json!(flipped);
-    let (status, response, doc) = exchange(
-        &f,
-        (
-            "error",
-            "bad_signature",
-            "`lease_request.spawn` with one hex digit of `sig` changed. The id still \
-             matches the fields; the signature does not verify.",
-        ),
-        &spawn_route,
-        spawn_path,
-        json!({ "request": tampered }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-    assert_eq!(error_of(&response), "bad_signature");
-    golden(
-        "error.bad_signature.json",
-        with_validation_step(doc, "§6.2 step 1: the signature is valid"),
-    );
-
     // Step 1: freshness.
     let stale = lease_request(
         &f.tenant,
-        &[f.provider_pubkey()],
+        &f.provider_pubkey(),
         "spawn",
         &spawn_content(0xaa),
-        NOW - 400,
         NOW - 100,
+        "error.stale_request",
     );
     let (status, response, doc) = exchange(
         &f,
@@ -1432,13 +1373,13 @@ async fn one_refusal_per_spawn_validation_step() {
     // Step 1: the content's shape (ADR 0004).
     let mut privileged = spawn_content(0xaa);
     privileged["privileged"] = json!(true);
-    let event = lease_request(
+    let request = lease_request(
         &f.tenant,
-        &[f.provider_pubkey()],
+        &f.provider_pubkey(),
         "spawn",
         &privileged,
-        NOW,
         NOW + TTL,
+        "error.invalid_request",
     );
     let (status, response, doc) = exchange(
         &f,
@@ -1451,7 +1392,7 @@ async fn one_refusal_per_spawn_validation_step() {
         ),
         &spawn_route,
         spawn_path,
-        envelope(&event),
+        envelope(&request),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1472,7 +1413,7 @@ async fn one_refusal_per_spawn_validation_step() {
         ),
         &route("basic.v2.spawn"),
         "/listings/basic/v2/spawn",
-        envelope(&f.spawn_request(0xbb, TTL)),
+        envelope(&f.spawn_request(0xbb, "wrong_listing_version")),
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -1485,7 +1426,12 @@ async fn one_refusal_per_spawn_validation_step() {
     // Step 4: the workload id. Spawn `aa`, then spawn `aa` again with a
     // distinct event (a longer TTL) so the refusal is about the id, not a
     // replay.
-    let (status, response) = post(&f.app, spawn_path, envelope(&f.spawn_request(0xaa, TTL))).await;
+    let (status, response) = post(
+        &f.app,
+        spawn_path,
+        envelope(&f.spawn_request(0xaa, "spawn.aa")),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
     let (status, response, doc) = exchange(
         &f,
@@ -1497,7 +1443,7 @@ async fn one_refusal_per_spawn_validation_step() {
         ),
         &spawn_route,
         spawn_path,
-        envelope(&f.spawn_request(0xaa, TTL + 1)),
+        envelope(&f.spawn_request(0xaa, "error.workload_id_taken")),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -1513,7 +1459,7 @@ async fn one_refusal_per_spawn_validation_step() {
     let (status, response) = post(
         &f.app,
         spawn_path,
-        envelope(&f.spawn_request(0xbb, TTL + 1)),
+        envelope(&f.spawn_request(0xbb, "spawn.bb")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -1527,7 +1473,7 @@ async fn one_refusal_per_spawn_validation_step() {
         ),
         &spawn_route,
         spawn_path,
-        envelope(&f.spawn_request(0xcc, TTL)),
+        envelope(&f.spawn_request(0xcc, "error.no_capacity")),
     )
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
@@ -1556,7 +1502,7 @@ async fn one_refusal_per_spawn_validation_step() {
         ),
         &spawn_route,
         spawn_path,
-        envelope(&denying.spawn_request(0xaa, TTL)),
+        envelope(&denying.spawn_request(0xaa, "error.refused_image")),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -1592,13 +1538,13 @@ async fn one_refusal_per_spawn_validation_step() {
     let arm_only = fixture_provider(ImagePolicyConfig::default(), registry).await;
     let mut content = spawn_content(0xaa);
     content["image"]["digest"] = json!(index_digest);
-    let event = lease_request(
+    let request = lease_request(
         &arm_only.tenant,
-        &[arm_only.provider_pubkey()],
+        &arm_only.provider_pubkey(),
         "spawn",
         &content,
-        NOW,
         NOW + TTL,
+        "error.no_matching_arch",
     );
     let (status, response, doc) = exchange(
         &arm_only,
@@ -1610,7 +1556,7 @@ async fn one_refusal_per_spawn_validation_step() {
         ),
         &spawn_route,
         spawn_path,
-        envelope(&event),
+        envelope(&request),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -1637,18 +1583,18 @@ async fn a_standby_extend_response_and_its_role_refusals() {
     let f = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
     let seed = 0xb0;
     let set = [keys(PRIMARY_SECRET).public_key(), f.provider_pubkey()];
-    let reserve_event = lease_request(
+    let reserve_request = lease_request(
         &f.tenant,
-        &set,
-        "spawn",
+        &f.provider_pubkey(),
+        "standby",
         &standby_set_content(seed, &set),
-        NOW,
         NOW + TTL,
+        "standby_extend.reserve",
     );
     let (status, response) = post(
         &f.app,
         "/listings/warm/v1/standby",
-        envelope(&reserve_event),
+        envelope(&reserve_request),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -1678,9 +1624,13 @@ async fn a_standby_extend_response_and_its_role_refusals() {
     // `.standby.extend` is paid on, so the role is the only thing wrong.
     let g = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
     let running_seed = 0xb1;
-    let running_event = g.spawn_request(running_seed, TTL);
-    let (status, response) =
-        post(&g.app, "/listings/warm/v1/spawn", envelope(&running_event)).await;
+    let running_request = g.spawn_request(running_seed, "error.not_standby.spawn");
+    let (status, response) = post(
+        &g.app,
+        "/listings/warm/v1/spawn",
+        envelope(&running_request),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
     assert_eq!(response["role"], "standalone");
 
@@ -1713,18 +1663,18 @@ async fn a_standby_extend_response_and_its_role_refusals() {
     let h = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
     let reserved_seed = 0xb2;
     let reserved_set = [keys(PRIMARY_SECRET).public_key(), h.provider_pubkey()];
-    let reserved_event = lease_request(
+    let reserved_request = lease_request(
         &h.tenant,
-        &reserved_set,
-        "spawn",
+        &h.provider_pubkey(),
+        "standby",
         &standby_set_content(reserved_seed, &reserved_set),
-        NOW,
         NOW + TTL,
+        "error.not_running.reserve",
     );
     let (status, response) = post(
         &h.app,
         "/listings/warm/v1/standby",
-        envelope(&reserved_event),
+        envelope(&reserved_request),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -1768,7 +1718,14 @@ async fn a_spawn_and_a_status_per_standby_set_role() {
     let f = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
     let primary_set = [f.provider_pubkey(), keys(STANDBY_SECRET).public_key()];
     let content = standby_set_content(PRIMARY_WORKLOAD, &primary_set);
-    let event = lease_request(&f.tenant, &primary_set, "spawn", &content, NOW, NOW + TTL);
+    let request = lease_request(
+        &f.tenant,
+        &f.provider_pubkey(),
+        "spawn",
+        &content,
+        NOW + TTL,
+        "spawn.primary",
+    );
     let (status, response, doc) = exchange(
         &f,
         (
@@ -1784,7 +1741,7 @@ async fn a_spawn_and_a_status_per_standby_set_role() {
         ),
         &route("warm.v1.spawn"),
         "/listings/warm/v1/spawn",
-        envelope(&event),
+        envelope(&request),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -1803,7 +1760,7 @@ async fn a_spawn_and_a_status_per_standby_set_role() {
         ),
         &route("status"),
         "/status",
-        envelope(&f.about_request(&f.tenant, "status", PRIMARY_WORKLOAD, TTL)),
+        envelope(&f.about_request(&f.tenant, "status", PRIMARY_WORKLOAD, "status.primary")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -1840,7 +1797,7 @@ async fn a_spawn_and_a_status_per_standby_set_role() {
         ),
         &route("status"),
         "/status",
-        envelope(&f.about_request(&f.tenant, "status", PRIMARY_WORKLOAD, TTL + 30)),
+        envelope(&f.about_request(&f.tenant, "status", PRIMARY_WORKLOAD, "status.stopped")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -1853,7 +1810,14 @@ async fn a_spawn_and_a_status_per_standby_set_role() {
     let g = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
     let standby_set = [keys(PRIMARY_SECRET).public_key(), g.provider_pubkey()];
     let content = standby_set_content(STANDBY_SET_WORKLOAD, &standby_set);
-    let event = lease_request(&g.tenant, &standby_set, "spawn", &content, NOW, NOW + TTL);
+    let request = lease_request(
+        &g.tenant,
+        &g.provider_pubkey(),
+        "standby",
+        &content,
+        NOW + TTL,
+        "spawn.standby",
+    );
     let (status, response, doc) = exchange(
         &g,
         (
@@ -1870,7 +1834,7 @@ async fn a_spawn_and_a_status_per_standby_set_role() {
         ),
         &route("warm.v1.standby"),
         "/listings/warm/v1/standby",
-        envelope(&event),
+        envelope(&request),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -1891,7 +1855,7 @@ async fn a_spawn_and_a_status_per_standby_set_role() {
         ),
         &route("status"),
         "/status",
-        envelope(&g.about_request(&g.tenant, "status", STANDBY_SET_WORKLOAD, TTL)),
+        envelope(&g.about_request(&g.tenant, "status", STANDBY_SET_WORKLOAD, "status.reserved")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -1968,8 +1932,15 @@ async fn a_status_per_takeover_outcome() {
     let f = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
     let set = [keys(PRIMARY_SECRET).public_key(), f.provider_pubkey()];
     let content = standby_set_content(STANDBY_SET_WORKLOAD, &set);
-    let event = lease_request(&f.tenant, &set, "spawn", &content, NOW, NOW + TTL);
-    let (status, response) = post(&f.app, "/listings/warm/v1/standby", envelope(&event)).await;
+    let request = lease_request(
+        &f.tenant,
+        &f.provider_pubkey(),
+        "standby",
+        &content,
+        NOW + TTL,
+        "status.won.reserve",
+    );
+    let (status, response) = post(&f.app, "/listings/warm/v1/standby", envelope(&request)).await;
     assert_eq!(status, StatusCode::OK, "{}", response);
 
     take_over(&f, STANDBY_SET_WORKLOAD).await;
@@ -1993,7 +1964,7 @@ async fn a_status_per_takeover_outcome() {
         ),
         &route("status"),
         "/status",
-        envelope(&f.about_request(&f.tenant, "status", STANDBY_SET_WORKLOAD, TTL)),
+        envelope(&f.about_request(&f.tenant, "status", STANDBY_SET_WORKLOAD, "status.won")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -2012,8 +1983,15 @@ async fn a_status_per_takeover_outcome() {
         winner.public_key(),
     ];
     let content = standby_set_content(LOST_WORKLOAD, &set);
-    let event = lease_request(&g.tenant, &set, "spawn", &content, NOW, NOW + TTL);
-    let (status, response) = post(&g.app, "/listings/warm/v1/standby", envelope(&event)).await;
+    let request = lease_request(
+        &g.tenant,
+        &g.provider_pubkey(),
+        "standby",
+        &content,
+        NOW + TTL,
+        "status.lost.reserve",
+    );
+    let (status, response) = post(&g.app, "/listings/warm/v1/standby", envelope(&request)).await;
     assert_eq!(status, StatusCode::OK, "{}", response);
     // The relay already holds the standby provider's claim, one second
     // earlier than this provider's will be.
@@ -2045,7 +2023,7 @@ async fn a_status_per_takeover_outcome() {
         ),
         &route("status"),
         "/status",
-        envelope(&g.about_request(&g.tenant, "status", LOST_WORKLOAD, TTL)),
+        envelope(&g.about_request(&g.tenant, "status", LOST_WORKLOAD, "status.lost")),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -2478,13 +2456,13 @@ async fn one_spawn_per_image_form() {
         ImageRef::upstream(REFERENCE, valid_digest()),
         Some(template_address()),
     );
-    let event = lease_request(
+    let request = lease_request(
         &f.tenant,
-        &[f.provider_pubkey()],
+        &f.provider_pubkey(),
         "spawn",
         &content,
-        NOW,
         NOW + TTL,
+        "spawn_image.reference",
     );
     let (status, response, mut doc) = exchange(
         &f,
@@ -2499,7 +2477,7 @@ async fn one_spawn_per_image_form() {
         ),
         &spawn_route,
         spawn_path,
-        envelope(&event),
+        envelope(&request),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -2517,13 +2495,13 @@ async fn one_spawn_per_image_form() {
         ImageRef::from_registry(image_digest(), entry_address(), RELAY),
         None,
     );
-    let event = lease_request(
+    let request = lease_request(
         &f.tenant,
-        &[f.provider_pubkey()],
+        &f.provider_pubkey(),
         "spawn",
         &content,
-        NOW,
         NOW + TTL,
+        "spawn_image.registry_entry",
     );
     let (status, response, mut doc) = exchange(
         &f,
@@ -2542,7 +2520,7 @@ async fn one_spawn_per_image_form() {
         ),
         &spawn_route,
         spawn_path,
-        envelope(&event),
+        envelope(&request),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);
@@ -2557,13 +2535,13 @@ async fn one_spawn_per_image_form() {
     // the entry is on.
     let bare = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
     let content = spawn_content_with(0xd3, ImageRef::by_digest(image_digest()), None);
-    let event = lease_request(
+    let request = lease_request(
         &bare.tenant,
-        &[bare.provider_pubkey()],
+        &bare.provider_pubkey(),
         "spawn",
         &content,
-        NOW,
         NOW + TTL,
+        "spawn_image.digest_only",
     );
     let (status, response, mut doc) = exchange(
         &bare,
@@ -2581,7 +2559,7 @@ async fn one_spawn_per_image_form() {
         ),
         &spawn_route,
         spawn_path,
-        envelope(&event),
+        envelope(&request),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{}", response);

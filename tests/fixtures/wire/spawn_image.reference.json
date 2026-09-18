@@ -12,26 +12,37 @@
   },
   "request_body": {
     "request": {
-      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd\",\"reference\":\"docker.io/library/alpine\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"template\":\"30436:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:static-site\",\"volume_gb\":2,\"workload_id\":\"d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1\"}",
-      "created_at": 1700000000,
-      "id": "ee23516c545c907241139df96f684c859e977dd8f568f6db6e7ea03169f3b4a2",
-      "kind": 4432,
-      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
-      "sig": "60c26a16029cd9fb4e08c65947c00e683abfd65789eed6f55344b0de1676f23a5a9f2822a1cbe368182ca2f932286989f8c910ecce8947a4ec1f51a3e0980d2e",
-      "tags": [
-        [
-          "p",
-          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+      "content": {
+        "args": [
+          "-c",
+          "sleep 300"
         ],
-        [
-          "op",
-          "spawn"
+        "entrypoint": [
+          "/bin/sh"
         ],
-        [
-          "expiration",
-          "1700000060"
-        ]
-      ]
+        "env": {
+          "GREETING": "hello"
+        },
+        "image": {
+          "digest": "sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd",
+          "reference": "docker.io/library/alpine"
+        },
+        "ports": [
+          {
+            "container_port": 443,
+            "protocol": "tcp"
+          }
+        ],
+        "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
+        "template": "30436:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:static-site",
+        "volume_gb": 2,
+        "workload_id": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "spawn",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "c2ad91f907cbeedd857e3cda4208b46f9b63f8adff68621ea8f8b5b98ca9da2d"
     }
   },
   "response_body": {

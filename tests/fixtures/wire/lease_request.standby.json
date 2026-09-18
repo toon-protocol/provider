@@ -21,12 +21,16 @@
       }
     ],
     "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
+    "standby_set": [
+      "9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b",
+      "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+    ],
     "volume_gb": 2,
-    "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    "workload_id": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
   },
   "fixture": {
-    "case": "spawn",
-    "description": "Buys a lease on `<addr>.basic.v1.spawn`. The body of `spawn.ok`.",
+    "case": "standby",
+    "description": "Reserves a Warm Standby on `<addr>.warm.v1.standby` (spec §7). The same content a primary's spawn carries, under the op that names the route: each member of a Standby Set is sent its own request, naming only itself. The body of `spawn.standby`.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "lease_request"
   },
@@ -54,14 +58,18 @@
           }
         ],
         "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
+        "standby_set": [
+          "9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b",
+          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+        ],
         "volume_gb": 2,
-        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "workload_id": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
       },
       "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
       "expiration": 1700000060,
-      "op": "spawn",
+      "op": "standby",
       "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
-      "request_id": "3c9c26b6f182498f2f2f15089a58d368427ab31edc0fb3d6f0b87307655402f0"
+      "request_id": "207ab95ef26d598e443f6998ff4ac22c39c7f06a3539ee388cf175608f932042"
     }
   },
   "packet_body_encoding": "The HTTP request body is this JSON object: the request, unmodified, as the value of the single key `request`. No other key is allowed, and nothing is signed — a Lease Request is a plain JSON object carrying the lease's Continuation Token (spec §6.1, ADR 0016). The connector carries the whole HTTP request inside its sealed envelope; the provider app receives this body as plaintext JSON.",
@@ -88,13 +96,17 @@
         }
       ],
       "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
+      "standby_set": [
+        "9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b",
+        "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+      ],
       "volume_gb": 2,
-      "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      "workload_id": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
     },
     "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
     "expiration": 1700000060,
-    "op": "spawn",
+    "op": "standby",
     "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
-    "request_id": "3c9c26b6f182498f2f2f15089a58d368427ab31edc0fb3d6f0b87307655402f0"
+    "request_id": "207ab95ef26d598e443f6998ff4ac22c39c7f06a3539ee388cf175608f932042"
   }
 }

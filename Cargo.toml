@@ -53,8 +53,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Digesting the manifest bytes the image policy fetched, to verify them
-# against the digest the tenant named.
+# against the digest the tenant named, and deriving a Continuation Token from
+# a tenant's root secret (spec §6.1, ADR 0016).
 sha2 = "0.10"
+hkdf = "0.12"
+
+# Comparing a presented Continuation Token against the stored one without
+# leaking the stored value through how long the comparison took (spec §6.1).
+subtle = "2"
 bytes = "1"
 
 # Writing the OCI image layout a Docker backend loads verified blobs from

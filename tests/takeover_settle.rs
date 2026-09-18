@@ -18,10 +18,11 @@ use nostr_sdk::{EventBuilder, Keys, Kind, Tag, Timestamp};
 use serde_json::{json, Value};
 
 use common::harness::{
-    config_for, error_of, harness_from, listing, post, spawn_content, Harness, RequestSpec,
+    config_for, error_of, harness_from, listing, mint, post, spawn_content, Harness, RequestSpec,
     INTERVAL, NOW, PUBLIC_IP,
 };
 use common::{stub_registry, BackendCall, FakeBackend, FakeClock, FakeDirectory};
+use toon_provider::nostr::continuation::RootSecret;
 use toon_provider::nostr::directory_events::{takeover_event, ProfileContent, TakeoverContent};
 use toon_provider::nostr::kinds::{K_PROFILE, TOON_LABEL};
 use toon_provider::nostr::wire::SpawnContent;
@@ -107,12 +108,14 @@ fn profile_of(provider: &Keys, relays: &[&str]) -> nostr_sdk::Event {
 /// and the two in-process standbys — under one workload id.
 struct Set {
     primary: Keys,
-    tenant: Keys,
+    /// The tenant's root secret for this lease: every member's Continuation
+    /// Token derives from it, and each member's is its own (spec §6.1).
+    root: RootSecret,
     workload_id: String,
 }
 
-/// Reserve on `s1` (index 1) and `s2` (index 2) from ONE signed spawn, and
-/// seed the primary's Profile on both Directories.
+/// Reserve on `s1` (index 1) and `s2` (index 2) from one set, each member
+/// sent its own request, and seed the primary's Profile on both Directories.
 async fn reserve_set(s1: &Harness, s2: &Harness, seed: u8) -> Set {
     let primary = Keys::generate();
     let members = [primary.public_key(), s1.provider, s2.provider];
@@ -120,18 +123,19 @@ async fn reserve_set(s1: &Harness, s2: &Harness, seed: u8) -> Set {
         standby_set: Some(members.iter().map(|k| k.to_hex()).collect()),
         ..spawn_content(seed)
     };
-    let spec = RequestSpec::spawn(s1, &content).addressed_to(&members);
-    let tenant = Keys::parse(&spec.tenant.secret_key().to_secret_hex()).unwrap();
-    let event = spec.sign();
+    let root = mint();
     for h in [s1, s2] {
-        let (status, body) = post(&h.app, STANDBY, json!({ "request": event.clone() })).await;
+        let request = RequestSpec::standby(h, &content)
+            .with_token(&root.continuation_for(&h.provider))
+            .request();
+        let (status, body) = post(&h.app, STANDBY, json!({ "request": request })).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         h.directory
             .seed_profile(profile_of(&primary, &PRIMARY_RELAYS));
     }
     Set {
         primary,
-        tenant,
+        root,
         workload_id: content.workload_id,
     }
 }
@@ -181,13 +185,11 @@ fn keys_of(h: &Harness) -> Keys {
     Keys::parse(&h.provider_key).unwrap()
 }
 
-/// `status` signed by the set's tenant.
+/// `status` presenting this member's own Continuation Token.
 async fn status_of(h: &Harness, set: &Set) -> Value {
-    let spec = RequestSpec {
-        tenant: Keys::parse(&set.tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::about(h, "status", &set.workload_id)
-    };
-    post(&h.app, "/status", json!({ "request": spec.sign() }))
+    let spec = RequestSpec::about(h, "status", &set.workload_id)
+        .with_token(&set.root.continuation_for(&h.provider));
+    post(&h.app, "/status", json!({ "request": spec.request() }))
         .await
         .1
 }

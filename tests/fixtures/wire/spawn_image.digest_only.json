@@ -11,26 +11,35 @@
   },
   "request_body": {
     "request": {
-      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"volume_gb\":2,\"workload_id\":\"d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3\"}",
-      "created_at": 1700000000,
-      "id": "d4a16f2e14fb9033fc4f1f9fcf1078692e9b90b4b84b583489b85c1bfefa60fe",
-      "kind": 4432,
-      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
-      "sig": "4be35e8444f93b56064fb2e3064838c8ec05d1dc7acdb2c68e4b88c60cc6d6e17b34aab4e7aff7d92d7a3efbfb300d21ffa9be4929c41e9ade1cd856375b653c",
-      "tags": [
-        [
-          "p",
-          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+      "content": {
+        "args": [
+          "-c",
+          "sleep 300"
         ],
-        [
-          "op",
-          "spawn"
+        "entrypoint": [
+          "/bin/sh"
         ],
-        [
-          "expiration",
-          "1700000060"
-        ]
-      ]
+        "env": {
+          "GREETING": "hello"
+        },
+        "image": {
+          "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126"
+        },
+        "ports": [
+          {
+            "container_port": 443,
+            "protocol": "tcp"
+          }
+        ],
+        "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
+        "volume_gb": 2,
+        "workload_id": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "spawn",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "524703996a78d03da1c9fdd45365c8526982c2029b994f569e717dc7468c77d4"
     }
   },
   "response_body": {

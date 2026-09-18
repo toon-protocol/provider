@@ -7,6 +7,13 @@
 // all TOON Network kinds cheap. New kinds take the next free number in their
 // class's block; the spec's kind table is the register.
 //
+// Two numbers were allocated and then given back. `4432` was the Lease
+// Request and `30438` the Gateway Grant; a Lease Request is not a Nostr
+// event any more and a gateway's delegation is derived rather than published
+// (ADR 0016), so both are free again. A freed number inside a reserved block
+// is not a contradiction of ADR 0012: the block is still one block, and the
+// next kind takes the lowest free number in it.
+//
 // None of Paygress's kinds (38383..=38386, 20384) is reused: 38383 collides
 // with NIP-69, and the rest name events this protocol does not have.
 
@@ -44,20 +51,6 @@ pub const K_TEMPLATE: u16 = 30_436;
 /// TOON Network block (spec §3.1.2) but never published by a provider.
 pub const K_DEPLOYMENT: u16 = 30_437;
 
-/// Gateway Grant: a TENANT-signed delegation that lets ONE Workload Gateway
-/// read ONE workload's lease state on the free `status` route, until it
-/// expires (spec §3.1.3, §6.5). Addressable with `d` = the workload id, so
-/// renewing or rotating is republishing; it carries a `["p", "<gateway>"]`
-/// tag so a gateway finds the grants naming it with one relay filter. The
-/// provider only ever reads one, and only out of the request that carried
-/// it (`nostr::gateway_grant`).
-pub const K_GATEWAY_GRANT: u16 = 30_438;
-
-/// Lease Request: a tenant-signed event carried inside request bodies. It is
-/// a regular kind that is NEVER PUBLISHED — the provider validates it and
-/// must not forward it to any relay.
-pub const K_LEASE_REQUEST: u16 = 4_432;
-
 /// Eviction Notice: a provider's signed public record that it evicted a
 /// lease, and why. Regular, with an `x` tag of the workload id.
 pub const K_EVICTION: u16 = 4_433;
@@ -82,13 +75,10 @@ mod tests {
             K_BLOB,
             K_TEMPLATE,
             K_DEPLOYMENT,
-            K_GATEWAY_GRANT,
         ] {
             assert!((30_000..=39_999).contains(&addressable));
         }
-        for regular in [K_LEASE_REQUEST, K_EVICTION] {
-            assert!((1_000..=9_999).contains(&regular));
-        }
+        assert!((1_000..=9_999).contains(&K_EVICTION));
     }
 
     #[test]
@@ -102,8 +92,6 @@ mod tests {
             K_BLOB,
             K_TEMPLATE,
             K_DEPLOYMENT,
-            K_GATEWAY_GRANT,
-            K_LEASE_REQUEST,
             K_EVICTION,
         ];
         for paygress in [38383u16, 38384, 38385, 38386, 20384] {

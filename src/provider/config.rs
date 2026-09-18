@@ -1137,13 +1137,14 @@ pub fn load_config(path: &str) -> Result<ProviderConfig> {
 mod tests {
     use super::*;
 
+    use crate::nostr::continuation::ContinuationToken;
     use crate::nostr::wire::{LeaseEnd, LeaseState, Role};
 
     fn lease_on(name: &str, version: u32, state: LeaseState) -> LeaseRecord {
         LeaseRecord {
             id: 1000,
             workload_id: "aa".repeat(32),
-            tenant: "bb".repeat(32),
+            continuation: ContinuationToken::from_hex(&"bb".repeat(32)).unwrap(),
             listing: name.to_string(),
             listing_version: version,
             role: Role::Standalone,

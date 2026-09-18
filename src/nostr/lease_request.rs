@@ -1,71 +1,58 @@
 // Lease Request validation (spec §6.1).
 //
-// A Lease Request is a tenant-signed event carried inside a request body. It
-// is what binds a lease to a tenant: the provider never learns who PAID (ADR
-// 0005), only who SIGNED. So everything here is about the signature, who the
-// request is addressed to, whether it is fresh, and whether it was seen
-// before — and nothing about money.
+// A Lease Request is a plain JSON object carried inside a request body. It is
+// what binds a lease to the party that bought it: the provider never learns
+// who PAID (ADR 0005), and after ADR 0016 it never learns who ASKED either —
+// only that whoever is asking now holds the Continuation Token that took the
+// lease. So everything here is about the token, who the request is addressed
+// to, whether it is fresh, and whether it was seen before — and nothing
+// about money, and nothing about identity.
+//
+// Nothing is hashed or canonically serialised on either side. The tenant
+// chooses `request_id` at random, so the replay set keys on it exactly as it
+// once keyed on an event id, and two implementations have no serialisation
+// to disagree about.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use nostr_sdk::{Event, EventId, PublicKey, TagKind};
+use nostr_sdk::PublicKey;
+use serde_json::Value;
 
-use super::kinds::K_LEASE_REQUEST;
-use super::wire::{ErrorCode, ErrorResponse, LeaseRequestEnvelope};
+use super::continuation::ContinuationToken;
+use super::wire::{is_lower_hex, ErrorCode, ErrorResponse, LeaseRequest, LeaseRequestEnvelope, Op};
 
-/// A request whose `expiration` is more than this far past its `created_at`
-/// is refused as stale: a tenant has no reason to sign something valid for
-/// longer, and a captured request should not stay replayable for long.
+/// A request whose `expiration` is more than this far ahead of now is
+/// refused as stale: a tenant has no reason to mint one valid for longer,
+/// and a captured request should not stay replayable for long.
 pub const MAX_REQUEST_WINDOW_SECS: u64 = 300;
 
-/// How far into the future a `created_at` may sit before the request is
-/// refused: a request "created" later than now would stretch the window
-/// above past the 300 s it is meant to bound. Generous to clock drift.
-pub const MAX_CLOCK_SKEW_SECS: u64 = 60;
-
-/// The `op` tag: what the signed request asks for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Op {
-    Spawn,
-    Status,
-    Terminate,
-}
-
-impl Op {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Op::Spawn => "spawn",
-            Op::Status => "status",
-            Op::Terminate => "terminate",
-        }
-    }
-}
-
-/// What survives validation: who signed, who it is addressed to, until when
-/// it is good, and the content to parse per op.
+/// What survives validation: the id it was booked under, until when it is
+/// good, the token it presented, and the content to parse per op.
+///
+/// No tenant. There is nobody to name: a Continuation Token is not an
+/// identity, and the provider holds nothing else about whoever sent this
+/// (ADR 0016).
 #[derive(Debug, Clone)]
 pub struct ValidLeaseRequest {
-    pub id: EventId,
-    /// The tenant: the event's signer.
-    pub tenant: PublicKey,
-    /// Every provider the request names in a `p` tag, in the order it names
-    /// them. This provider is one of them, and for every op but `spawn` it
-    /// is the only one — `validate` refuses otherwise.
-    ///
-    /// A spawn may name more: ONE signed spawn forms a whole Standby Set and
-    /// is sent to every member (§6.1, §7), so the route it lands on, not the
-    /// addressee, is what tells a member its role. That they are exactly the
-    /// members is `provider::standby::membership`'s to say, since only the
-    /// spawn's content knows the set.
-    pub addressees: Vec<PublicKey>,
+    /// 32 tenant-chosen random bytes, hex. The replay set's key.
+    pub request_id: String,
     pub expiration: u64,
-    pub content: String,
+    /// The token the request presented, if it presented one. Compared
+    /// against a lease's stored token by `check_continuation`; on a spawn
+    /// there is nothing to compare it with yet, and it becomes the new
+    /// lease's (`continuation_to_store`).
+    pub continuation: Option<ContinuationToken>,
+    pub content: Value,
 }
 
-/// Accept the Lease Request in a request body: parse the envelope, validate
-/// the event, and book its id against replay — the whole of step 1 of the
-/// spec's validation order (§6.2), which every signed route runs identically.
+/// Accept the Lease Request in a request body: parse it, validate it, and
+/// book its id against replay — steps 1 to 3 of the spec's validation order
+/// (§6.1), which every authenticated route runs identically.
+///
+/// Step 4, the Continuation Token, is `check_continuation`: it needs the
+/// lease, which only the caller has found by then. A spawn skips it, because
+/// there is no stored token until this request makes one.
 pub fn accept(
     body: &[u8],
     provider: &PublicKey,
@@ -76,132 +63,130 @@ pub fn accept(
     let envelope: LeaseRequestEnvelope = serde_json::from_slice(body).map_err(|e| {
         ErrorResponse::new(
             ErrorCode::InvalidRequest,
-            format!("body is not {{ \"request\": <event> }}: {}", e),
+            format!("body is not {{ \"request\": {{ … }} }}: {}", e),
         )
     })?;
-    let request = validate(&envelope.request, provider, op, now)?;
-    // Booked as soon as the request is known to be authentic, so a captured
-    // refusal cannot be replayed onto a route that would accept it.
-    if !seen.accept(request.id, request.expiration, now) {
+    let request = validate(envelope.request, provider, op, now)?;
+    // Booked as soon as the request is known to be fresh and ours, so a
+    // captured refusal cannot be replayed onto a route that would accept it.
+    if !seen.accept(&request.request_id, request.expiration, now) {
         return Err(ErrorResponse::new(
             ErrorCode::StaleRequest,
-            "this Lease Request was already accepted; sign a new one",
+            "this Lease Request was already accepted; send a new one",
         ));
     }
     Ok(request)
 }
 
 /// Validate a Lease Request against this provider, in the spec's order: the
-/// signature, the kind, the `p` tag, the `op` tag, then freshness. Replay is
-/// `AcceptedRequests`, booked by `accept` once everything here passed.
+/// shape, the `op` and the addressee (`invalid_request`), then `expiration`
+/// and the window (`stale_request`). Replay is `AcceptedRequests`, booked by
+/// `accept` once everything here passed.
 pub fn validate(
-    event: &Event,
+    request: LeaseRequest,
     provider: &PublicKey,
     op: Op,
     now: u64,
 ) -> Result<ValidLeaseRequest, ErrorResponse> {
-    if event.verify().is_err() {
-        return Err(ErrorResponse::new(
-            ErrorCode::BadSignature,
-            "the Lease Request's id or signature does not verify",
-        ));
-    }
-    if event.kind.as_u16() != K_LEASE_REQUEST {
+    if !is_lower_hex(&request.request_id, 64) {
         return Err(ErrorResponse::new(
             ErrorCode::InvalidRequest,
-            format!(
-                "a Lease Request is kind {}, not {}",
-                K_LEASE_REQUEST,
-                event.kind.as_u16()
-            ),
+            "request_id is 32 random bytes as 64 lowercase hex characters",
         ));
     }
-    // Every `p` tag, not the first. Only a SPAWN may name more than one
-    // provider, and only because one signed spawn forms a whole Standby Set
-    // and is sent to every member (§7); a status or a termination is about
-    // one lease on one provider, so a second `p` tag there means the request
-    // is addressed to someone else as much as to us. That a spawn's
-    // addressees are exactly its `standby_set` needs the content, so it is
-    // §6.2 step 3's (`provider::standby::membership`).
-    let addressees: Vec<PublicKey> = event.tags.public_keys().copied().collect();
-    if addressees.is_empty() {
-        return Err(ErrorResponse::new(
-            ErrorCode::InvalidRequest,
-            "the Lease Request names no provider (`p` tag)",
-        ));
-    }
-    if !addressees.contains(provider) {
-        return Err(ErrorResponse::new(
-            ErrorCode::InvalidRequest,
-            "the Lease Request is addressed to another provider",
-        ));
-    }
-    if op != Op::Spawn && addressees.len() > 1 {
-        return Err(ErrorResponse::new(
-            ErrorCode::InvalidRequest,
-            format!(
-                "a {} names one provider; this one is addressed to more than this provider",
-                op.as_str()
-            ),
-        ));
-    }
-    let found_op = event
-        .tags
-        .find(TagKind::custom("op"))
-        .and_then(|t| t.content());
-    if found_op != Some(op.as_str()) {
+    if request.op != op {
         return Err(ErrorResponse::new(
             ErrorCode::InvalidRequest,
             format!(
                 "this route serves op={}, the Lease Request says op={}",
                 op.as_str(),
-                found_op.unwrap_or("<none>")
+                request.op.as_str()
             ),
         ));
     }
-    let expiration = match event.tags.expiration() {
-        Some(t) => t.as_u64(),
-        None => {
-            return Err(ErrorResponse::new(
-                ErrorCode::InvalidRequest,
-                "the Lease Request carries no `expiration` tag",
-            ))
-        }
-    };
-    if now > expiration {
+    // ONE provider, on every op — a spawn that forms a Standby Set included.
+    // A tenant sends one request to each member now, so nothing is saved by
+    // addressing one request to several, and a request meant for somebody
+    // else is never accepted here (spec §6.1, §7).
+    let addressee = PublicKey::parse(&request.provider).map_err(|e| {
+        ErrorResponse::new(
+            ErrorCode::InvalidRequest,
+            format!("the Lease Request's `provider` is not a public key: {}", e),
+        )
+    })?;
+    if addressee != *provider {
         return Err(ErrorResponse::new(
-            ErrorCode::StaleRequest,
-            format!("the Lease Request expired at {} (now {})", expiration, now),
+            ErrorCode::InvalidRequest,
+            "the Lease Request is addressed to another provider",
         ));
     }
-    let created_at = event.created_at.as_u64();
-    if created_at > now + MAX_CLOCK_SKEW_SECS {
+    if now > request.expiration {
         return Err(ErrorResponse::new(
             ErrorCode::StaleRequest,
             format!(
-                "the Lease Request's created_at {} is in the future (now {})",
-                created_at, now
+                "the Lease Request expired at {} (now {})",
+                request.expiration, now
             ),
         ));
     }
-    match expiration.checked_sub(created_at) {
-        Some(window) if window <= MAX_REQUEST_WINDOW_SECS => {}
-        _ => {
-            return Err(ErrorResponse::new(
-                ErrorCode::StaleRequest,
-                format!(
-                    "a Lease Request may be valid for at most {} s after created_at",
-                    MAX_REQUEST_WINDOW_SECS
-                ),
-            ))
-        }
+    if request.expiration > now + MAX_REQUEST_WINDOW_SECS {
+        return Err(ErrorResponse::new(
+            ErrorCode::StaleRequest,
+            format!(
+                "a Lease Request may be valid for at most {} s from now",
+                MAX_REQUEST_WINDOW_SECS
+            ),
+        ));
     }
     Ok(ValidLeaseRequest {
-        id: event.id,
-        tenant: event.pubkey,
-        addressees,
-        expiration,
-        content: event.content.clone(),
+        request_id: request.request_id,
+        expiration: request.expiration,
+        continuation: request.continuation,
+        content: request.content,
+    })
+}
+
+/// Step 4 of the validation order (spec §6.1): the token this request
+/// presented is the one the lease stored.
+///
+/// The comparison is constant time — that is `ContinuationToken`'s own
+/// `PartialEq`, so there is no other way to make it — and the refusal says
+/// nothing about the lease and quotes no token back.
+///
+/// A wrong token and an ABSENT one are the same answer, deliberately. A
+/// request with no `continuation` asserts no authority over this lease, and
+/// that is exactly what a wrong one does; telling the two apart would leave
+/// a prober knowing which half of its guess was wrong, and an absent token
+/// must never read as an unauthenticated success.
+pub fn check_continuation(
+    request: &ValidLeaseRequest,
+    stored: &ContinuationToken,
+) -> Result<(), ErrorResponse> {
+    if request.continuation.as_ref() == Some(stored) {
+        Ok(())
+    } else {
+        Err(ErrorResponse::new(
+            ErrorCode::NotTenant,
+            "this lease was taken with another continuation token",
+        ))
+    }
+}
+
+/// The token a SPAWN stores against the lease it is about to create.
+///
+/// The mirror of `check_continuation`, and the other half of why step 4 is
+/// skipped on a spawn: there is nothing stored to compare with, so the
+/// presented token is simply kept. Absent, it is `invalid_request` rather
+/// than `not_tenant` — a spawn with no token would buy a lease nobody could
+/// ever read, extend or stop, which is a request the tenant must correct.
+pub fn continuation_to_store(
+    request: &ValidLeaseRequest,
+) -> Result<ContinuationToken, ErrorResponse> {
+    request.continuation.clone().ok_or_else(|| {
+        ErrorResponse::new(
+            ErrorCode::InvalidRequest,
+            "a spawn carries the continuation token its lease will keep",
+        )
     })
 }
 
@@ -213,7 +198,7 @@ pub fn validate(
 /// loss; persisting the set is a later ticket's call.
 #[derive(Default)]
 pub struct AcceptedRequests {
-    seen: Mutex<HashMap<EventId, u64>>,
+    seen: Mutex<HashMap<String, u64>>,
 }
 
 impl AcceptedRequests {
@@ -221,15 +206,15 @@ impl AcceptedRequests {
         Self::default()
     }
 
-    /// Record `id` as accepted until `expiration`. `false` if it was already
-    /// accepted — the caller refuses the request.
-    pub fn accept(&self, id: EventId, expiration: u64, now: u64) -> bool {
+    /// Record `request_id` as accepted until `expiration`. `false` if it was
+    /// already accepted — the caller refuses the request.
+    pub fn accept(&self, request_id: &str, expiration: u64, now: u64) -> bool {
         let mut seen = self.seen.lock().unwrap();
         seen.retain(|_, until| *until >= now);
-        if seen.contains_key(&id) {
+        if seen.contains_key(request_id) {
             return false;
         }
-        seen.insert(id, expiration);
+        seen.insert(request_id.to_string(), expiration);
         true
     }
 }
@@ -241,9 +226,9 @@ mod tests {
     #[test]
     fn a_replayed_id_is_refused_until_it_expires() {
         let seen = AcceptedRequests::new();
-        let id = EventId::all_zeros();
-        assert!(seen.accept(id, 100, 50));
-        assert!(!seen.accept(id, 100, 60), "same id, still valid");
-        assert!(seen.accept(id, 200, 101), "expired ids are forgotten");
+        let id = "aa".repeat(32);
+        assert!(seen.accept(&id, 100, 50));
+        assert!(!seen.accept(&id, 100, 60), "same id, still valid");
+        assert!(seen.accept(&id, 200, 101), "expired ids are forgotten");
     }
 }

@@ -16,13 +16,14 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use nostr_sdk::{EventBuilder, Keys, Kind, PublicKey, Tag, TagKind, Timestamp};
+use nostr_sdk::{Keys, PublicKey};
+use rand::RngCore;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
 use super::{FakeBackend, FakeClock, FakeDirectory, FakeHiddenService};
 use toon_provider::compute::EgressPolicy;
-use toon_provider::nostr::kinds::K_LEASE_REQUEST;
+use toon_provider::nostr::continuation::{ContinuationToken, RootSecret};
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, Resources, SpawnContent};
 use toon_provider::provider::ImagePolicyConfig;
 use toon_provider::{
@@ -277,46 +278,91 @@ pub fn spawn_content(seed: u8) -> SpawnContent {
     }
 }
 
-/// A Lease Request as a tenant's tooling would sign it.
+/// One lease's root secret, as a tenant mints it (spec §6.1): 32 random
+/// bytes it holds and derives every Continuation Token from.
+pub fn mint() -> RootSecret {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    RootSecret::from_bytes(bytes)
+}
+
+/// 32 random bytes as a `request_id`: what a tenant puts on every request so
+/// the provider's replay set has something to key on (spec §6.1).
+pub fn request_id() -> String {
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// A Lease Request as a tenant's tooling would mint it (spec §6.1): a plain
+/// JSON object, signed by nobody, presenting a Continuation Token.
 pub struct RequestSpec {
-    pub tenant: Keys,
-    /// Every provider the request is addressed to: one `p` tag each, in this
-    /// order. Ordinarily one. A spawn that forms a Standby Set names every
-    /// member, because ONE signed request is what the tenant sends to all of
-    /// them (spec §6.1, §7) — `addressed_to`.
-    pub providers: Vec<PublicKey>,
+    /// The one provider this request is for. Singular on every op, a spawn
+    /// forming a Standby Set included: each member gets its own request
+    /// naming only itself (spec §6.1, §7) — `addressed_to`.
+    pub provider: PublicKey,
     pub op: &'static str,
     pub content: Value,
-    pub created_at: u64,
+    pub request_id: String,
     pub expiration: Option<u64>,
-    pub kind: u16,
+    /// The token this request presents. `None` sends no `continuation` field
+    /// at all: what a request asserting no authority over a lease looks like.
+    pub continuation: Option<ContinuationToken>,
 }
 
 impl RequestSpec {
-    /// A fresh request for `op`, signed by a tenant nobody has seen before.
-    /// Override `tenant` to sign as a tenant that already holds a lease.
+    /// A fresh request for `op`, presenting a token nobody has seen before —
+    /// derived from a root secret minted for this call alone. A test that
+    /// means the lease's own token says `with_token`.
     pub fn op(h: &Harness, op: &'static str, content: Value) -> Self {
+        Self::new(h.provider, h.clock.now(), op, content)
+    }
+
+    /// The same, for a test whose harness is not this module's — the store
+    /// world's, say. `now` is that harness's clock.
+    pub fn new(provider: PublicKey, now: u64, op: &'static str, content: Value) -> Self {
         Self {
-            tenant: Keys::generate(),
-            providers: vec![h.provider],
+            provider,
             op,
             content,
-            created_at: h.clock.now(),
-            expiration: Some(h.clock.now() + 60),
-            kind: K_LEASE_REQUEST,
+            request_id: request_id(),
+            expiration: Some(now + 60),
+            continuation: Some(mint().continuation_for(&provider)),
         }
     }
 
-    /// Address this request to every provider in `providers` rather than to
-    /// the one harness it was built from: the one signed spawn a tenant
-    /// sends to a whole Standby Set.
-    pub fn addressed_to(mut self, providers: &[PublicKey]) -> Self {
-        self.providers = providers.to_vec();
+    /// Present `token` instead of a freshly minted one: what a tenant that
+    /// already holds this lease sends.
+    pub fn with_token(mut self, token: &ContinuationToken) -> Self {
+        self.continuation = Some(token.clone());
         self
     }
 
+    /// Send no `continuation` field at all: a request that asserts no
+    /// authority over the lease it names.
+    pub fn with_no_token(mut self) -> Self {
+        self.continuation = None;
+        self
+    }
+
+    /// Address this request to `provider` rather than to the harness it was
+    /// built from. The token is left alone, so a caller that means a token
+    /// derived for that provider derives it itself.
+    pub fn addressed_to(mut self, provider: PublicKey) -> Self {
+        self.provider = provider;
+        self
+    }
+
+    /// `op = spawn`: what `.spawn` serves — a standalone lease, or a
+    /// Standby Set's primary.
     pub fn spawn(h: &Harness, content: &SpawnContent) -> Self {
         Self::op(h, "spawn", serde_json::to_value(content).unwrap())
+    }
+
+    /// `op = standby`: the same content on the route that reserves capacity
+    /// for a Warm Standby (spec §6.1, §7).
+    pub fn standby(h: &Harness, content: &SpawnContent) -> Self {
+        Self::op(h, "standby", serde_json::to_value(content).unwrap())
     }
 
     /// `op = status` or `op = terminate`: the content is just the workload id.
@@ -324,23 +370,23 @@ impl RequestSpec {
         Self::op(h, op, json!({ "workload_id": workload_id }))
     }
 
-    pub fn sign(&self) -> Value {
-        let mut tags: Vec<Tag> = self
-            .providers
-            .iter()
-            .copied()
-            .map(Tag::public_key)
-            .collect();
-        tags.push(Tag::custom(TagKind::custom("op"), [self.op]));
+    /// The request object, as it goes inside `{ "request": … }`. Fields the
+    /// spec does not require are omitted when they are `None`, so a test can
+    /// send a request with no `expiration` or no `continuation` at all.
+    pub fn request(&self) -> Value {
+        let mut request = json!({
+            "request_id": self.request_id,
+            "op": self.op,
+            "provider": self.provider.to_hex(),
+            "content": self.content,
+        });
         if let Some(t) = self.expiration {
-            tags.push(Tag::expiration(Timestamp::from(t)));
+            request["expiration"] = json!(t);
         }
-        let event = EventBuilder::new(Kind::Custom(self.kind), self.content.to_string())
-            .tags(tags)
-            .custom_created_at(Timestamp::from(self.created_at))
-            .sign_with_keys(&self.tenant)
-            .unwrap();
-        serde_json::to_value(event).unwrap()
+        if let Some(token) = &self.continuation {
+            request["continuation"] = serde_json::to_value(token).unwrap();
+        }
+        request
     }
 }
 
@@ -365,11 +411,11 @@ pub async fn post(app: &axum::Router, path: &str, body: Value) -> (StatusCode, V
     (status, json)
 }
 
-pub async fn spawn(h: &Harness, event: Value) -> (StatusCode, Value) {
+pub async fn spawn(h: &Harness, request: Value) -> (StatusCode, Value) {
     post(
         &h.app,
         "/listings/basic/v1/spawn",
-        json!({ "request": event }),
+        json!({ "request": request }),
     )
     .await
 }

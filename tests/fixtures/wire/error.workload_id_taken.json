@@ -8,26 +8,36 @@
   "http_path": "/listings/basic/v1/spawn",
   "request_body": {
     "request": {
-      "content": "{\"args\":[\"-c\",\"sleep 300\"],\"entrypoint\":[\"/bin/sh\"],\"env\":{\"GREETING\":\"hello\"},\"image\":{\"digest\":\"sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd\",\"reference\":\"docker.io/library/alpine\"},\"ports\":[{\"container_port\":443,\"protocol\":\"tcp\"}],\"ssh_public_key\":\"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture\",\"volume_gb\":2,\"workload_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
-      "created_at": 1700000000,
-      "id": "6c64a1c5a49a314d97cd7661270a85132d667b3794b605e81427e23cb4ed82fc",
-      "kind": 4432,
-      "pubkey": "4f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa",
-      "sig": "5ad1649242a181cab8f89ce8e85c26e50aaf0277a85e1827036e3e848464b0053cbc720bb92d6c3181fc4622be928ac0d9a6ec8e7bba96289bd8345776681b5d",
-      "tags": [
-        [
-          "p",
-          "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+      "content": {
+        "args": [
+          "-c",
+          "sleep 300"
         ],
-        [
-          "op",
-          "spawn"
+        "entrypoint": [
+          "/bin/sh"
         ],
-        [
-          "expiration",
-          "1700000061"
-        ]
-      ]
+        "env": {
+          "GREETING": "hello"
+        },
+        "image": {
+          "digest": "sha256:c02a7c7b9cac8e709f8cc42dc9e7aa8fdc36e35acfa19da7cd7dff2b8bd94fdd",
+          "reference": "docker.io/library/alpine"
+        },
+        "ports": [
+          {
+            "container_port": 443,
+            "protocol": "tcp"
+          }
+        ],
+        "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
+        "volume_gb": 2,
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "spawn",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "3ebe6061f433dfac86ea14c49a358a638d20bcef655ca032040163d5348aa456"
     }
   },
   "response_body": {

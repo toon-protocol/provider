@@ -17,6 +17,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use common::{sha256_hex, valid_digest, valid_manifest_bytes, FakeBackend};
+use toon_provider::nostr::continuation::ContinuationToken;
 use toon_provider::nostr::wire::{Resources, Role};
 use toon_provider::provider::ImagePolicyConfig;
 use toon_provider::{router, Listing, ProviderConfig, ProviderService};
@@ -191,7 +192,7 @@ fn lease(id: u32, listing: &str, version: u32) -> LeaseRecord {
     LeaseRecord {
         id,
         workload_id: format!("{:02x}", id % 256).repeat(32),
-        tenant: "ee6afe4b4a6e4fe49d6c35359d1161a6fd26fbe5d6eefcbab1c9c147731bf08a".to_string(),
+        continuation: ContinuationToken::from_hex(&"ee".repeat(32)).unwrap(),
         listing: listing.to_string(),
         listing_version: version,
         role: Role::Standalone,

@@ -180,14 +180,8 @@ async fn runs_on_docker(form: Form) {
         Form::Entry => ImageRef::from_registry(manifest_digest.clone(), w.address(), RELAY),
         Form::BareDigest => ImageRef::by_digest(manifest_digest.clone()),
     };
-    let tenant = nostr_sdk::Keys::generate();
-    let (status, body) = spawn_as(
-        &h,
-        seed,
-        image,
-        nostr_sdk::Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap(),
-    )
-    .await;
+    let token = common::harness::mint().continuation_for(&h.provider);
+    let (status, body) = spawn_as(&h, seed, image, &token).await;
 
     assert_eq!(status, StatusCode::OK, "{}", body);
     assert_eq!(body["access"]["ssh_port"], ssh_port, "{}", body);
@@ -241,13 +235,13 @@ async fn runs_on_docker(form: Form) {
     );
 
     // Terminate through the app, as a tenant would, and it is gone.
-    let request = signed(
+    let terminate = request(
         &h,
         "terminate",
         json!({ "workload_id": format!("{:02x}", seed).repeat(32) }),
-        Some(nostr_sdk::Keys::parse(&tenant.secret_key().to_secret_hex()).unwrap()),
+        Some(&token),
     );
-    let (status, body) = post(&h.app, "/terminate", json!({ "request": request })).await;
+    let (status, body) = post(&h.app, "/terminate", json!({ "request": terminate })).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
     let gone = docker(&["inspect", &name]).await;
     assert!(!gone.status.success(), "the container was removed");

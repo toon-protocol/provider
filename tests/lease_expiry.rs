@@ -8,6 +8,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{BackendCall, FakeBackend};
+use toon_provider::nostr::continuation::ContinuationToken;
 use toon_provider::nostr::wire::Role;
 use toon_provider::{LeaseEnd, LeaseRecord, LeaseState, ProviderConfig, ProviderService};
 
@@ -19,7 +20,7 @@ fn lease(id: u32, expires_at: u64) -> LeaseRecord {
     LeaseRecord {
         id,
         workload_id: format!("{:02x}", id % 256).repeat(32),
-        tenant: "ee6afe4b4a6e4fe49d6c35359d1161a6fd26fbe5d6eefcbab1c9c147731bf08a".to_string(),
+        continuation: ContinuationToken::from_hex(&"ee".repeat(32)).unwrap(),
         listing: "basic".to_string(),
         listing_version: 1,
         role: Role::Standalone,

@@ -19,9 +19,11 @@ use nostr_sdk::Keys;
 use serde_json::{json, Value};
 
 use common::harness::{
-    config_for, harness_from, listing, post, spawn_content, Harness, RequestSpec, INTERVAL, NOW,
+    config_for, harness_from, listing, mint, post, spawn_content, Harness, RequestSpec, INTERVAL,
+    NOW,
 };
 use common::{stub_registry, BackendCall, FakeBackend, FakeClock, FakeDirectory};
+use toon_provider::nostr::continuation::ContinuationToken;
 use toon_provider::nostr::directory_events::takeover_event;
 use toon_provider::nostr::wire::SpawnContent;
 use toon_provider::provider::{persisted_leases, ImagePolicyConfig, Listing, SELF_STOP_CADENCES};
@@ -103,7 +105,9 @@ async fn restart(h: &Harness) -> Harness {
 /// One lease this provider holds, and whom it holds it with.
 struct Lease {
     id: u32,
-    tenant: Keys,
+    /// The Continuation Token it was taken with: what every later request
+    /// about it presents (spec §6.1).
+    token: ContinuationToken,
     workload_id: String,
     /// The one Warm Standby behind it; nobody, for a standalone lease.
     standby: Option<Keys>,
@@ -126,19 +130,19 @@ async fn spawn_primary(h: &Harness, seed: u8) -> Lease {
         standby_set: Some(set.iter().map(|k| k.to_hex()).collect()),
         ..spawn_content(seed)
     };
-    let spec = RequestSpec::spawn(h, &content).addressed_to(&set);
-    let tenant = Keys::parse(&spec.tenant.secret_key().to_secret_hex()).unwrap();
+    let token = mint().continuation_for(&h.provider);
+    let spec = RequestSpec::spawn(h, &content).with_token(&token);
     let (status, body) = post(
         &h.app,
         "/listings/warm/v1/spawn",
-        json!({ "request": spec.sign() }),
+        json!({ "request": spec.request() }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["role"], "primary");
     Lease {
         id: lease_id(h, &content.workload_id),
-        tenant,
+        token,
         workload_id: content.workload_id,
         standby: Some(standby),
     }
@@ -148,19 +152,19 @@ async fn spawn_primary(h: &Harness, seed: u8) -> Lease {
 /// watching, nobody to take it over.
 async fn spawn_standalone(h: &Harness, seed: u8) -> Lease {
     let content = spawn_content(seed);
-    let spec = RequestSpec::spawn(h, &content);
-    let tenant = Keys::parse(&spec.tenant.secret_key().to_secret_hex()).unwrap();
+    let token = mint().continuation_for(&h.provider);
+    let spec = RequestSpec::spawn(h, &content).with_token(&token);
     let (status, body) = post(
         &h.app,
         "/listings/basic/v1/spawn",
-        json!({ "request": spec.sign() }),
+        json!({ "request": spec.request() }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["role"], "standalone");
     Lease {
         id: lease_id(h, &content.workload_id),
-        tenant,
+        token,
         workload_id: content.workload_id,
         standby: None,
     }
@@ -207,17 +211,10 @@ fn takeover_by_a_stranger(h: &Harness, lease: &Lease, at: u64) {
     );
 }
 
-/// `status` signed by the lease's own tenant.
-///
-/// One second later every time: two identical Lease Requests from one tenant
-/// at one instant are the same event, and the second is refused as a replay.
+/// `status` presenting the lease's own Continuation Token.
 async fn status_of(h: &Harness, lease: &Lease) -> Value {
-    h.clock.advance(1);
-    let spec = RequestSpec {
-        tenant: Keys::parse(&lease.tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::about(h, "status", &lease.workload_id)
-    };
-    post(&h.app, "/status", json!({ "request": spec.sign() }))
+    let spec = RequestSpec::about(h, "status", &lease.workload_id).with_token(&lease.token);
+    post(&h.app, "/status", json!({ "request": spec.request() }))
         .await
         .1
 }

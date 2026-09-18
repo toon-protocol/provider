@@ -4,8 +4,8 @@
 // it terminates payment, seals and unseals the payload, and forwards a plain
 // HTTP request here. So this app reads no `X-TOON-Payer`, `X-TOON-Amount` or
 // `X-TOON-Chain` header (ADR 0005) — a tenant paying through hops is served
-// identically to one paying directly, and identity comes from the request body,
-// not from who paid.
+// identically to one paying directly, and authority comes from the request
+// body, not from who paid.
 //
 // Paths are `provider::routes`'s: the connector forwards each ILP prefix to
 // one of them. Spawn, extend, standby, standby.extend, availability, status
@@ -14,6 +14,10 @@
 // The free routes (`availability`, `status`, `terminate`) arrive with nothing
 // paid and are served exactly like the paid ones: this app never looks at what
 // a packet was worth.
+//
+// `status` and `terminate` are free but not unauthenticated: each carries a
+// Lease Request presenting the lease's Continuation Token (spec §6.1). Only
+// `availability` and `.extend` carry nothing at all.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,8 +57,8 @@ pub struct AppState {
     pub config: Arc<ProviderConfig>,
     pub backend: Arc<dyn ComputeBackend>,
     pub clock: Arc<dyn Clock>,
-    /// The provider's Nostr identity: what a Lease Request must be addressed
-    /// to, and what signs everything the provider publishes.
+    /// The provider's Nostr identity: what a Lease Request's `provider`
+    /// must name, and what signs everything the provider publishes.
     pub keys: Keys,
     /// Where the Provider Profile, Listings, Liveness and — from a later
     /// ticket — Eviction Notices go. The second of the provider's two I/O
@@ -432,9 +436,7 @@ fn parse_version(segment: &str) -> Option<u32> {
 /// is for tooling that reads HTTP before it reads the body.
 pub fn refuse(error: ErrorResponse) -> Response {
     let status = match error.error {
-        ErrorCode::BadSignature | ErrorCode::NotTenant | ErrorCode::BadGrant => {
-            StatusCode::FORBIDDEN
-        }
+        ErrorCode::NotTenant | ErrorCode::BadGrant => StatusCode::FORBIDDEN,
         ErrorCode::StaleRequest | ErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
         ErrorCode::WrongListingVersion | ErrorCode::UnknownWorkload => StatusCode::NOT_FOUND,
         ErrorCode::WorkloadIdTaken

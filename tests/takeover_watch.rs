@@ -17,9 +17,10 @@ use nostr_sdk::{EventBuilder, Keys, Kind, Tag, Timestamp};
 use serde_json::{json, Value};
 
 use common::harness::{
-    config_for, harness_from, listing, post, spawn_content, Harness, RequestSpec, NOW,
+    config_for, harness_from, listing, mint, post, spawn_content, Harness, RequestSpec, NOW,
 };
 use common::{stub_registry, FakeBackend, FakeClock, FakeDirectory};
+use toon_provider::nostr::continuation::ContinuationToken;
 use toon_provider::nostr::directory_events::{ProfileContent, TakeoverContent};
 use toon_provider::nostr::kinds::{K_PROFILE, K_TAKEOVER, TOON_LABEL};
 use toon_provider::nostr::wire::SpawnContent;
@@ -116,7 +117,8 @@ fn profile_of(primary: &Keys, relays: &[&str], cadence_s: u64) -> nostr_sdk::Eve
 /// One reservation this provider holds, and the primary it watches.
 struct Reservation {
     primary: Keys,
-    tenant: Keys,
+    /// The Continuation Token this member was reserved with (spec §6.1).
+    token: ContinuationToken,
     workload_id: String,
 }
 
@@ -134,12 +136,12 @@ async fn reserve_behind(
         standby_set: Some(set.iter().map(|k| k.to_hex()).collect()),
         ..spawn_content(seed)
     };
-    let spec = RequestSpec::spawn(h, &content).addressed_to(&set);
-    let tenant = Keys::parse(&spec.tenant.secret_key().to_secret_hex()).unwrap();
+    let token = mint().continuation_for(&h.provider);
+    let spec = RequestSpec::standby(h, &content).with_token(&token);
     let (status, body) = post(
         &h.app,
         "/listings/warm/v1/standby",
-        json!({ "request": spec.sign() }),
+        json!({ "request": spec.request() }),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -147,7 +149,7 @@ async fn reserve_behind(
         .seed_profile(profile_of(&primary, relays, cadence_s));
     Reservation {
         primary,
-        tenant,
+        token,
         workload_id: content.workload_id,
     }
 }
@@ -177,13 +179,10 @@ fn strings(relays: &[&str]) -> Vec<String> {
     relays.iter().map(|r| r.to_string()).collect()
 }
 
-/// `status` signed by the lease's own tenant.
+/// `status` presenting the reservation's own Continuation Token.
 async fn status_of(h: &Harness, r: &Reservation) -> Value {
-    let spec = RequestSpec {
-        tenant: Keys::parse(&r.tenant.secret_key().to_secret_hex()).unwrap(),
-        ..RequestSpec::about(h, "status", &r.workload_id)
-    };
-    post(&h.app, "/status", json!({ "request": spec.sign() }))
+    let spec = RequestSpec::about(h, "status", &r.workload_id).with_token(&r.token);
+    post(&h.app, "/status", json!({ "request": spec.request() }))
         .await
         .1
 }
@@ -404,7 +403,7 @@ async fn a_provider_with_no_reservation_reads_nothing() {
     assert!(h.directory.reads().is_empty(), "{:?}", h.directory.reads());
 
     // A standalone lease…
-    let standalone = RequestSpec::spawn(&h, &spawn_content(8)).sign();
+    let standalone = RequestSpec::spawn(&h, &spawn_content(8)).request();
     let (status, body) = post(
         &h.app,
         "/listings/warm/v1/spawn",
@@ -418,7 +417,7 @@ async fn a_provider_with_no_reservation_reads_nothing() {
         standby_set: Some(set.iter().map(|k| k.to_hex()).collect()),
         ..spawn_content(9)
     };
-    let primary = RequestSpec::spawn(&h, &content).addressed_to(&set).sign();
+    let primary = RequestSpec::spawn(&h, &content).request();
     let (status, body) = post(
         &h.app,
         "/listings/warm/v1/spawn",
