@@ -14,6 +14,13 @@
 // nothing: the comparison is constant time, and the token reaches no log,
 // no metric and no message.
 //
+// Status asks ONE thing more, because reading is the one authority a tenant
+// can hand on: a Workload Gateway may present a Gateway Grant derived from
+// the lease's token for a moment the tenant chose (spec §6.5), which the
+// provider recomputes from the token it already holds. That is the whole of
+// the delegation — nothing is fetched, nothing is stored per gateway, and
+// `terminate` is not part of it.
+//
 // A lease is named by the tenant's own `workload_id`, never by the backend id
 // this provider keys its table on: the tenant chose that id and it is the only
 // handle it has.
@@ -28,7 +35,7 @@ use crate::nostr::directory_events::eviction_event;
 use crate::nostr::lease_request::{self, ValidLeaseRequest};
 use crate::nostr::wire::{
     ErrorCode, ErrorResponse, EvictResponse, EvictionReason, ExtendRequest, ExtendResponse, Op,
-    StatusResponse, TakeoverStatus, TerminateResponse, WorkloadContent,
+    StatusContent, StatusResponse, TakeoverStatus, TerminateResponse, WorkloadContent,
 };
 use crate::provider_http::AppState;
 
@@ -217,13 +224,23 @@ async fn extend_lease(
 }
 
 /// Serve one status on the free `<addr>.status`.
+///
+/// The one route a Gateway Grant admits (spec §6.5). The answer is the same
+/// answer either way: a grant delegates READING this lease, so what reading
+/// it says is not a thing the delegation changes.
 pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, ErrorResponse> {
-    let (request, content) = authenticate(state, body, Op::Status).await?;
+    let (request, content): (_, StatusContent) = authenticate(state, body, Op::Status).await?;
+    let now = state.clock.now();
 
     let leases = state.leases.lock().await;
     let id = lease_id_for(&leases, &content.workload_id).ok_or_else(unknown_workload)?;
     let lease = leases.get(&id).ok_or_else(unknown_workload)?;
-    lease_request::check_continuation(&request, &lease.continuation)?;
+    lease_request::check_status_continuation(
+        &request,
+        &lease.continuation,
+        content.gateway_expires_at,
+        now,
+    )?;
 
     Ok(StatusResponse {
         workload_id: lease.workload_id.clone(),
@@ -261,7 +278,7 @@ pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, Err
 /// destroyed now, and nothing is refunded (ADR 0003).
 pub async fn terminate(state: &AppState, body: &[u8]) -> Result<TerminateResponse, ErrorResponse> {
     let received = std::time::Instant::now();
-    let (request, content) = authenticate(state, body, Op::Terminate).await?;
+    let (request, content): (_, WorkloadContent) = authenticate(state, body, Op::Terminate).await?;
     let workload_id = content.workload_id;
     let now = state.clock.now();
 
@@ -380,16 +397,22 @@ pub async fn evict(
 }
 
 /// The Lease Request on an authenticated free route: validated exactly as a
-/// spawn's is, replay included, and parsed down to the workload id it names.
+/// spawn's is, replay included, and parsed down to `C`, the op's own content.
 ///
 /// Steps 1 to 3 only. The token it presented rides back in the request, for
-/// `lease_request::check_continuation` to weigh against the lease once the
-/// caller has found it — there is no lease to weigh it against until then.
-async fn authenticate(
+/// `lease_request`'s step 4 to weigh against the lease once the caller has
+/// found it — there is no lease to weigh it against until then.
+///
+/// `C` is the op's content type and not one shape for both, because the two
+/// contents are not the same: only `status`'s names `gateway_expires_at`
+/// (spec §6.5). Every field neither names is `invalid_request` here, never
+/// dropped (ADR 0004) — which is how a gateway asking to `terminate` is
+/// refused by the shape rather than by a rule.
+async fn authenticate<C: serde::de::DeserializeOwned>(
     state: &AppState,
     body: &[u8],
     op: Op,
-) -> Result<(ValidLeaseRequest, WorkloadContent), ErrorResponse> {
+) -> Result<(ValidLeaseRequest, C), ErrorResponse> {
     let now = state.clock.now();
     let request = lease_request::accept(
         body,
@@ -398,7 +421,7 @@ async fn authenticate(
         now,
         &state.accepted_requests,
     )?;
-    let content: WorkloadContent = serde_json::from_value(request.content.clone())
+    let content: C = serde_json::from_value(request.content.clone())
         .map_err(|e| invalid(format!("{} content: {}", op.as_str(), e)))?;
     Ok((request, content))
 }

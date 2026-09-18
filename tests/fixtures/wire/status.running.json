@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "running",
-    "description": "Status (spec §6.5) of the running lease, signed by its tenant, with `lease_request.status` as its body. `state` is the one-word `running`.",
+    "description": "Status (spec §6.5) of the running lease, presenting its own Continuation Token, with `lease_request.status` as its body. `state` is the one-word `running`.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "status"
   },

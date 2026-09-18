@@ -165,11 +165,76 @@ pub fn check_continuation(
     if request.continuation.as_ref() == Some(stored) {
         Ok(())
     } else {
-        Err(ErrorResponse::new(
-            ErrorCode::NotTenant,
-            "this lease was taken with another continuation token",
+        Err(not_tenant())
+    }
+}
+
+/// Step 4 as the `status` route runs it (spec §6.5): the lease's own token,
+/// or a Gateway Grant derived from it for the moment the request names.
+///
+/// The order is the whole of it, and none of it is an optimisation:
+///
+/// 1. The lease's stored token, in constant time. A match is FULL AUTHORITY,
+///    so a tenant is never weighed against a delegation it did not assert,
+///    and the ordinary path is the one comparison `terminate` makes.
+/// 2. Failing that, and only with an `asserted` moment: `now <= asserted`,
+///    checked BEFORE anything is derived. A delegation that has expired is
+///    refused on the moment it named, so a provider derives nothing at all
+///    for a grant that could not apply however well it was formed.
+/// 3. Then `gateway_sub` for that one moment, in constant time. A match is
+///    READ AUTHORITY, and the caller answers byte for byte what the tenant
+///    would have been answered.
+///
+/// **The assertion decides the refusal.** Anything that is neither is
+/// refused on what the request CLAIMED rather than on what it got wrong: a
+/// request that asserted a delegation hears `bad_grant`, one that asserted
+/// none hears `not_tenant`. A grant derived for another moment, a grant for
+/// another lease, an expired one and a value that is no grant at all are one
+/// code, so a gateway learns that its delegation does not apply here and
+/// nothing about the lease — not whose it is, not when it ends.
+pub fn check_status_continuation(
+    request: &ValidLeaseRequest,
+    stored: &ContinuationToken,
+    asserted: Option<u64>,
+    now: u64,
+) -> Result<(), ErrorResponse> {
+    if request.continuation.as_ref() == Some(stored) {
+        return Ok(());
+    }
+    let Some(expires_at) = asserted else {
+        return Err(not_tenant());
+    };
+    if now > expires_at {
+        return Err(bad_grant(format!(
+            "this delegation was derived for {}, which passed at {}; a tenant renews one by \
+             deriving it again for a later moment",
+            expires_at, now
+        )));
+    }
+    if request.continuation.as_ref() == Some(&stored.gateway_sub(expires_at)) {
+        Ok(())
+    } else {
+        Err(bad_grant(
+            "this delegation does not apply here; ask the tenant for one derived for this \
+             workload and this moment",
         ))
     }
+}
+
+/// A request presenting a token that is not the lease's — or none at all —
+/// and asserting no delegation that might excuse it.
+fn not_tenant() -> ErrorResponse {
+    ErrorResponse::new(
+        ErrorCode::NotTenant,
+        "this lease was taken with another continuation token",
+    )
+}
+
+/// A request that asserted a delegation which does not admit it. The message
+/// quotes the moment the REQUEST named and the clock, and nothing about the
+/// lease; no token is ever in it (spec §6.1.1).
+fn bad_grant(message: impl Into<String>) -> ErrorResponse {
+    ErrorResponse::new(ErrorCode::BadGrant, message)
 }
 
 /// The token a SPAWN stores against the lease it is about to create.

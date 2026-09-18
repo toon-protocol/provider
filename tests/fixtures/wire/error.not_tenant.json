@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "not_tenant",
-    "description": "Status signed by a key that is not the lease's tenant (spec §6.5).",
+    "description": "Status presenting a Continuation Token this lease was not taken with, and asserting no delegation (spec §6.1.2, §6.5). A request that DOES assert one hears `bad_grant` instead: the assertion decides the refusal.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "error"
   },
@@ -24,5 +24,5 @@
   },
   "response_status": 403,
   "route": "g.fixture.status",
-  "validation_step": "§6.5: the signer MUST be the lease's tenant"
+  "validation_step": "§6.1.2 step 4: the request MUST present the token the lease was taken with"
 }
