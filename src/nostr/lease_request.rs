@@ -162,14 +162,25 @@ pub fn check_continuation(
     request: &ValidLeaseRequest,
     stored: &ContinuationToken,
 ) -> Result<(), ErrorResponse> {
-    if request.continuation.as_ref() == Some(stored) {
+    if presents(request, stored) {
         Ok(())
     } else {
         Err(not_tenant())
     }
 }
 
-/// Step 4 as the `status` route runs it (spec §6.5): the lease's own token,
+/// Is `token` the value this request presented?
+///
+/// The one comparison this module makes, so its three call sites cannot
+/// drift on it. It is CONSTANT TIME — that is `ContinuationToken`'s own
+/// `PartialEq`, and there is no other way to compare two — and a request
+/// that presented nothing at all is simply `false`: an absent value asserts
+/// no authority, which is exactly what a wrong one does.
+fn presents(request: &ValidLeaseRequest, token: &ContinuationToken) -> bool {
+    request.continuation.as_ref() == Some(token)
+}
+
+/// Step 4 as the `status` route runs it (spec §6.5.1): the lease's own token,
 /// or a Gateway Grant derived from it for the moment the request names.
 ///
 /// The order is the whole of it, and none of it is an optimisation:
@@ -198,7 +209,7 @@ pub fn check_status_continuation(
     asserted: Option<u64>,
     now: u64,
 ) -> Result<(), ErrorResponse> {
-    if request.continuation.as_ref() == Some(stored) {
+    if presents(request, stored) {
         return Ok(());
     }
     let Some(expires_at) = asserted else {
@@ -211,7 +222,7 @@ pub fn check_status_continuation(
             expires_at, now
         )));
     }
-    if request.continuation.as_ref() == Some(&stored.gateway_sub(expires_at)) {
+    if presents(request, &stored.gateway_sub(expires_at)) {
         Ok(())
     } else {
         Err(bad_grant(

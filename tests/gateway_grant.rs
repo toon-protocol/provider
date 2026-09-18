@@ -1,4 +1,5 @@
-//! A Gateway Grant on the free `status` route (spec §6.5; TOON_Network #58).
+//! A Gateway Grant on the free `status` route (spec §6.5.1; TOON_Network
+//! #58).
 //!
 //! A tenant delegates reading one workload to one Workload Gateway without
 //! publishing anything and without telling the provider. The grant is
@@ -28,6 +29,7 @@ use common::socks::SocksStub;
 use common::{stub_registry, FakeBackend, FakeClock, FakeDirectory};
 use toon_provider::is_anyone_host;
 use toon_provider::nostr::continuation::ContinuationToken;
+use toon_provider::nostr::wire::SpawnContent;
 use toon_provider::provider::ImagePolicyConfig;
 use toon_provider::Clock;
 
@@ -43,8 +45,11 @@ struct Lease {
 
 /// Buy one lease on `basic.v1.spawn`, and hand back the token that took it.
 async fn spawn_lease(h: &Harness, seed: u8) -> Lease {
+    spawn_lease_from(h, spawn_content(seed)).await
+}
+
+async fn spawn_lease_from(h: &Harness, content: SpawnContent) -> Lease {
     let token = mint().continuation_for(&h.provider);
-    let content = spawn_content(seed);
     let spec = RequestSpec::spawn(h, &content).with_token(&token);
     let (status, body) = spawn(h, spec.request()).await;
     assert_eq!(status, StatusCode::OK, "{}", body);
@@ -70,14 +75,32 @@ async fn status_with(
     post(&h.app, "/status", json!({ "request": spec.request() })).await
 }
 
+/// The `30436:<pubkey>:<d>` a tenant that expanded a Template puts in its
+/// spawn, and that `status` echoes back (spec §6.2, §6.5). The lease below
+/// carries one so that the answer a gateway is weighed against has every
+/// optional field it can have — `template` here, `takeover` in
+/// `tests/takeover_settle.rs`, which proves the same equality on a lease
+/// that has one.
+const TEMPLATE: &str =
+    "30436:2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991:static-site";
+
 #[tokio::test]
 async fn a_grant_reads_exactly_what_the_tenant_reads() {
     let h = harness().await;
-    let lease = spawn_lease(&h, 0xaa).await;
+    let lease = spawn_lease_from(
+        &h,
+        SpawnContent {
+            template: Some(TEMPLATE.to_string()),
+            ..spawn_content(0xaa)
+        },
+    )
+    .await;
     let expires_at = h.clock.now() + GRANT_TTL;
 
     let (status, tenants_answer) = status_with(&h, &lease.token, &lease.workload_id, None).await;
     assert_eq!(status, StatusCode::OK, "{}", tenants_answer);
+    assert_eq!(tenants_answer["template"], TEMPLATE, "{}", tenants_answer);
+    assert!(tenants_answer["access"].is_object(), "{}", tenants_answer);
 
     // What the provider held before it was shown a grant it had never seen.
     let before = std::fs::read(&h.state_path).unwrap();
@@ -108,7 +131,7 @@ async fn a_grant_reads_exactly_what_the_tenant_reads() {
 }
 
 /// A delegation ends by expiring, and there is no other way it ends: a
-/// tenant that wants a gateway cut off sooner waits (spec §6.5). The value
+/// tenant that wants a gateway cut off sooner waits (spec §6.5.1). The value
 /// presented here is the RIGHT one for the moment it names — the moment is
 /// simply past, which is refused before the provider derives anything.
 #[tokio::test]
@@ -189,9 +212,9 @@ async fn every_delegation_defect_is_bad_grant_and_nothing_else() {
 }
 
 /// Rotation is re-derivation at a new moment, and nothing else — there is no
-/// state to move and nothing to publish (spec §6.5). Two grants of one lease
-/// for two moments both read, which is what makes handing out a later one a
-/// renewal rather than a migration.
+/// state to move and nothing to publish (spec §6.5.1). Two grants of one
+/// lease for two moments both read, which is what makes handing out a later
+/// one an ordinary second derivation rather than a migration.
 #[tokio::test]
 async fn a_grant_for_a_later_moment_reads_beside_the_one_it_renews() {
     let h = harness().await;
@@ -211,7 +234,7 @@ async fn a_grant_for_a_later_moment_reads_beside_the_one_it_renews() {
     }
 }
 
-/// A grant admits `status` and nothing else (spec §6.5, §6.6), and the shape
+/// A grant admits `status` and nothing else (spec §6.5.1, §6.6), and the shape
 /// is what says so rather than a rule the terminate route has to remember.
 /// `gateway_expires_at` is named by `status` content alone: with it, a
 /// `terminate` is refused for a field this provider does not know; without
@@ -395,4 +418,20 @@ async fn a_hidden_providers_delegated_status_names_the_anyone_host_and_dials_not
         before,
         "checking a grant opened no connection"
     );
+}
+
+/// The lease's own token is FULL authority, and nothing below it runs (spec
+/// §6.5.1 step 1). A tenant that somehow names a moment — a stale one at
+/// that — is still the tenant, so it is answered rather than weighed against
+/// a delegation it never asserted. The order is the claim, and this is the
+/// one case where it is visible from outside.
+#[tokio::test]
+async fn a_leases_own_token_is_never_weighed_against_a_delegation() {
+    let h = harness().await;
+    let lease = spawn_lease(&h, 0xaa).await;
+    let long_past = h.clock.now() - 1;
+
+    let (status, body) = status_with(&h, &lease.token, &lease.workload_id, Some(long_past)).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["state"], "running");
 }

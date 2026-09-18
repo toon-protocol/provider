@@ -16,7 +16,7 @@
 //
 // Status asks ONE thing more, because reading is the one authority a tenant
 // can hand on: a Workload Gateway may present a Gateway Grant derived from
-// the lease's token for a moment the tenant chose (spec §6.5), which the
+// the lease's token for a moment the tenant chose (spec §6.5.1), which the
 // provider recomputes from the token it already holds. That is the whole of
 // the delegation — nothing is fetched, nothing is stored per gateway, and
 // `terminate` is not part of it.
@@ -225,7 +225,7 @@ async fn extend_lease(
 
 /// Serve one status on the free `<addr>.status`.
 ///
-/// The one route a Gateway Grant admits (spec §6.5). The answer is the same
+/// The one route a Gateway Grant admits (spec §6.5.1). The answer is the same
 /// answer either way: a grant delegates READING this lease, so what reading
 /// it says is not a thing the delegation changes.
 pub async fn status(state: &AppState, body: &[u8]) -> Result<StatusResponse, ErrorResponse> {

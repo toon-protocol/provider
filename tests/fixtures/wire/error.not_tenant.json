@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "not_tenant",
-    "description": "Status presenting a Continuation Token this lease was not taken with, and asserting no delegation (spec §6.1.2, §6.5). A request that DOES assert one hears `bad_grant` instead: the assertion decides the refusal.",
+    "description": "Status presenting a Continuation Token this lease was not taken with, and asserting no delegation (spec §6.1.2, §6.5.1). A request that DOES assert one hears `bad_grant` instead: the assertion decides the refusal.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "error"
   },

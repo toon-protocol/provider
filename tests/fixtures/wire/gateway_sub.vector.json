@@ -8,7 +8,7 @@
   "expires_at": 1700086400,
   "fixture": {
     "case": "vector",
-    "description": "The Gateway Grant derivation (spec §6.5): HKDF-SHA256 over the LEASE'S CONTINUATION TOKEN — not the tenant's root secret — with an empty salt and an ASCII `info` of the domain string followed by the moment the grant is derived for, written as unpadded decimal unix seconds, for 32 bytes of output. A tenant hands the result and that moment to one Workload Gateway out of band; the gateway presents it as its request's `continuation` and names the moment in `gateway_expires_at`, and the provider recomputes it from the token it already stores. Nothing is published and nothing is kept per gateway. `at_the_next_second` is the same token one second later, which is why rotation is re-derivation, and why a grant presented with another moment is refused.",
+    "description": "The Gateway Grant derivation (spec §6.5.1): HKDF-SHA256 over the LEASE'S CONTINUATION TOKEN — not the tenant's root secret — with an empty salt and an ASCII `info` of the domain string followed by the moment the grant is derived for, written as unpadded decimal unix seconds, for 32 bytes of output. A tenant hands the result and that moment to one Workload Gateway out of band; the gateway presents it as its request's `continuation` and names the moment in `gateway_expires_at`, and the provider recomputes it from the token it already stores. Nothing is published and nothing is kept per gateway. `at_the_next_second` is the same token one second later, which is why rotation is re-derivation, and why a grant presented with another moment is refused.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "gateway_sub"
   },

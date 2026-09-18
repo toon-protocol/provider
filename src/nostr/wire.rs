@@ -241,7 +241,7 @@ pub struct SpawnContent {
     pub template: Option<String>,
 }
 
-/// Content of a Lease Request with `op = status` (spec §6.5): the workload
+/// Content of a Lease Request with `op = status` (spec §6.5, §6.5.1): the workload
 /// it is about, and — when the request is a Workload Gateway's — the moment
 /// the Gateway Grant it presents was derived for.
 ///
@@ -262,7 +262,7 @@ pub struct StatusContent {
     /// Unix seconds: the moment this request asserts its Gateway Grant was
     /// derived for. Absent is a request asserting no delegation at all,
     /// which is `not_tenant` rather than `bad_grant` when its token is not
-    /// the lease's (spec §6.5).
+    /// the lease's (spec §6.5.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_expires_at: Option<u64>,
 }
@@ -605,7 +605,7 @@ pub enum ErrorCode {
     NotRunning,
     StaleRequest,
     /// A `status` asserted a Gateway Grant that does not apply here (spec
-    /// §6.5). Distinct from `NotTenant`, which is what a request asserting
+    /// §6.5.1). Distinct from `NotTenant`, which is what a request asserting
     /// no delegation hears, so the two refusals stay tellable apart: one
     /// says *you are not the tenant*, the other *your delegation does not
     /// apply here*.

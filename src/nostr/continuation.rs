@@ -21,7 +21,7 @@
 //
 // One more thing derives, and this one the PROVIDER computes: a Gateway
 // Grant, `gateway_sub`, which delegates reading a lease to one Workload
-// Gateway until a moment the tenant chose (spec §6.5). It hangs off the
+// Gateway until a moment the tenant chose (spec §6.5.1). It hangs off the
 // token rather than off the root secret, so the provider — which holds the
 // token and not the root — can recompute any grant it is shown, and needs
 // to store nothing per gateway and read no relay to check one.
@@ -49,7 +49,7 @@ use super::wire::is_lower_hex;
 /// guess about byte order or encoding.
 pub const CONTINUATION_DOMAIN: &str = "toon-network-continuation:";
 
-/// The HKDF `info` prefix a Gateway Grant is derived under (spec §6.5). The
+/// The HKDF `info` prefix a Gateway Grant is derived under (spec §6.5.1). The
 /// moment the grant was derived for follows it as unix seconds written in
 /// ASCII decimal with no padding and no sign, so this `info` is ASCII too
 /// and a gateway and a provider cannot disagree about how a number was
@@ -123,12 +123,17 @@ impl ContinuationToken {
     }
 
     /// The Gateway Grant this lease's token derives for the moment
-    /// `expires_at` (spec §6.5):
+    /// `expires_at` (spec §6.5.1):
     ///
     /// ```text
     /// gateway_sub(provider, expires_at) = HKDF-SHA256(continuation(provider),
     ///                                         "toon-network-gateway:" || expires_at)
     /// ```
+    ///
+    /// The spec writes `provider` because the input keying material is
+    /// `continuation(provider)`; here that IS the receiver, so there is no
+    /// such parameter — a grant is derived from one lease's token at one
+    /// provider, and from nothing else.
     ///
     /// The same HKDF as a Continuation Token's, over the token rather than
     /// the root secret, with `expires_at` as ASCII decimal unix seconds.

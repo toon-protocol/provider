@@ -520,7 +520,7 @@ impl Fixture {
         )
     }
 
-    /// A WORKLOAD GATEWAY's `status` (spec §6.5): the Gateway Grant it holds
+    /// A WORKLOAD GATEWAY's `status` (spec §6.5.1): the Gateway Grant it holds
     /// presented as the request's `continuation`, exactly where the lease's
     /// own token would ride, and the moment it was derived for named in the
     /// content. The request is an ordinary Lease Request in every other way.
@@ -824,7 +824,7 @@ fn the_continuation_derivation_vector() {
     );
 }
 
-/// The Gateway Grant derivation (spec §6.5): one fixed Continuation Token,
+/// The Gateway Grant derivation (spec §6.5.1): one fixed Continuation Token,
 /// one fixed moment, and the grant they produce.
 ///
 /// The second half of the story `continuation.vector` tells, and a vector
@@ -837,7 +837,7 @@ fn the_gateway_grant_derivation_vector() {
     let token = root(TENANT_ROOT_SECRET).continuation_for(&provider);
     let expires_at = NOW + GRANT_TTL;
     let grant = token.gateway_sub(expires_at);
-    // Rotation is re-derivation at a new moment (spec §6.5), so a grant is
+    // Rotation is re-derivation at a new moment (spec §6.5.1), so a grant is
     // bound to the one moment it names: a second moment is a second value,
     // and a gateway presenting one with the other is refused `bad_grant`.
     let later = token.gateway_sub(expires_at + 1);
@@ -851,7 +851,7 @@ fn the_gateway_grant_derivation_vector() {
                    "fixture": header(
                        "gateway_sub",
                        "vector",
-        "The Gateway Grant derivation (spec §6.5): HKDF-SHA256 over the LEASE'S \
+        "The Gateway Grant derivation (spec §6.5.1): HKDF-SHA256 over the LEASE'S \
                         CONTINUATION TOKEN — not the tenant's root secret — with an empty salt and \
                         an ASCII `info` of the domain string followed by the moment the grant is \
                         derived for, written as unpadded decimal unix seconds, for 32 bytes of \
@@ -1339,7 +1339,7 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
             "status",
             "delegated",
             "Status of the same running lease, asked by a WORKLOAD GATEWAY rather than by the \
-             tenant (spec §6.5). The request presents the Gateway Grant \
+             tenant (spec §6.5.1). The request presents the Gateway Grant \
              (`gateway_sub.vector`) as its `continuation` — exactly where the lease's own token \
              rides — and names the moment it was derived for in the content's \
              `gateway_expires_at`. The answer is byte-for-byte what the tenant was told in \
@@ -1375,13 +1375,14 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
             "bad_grant",
             "A `status` asserting a delegation — the content names a `gateway_expires_at` that \
              has not passed — presenting a grant derived from a token this lease was not taken \
-             with (spec §6.5). Every other defect is the same code and the same shape: a grant \
-             derived for a different moment from the one asserted, a grant for another lease, a \
-             moment already past — refused before anything is derived — and 32 bytes that were \
-             derived for nothing. One code on purpose: a gateway learns that its delegation \
-             does not apply and nothing about the lease. Distinct from `not_tenant`, which is \
-             what the same value hears when the request asserts no delegation at all — the \
-             assertion decides the refusal, not the defect.",
+             with (spec §6.5.1). Every other defect earns this same code: a grant derived for a \
+             different moment from the one asserted, a grant for another lease, a moment \
+             already past — refused before anything is derived — and 32 bytes that were derived \
+             for nothing. One code on purpose, so a gateway learns that its delegation does not \
+             apply and nothing about the lease; `message` is for people and says which defect \
+             it was, and every fact in it is one the gateway sent (§5). Distinct from \
+             `not_tenant`, which is what the same value hears when the request asserts no \
+             delegation at all — the assertion decides the refusal, not the defect.",
         ),
         &route("status"),
         "/status",
@@ -1394,8 +1395,8 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
         "error.bad_grant.json",
         with_validation_step(
             doc,
-            "§6.5: the presented value MUST be the grant this lease's token derives for the \
-             moment the request asserts",
+            "§6.5.1 step 3: the presented value MUST be the grant this lease's token derives \
+             for the moment the request asserts",
         ),
     );
 
@@ -1424,7 +1425,7 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
             "error",
             "not_tenant",
             "Status presenting a Continuation Token this lease was not taken with, and \
-             asserting no delegation (spec §6.1.2, §6.5). A request that DOES assert one hears \
+             asserting no delegation (spec §6.1.2, §6.5.1). A request that DOES assert one hears \
              `bad_grant` instead: the assertion decides the refusal.",
         ),
         &route("status"),

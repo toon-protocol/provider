@@ -1,7 +1,7 @@
 {
   "fixture": {
     "case": "bad_grant",
-    "description": "A `status` asserting a delegation — the content names a `gateway_expires_at` that has not passed — presenting a grant derived from a token this lease was not taken with (spec §6.5). Every other defect is the same code and the same shape: a grant derived for a different moment from the one asserted, a grant for another lease, a moment already past — refused before anything is derived — and 32 bytes that were derived for nothing. One code on purpose: a gateway learns that its delegation does not apply and nothing about the lease. Distinct from `not_tenant`, which is what the same value hears when the request asserts no delegation at all — the assertion decides the refusal, not the defect.",
+    "description": "A `status` asserting a delegation — the content names a `gateway_expires_at` that has not passed — presenting a grant derived from a token this lease was not taken with (spec §6.5.1). Every other defect earns this same code: a grant derived for a different moment from the one asserted, a grant for another lease, a moment already past — refused before anything is derived — and 32 bytes that were derived for nothing. One code on purpose, so a gateway learns that its delegation does not apply and nothing about the lease; `message` is for people and says which defect it was, and every fact in it is one the gateway sent (§5). Distinct from `not_tenant`, which is what the same value hears when the request asserts no delegation at all — the assertion decides the refusal, not the defect.",
     "generated_by": "toon-provider tests/wire_fixtures.rs",
     "surface": "error"
   },
@@ -25,5 +25,5 @@
   },
   "response_status": 403,
   "route": "g.fixture.status",
-  "validation_step": "§6.5: the presented value MUST be the grant this lease's token derives for the moment the request asserts"
+  "validation_step": "§6.5.1 step 3: the presented value MUST be the grant this lease's token derives for the moment the request asserts"
 }
