@@ -10,7 +10,9 @@
 //!
 //! The three doors a tenant can push on are one test each: the registry the
 //! reference names, the token realm a hostile registry answers 401 with, and
-//! a redirect. The operator's own door — `registry_url_override`,
+//! a redirect. Then the whole free route, from the JSON a connector posts to
+//! the refusal it answers with, because that is where this is cheapest to
+//! abuse. The operator's own door — `registry_url_override`,
 //! `gateway_url_pattern`, `image_policy.exempt_registries` — is the way back
 //! in, and the last two tests walk through it.
 

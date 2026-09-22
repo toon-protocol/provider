@@ -130,11 +130,20 @@ impl Exemption {
                 .with_context(|| format!("{:?} is not a port", port))?;
             return Ok(Self::Authority(addr.to_string(), port));
         }
+        // A bare IPv6 address was already taken above, so a `:` left here is
+        // a port — and one that will not parse is a typo, not a host name
+        // with a colon in it, which no host name has.
         match entry.rsplit_once(':') {
-            Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => Ok(
-                Self::Authority(host.to_ascii_lowercase(), port.parse().unwrap()),
-            ),
-            _ => Ok(Self::Host(entry.to_ascii_lowercase())),
+            Some((host, port)) => {
+                let port: u16 = port
+                    .parse()
+                    .with_context(|| format!("{:?} is not a port", port))?;
+                if host.is_empty() {
+                    bail!("{:?} names a port but no host", entry);
+                }
+                Ok(Self::Authority(host.to_ascii_lowercase(), port))
+            }
+            None => Ok(Self::Host(entry.to_ascii_lowercase())),
         }
     }
 
@@ -484,7 +493,16 @@ mod tests {
 
     #[test]
     fn an_entry_that_is_neither_a_host_nor_a_cidr_is_refused_at_load() {
-        for written in ["", "10.0.0.0/99", "10.0.0.0/notaprefix", "1.2.3.4/"] {
+        for written in [
+            "",
+            "10.0.0.0/99",
+            "10.0.0.0/notaprefix",
+            "1.2.3.4/",
+            // A port that is not one: a typo an operator must hear about,
+            // not a host name nothing will ever match.
+            "registry.internal:http",
+            ":5000",
+        ] {
             assert!(
                 OutboundGuard::new(&[written.to_string()]).is_err(),
                 "{:?} must be refused",
