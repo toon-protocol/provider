@@ -220,7 +220,7 @@ async fn one_listing_event_per_configured_listing() {
 #[tokio::test]
 async fn a_listing_names_its_tier_its_profile_and_everything_a_relay_filters_on() {
     let mut tier = listing("basic", 3, 4);
-    tier.resources.gpu = Some("rtx4090".to_string());
+    tier.resources.gpu = Some("nvidia-rtx-4090".to_string());
     tier.capabilities = vec!["x-ci-sandbox".to_string(), "x-lxc".to_string()];
     let h = harness_with(vec![tier]).await;
     h.service.publish_directory().await.unwrap();
@@ -247,7 +247,7 @@ async fn a_listing_names_its_tier_its_profile_and_everything_a_relay_filters_on(
         &["l", "isolation:shared-kernel", TOON_LABEL]
     ));
     assert!(has_tag(event, &["l", "arch:amd64", TOON_LABEL]));
-    assert!(has_tag(event, &["l", "gpu:rtx4090", TOON_LABEL]));
+    assert!(has_tag(event, &["l", "gpu:nvidia-rtx-4090", TOON_LABEL]));
     assert!(has_tag(event, &["t", "x-ci-sandbox"]));
     assert!(has_tag(event, &["t", "x-lxc"]));
     assert!(has_tag(event, &["g", "u4pruy"]));
@@ -262,7 +262,7 @@ async fn a_listing_names_its_tier_its_profile_and_everything_a_relay_filters_on(
     assert_eq!(content.resources.cpu_millicores, 500);
     assert_eq!(content.resources.memory_mb, 256);
     assert_eq!(content.resources.storage_gb, 4);
-    assert_eq!(content.resources.gpu.as_deref(), Some("rtx4090"));
+    assert_eq!(content.resources.gpu.as_deref(), Some("nvidia-rtx-4090"));
     assert_eq!(
         content.standby_price, None,
         "this tier prices no Warm Standby, so it publishes no field at all"

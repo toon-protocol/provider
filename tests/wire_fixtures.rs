@@ -42,20 +42,24 @@ use toon_provider::nostr::continuation::{
     ContinuationToken, RootSecret, CONTINUATION_DOMAIN, GATEWAY_DOMAIN,
 };
 use toon_provider::nostr::directory_events::{
-    takeover_event, ProfileContent, Settlement, HIDDEN_LABEL,
+    takeover_event, ProfileContent, Settlement, HIDDEN_LABEL, LIVENESS_EXPIRY_CADENCES,
 };
 use toon_provider::nostr::image_events::{
-    blob_record_event, image_entry_event, template_event, BlobPart, BlobRecordContent, BlobSource,
-    EntryBlob, ImageEntryContent, TemplateContent, TemplateImage,
+    blob_record_event, image_entry_event, template_event, BlobPage, BlobPart, BlobRecord,
+    BlobRecordContent, BlobSource, EntryBlob, ImageEntryContent, TemplateContent, TemplateImage,
 };
 use toon_provider::nostr::kinds::{
     K_BLOB, K_EVICTION, K_IMAGE, K_LISTING, K_LIVENESS, K_PROFILE, K_TAKEOVER, K_TEMPLATE,
     TOON_LABEL,
 };
+use toon_provider::nostr::lease_request::MAX_REQUEST_WINDOW_SECS;
 use toon_provider::nostr::wire::{
     EvictionReason, ImageRef, PortRequest, Protocol, RegistryEntryRef, Resources, SpawnContent,
 };
-use toon_provider::provider::{evict, route_table, ImagePolicyConfig, SELF_STOP_CADENCES};
+use toon_provider::provider::{
+    evict, route_table, ImagePolicyConfig, SELF_STOP_CADENCES, SETTLE_CADENCES,
+    SWEEP_INTERVAL_SECS, TRIGGER_CADENCES,
+};
 use toon_provider::{router, Listing, LivenessState, ProviderConfig, ProviderService};
 
 // ── the fixed world every fixture is generated in ────────────────────────────
@@ -461,7 +465,7 @@ fn config(
         capabilities: vec!["x-fixture".to_string()],
         listings: vec![
             listing("basic", 1, 2, None, &["x-fixture"], None),
-            listing("gpu", 1, 1, Some("rtx-4090"), &[], None),
+            listing("gpu", 1, 1, Some("nvidia-rtx-4090"), &[], None),
             // The one tier that sells Warm Standbys, so the fixtures show
             // both halves of the rule: a priced listing gets `.standby` and
             // `.standby.extend` rows and publishes `standby_price`, and the
@@ -707,6 +711,20 @@ fn constants_and_test_keys() {
             },
             "standby_price": STANDBY_PRICE,
             "label": TOON_LABEL,
+            // Spec §7.2's normative timing table, read from this provider's
+            // OWN constants rather than typed again here as literals: a
+            // second implementation checks itself against the same values
+            // the reference provider runs on, and `check.mjs` fails the
+            // build if this block and the spec's table ever disagree.
+            "timing": {
+                "liveness_cadence_s": LIVENESS_CADENCE_S,
+                "liveness_expiry_cadences": LIVENESS_EXPIRY_CADENCES,
+                "takeover_trigger_cadences": TRIGGER_CADENCES,
+                "settle_window_cadences": SETTLE_CADENCES,
+                "self_stop_cadences": SELF_STOP_CADENCES,
+                "request_window_s": MAX_REQUEST_WINDOW_SECS,
+                "sweep_interval_s": SWEEP_INTERVAL_SECS,
+            },
             "signing": {
                 "id": "sha256 over the NIP-01 serialization [0, pubkey, created_at, kind, tags, content]",
                 "sig": "BIP-340 Schnorr over the id, by the event's pubkey",
@@ -990,7 +1008,7 @@ async fn one_directory_event_per_kind() {
             &listings[1],
             "listing.gpu",
             "The `gpu` Listing: as `listing`, plus `resources.gpu` in content and an \
-             `l gpu:<model>` label, and no capabilities.",
+             `l gpu:<vendor>-<model>` label, and no capabilities (spec §4.2, §4.4).",
         ),
         (
             &listings[2],
@@ -2640,6 +2658,15 @@ const MANIFEST_PART_TXIDS: [&str; 1] = ["dG9vbi1zdG9yZS1tYW5pZmVzdC1wYXJ0"];
 /// a record for EVERY blob, base layers included.
 const BASE_RECORD_TXID: &str = "dG9vbi1zdG9yZS1iYXNlLXJlY29yZA";
 const BASE_PART_TXIDS: [&str; 1] = ["dG9vbi1zdG9yZS1iYXNlLXBhcnQ"];
+/// The SAME application layer's bytes and PARTS, published a second time
+/// as a PAGED Blob Record (spec §8.2, §11 item 2): the txid of the paged
+/// record's own upload, and of its two pages — `LAYER_PART_TXIDS`' three
+/// parts grouped two-then-one.
+const PAGED_LAYER_RECORD_TXID: &str = "dG9vbi1zdG9yZS1wYWdlZC1sYXllci1yZWNvcmQ";
+const PAGED_LAYER_PAGE_TXIDS: [&str; 2] = [
+    "dG9vbi1zdG9yZS1wYWdlZC1sYXllci1wYWdlLW9uZQ",
+    "dG9vbi1zdG9yZS1wYWdlZC1sYXllci1wYWdlLXR3bw",
+];
 
 fn publisher() -> Keys {
     keys(PUBLISHER_SECRET)
@@ -2740,16 +2767,68 @@ fn blob_record_for(bytes: &[u8], part_txids: &[&str]) -> BlobRecordContent {
         digest: digest_of(bytes),
         size: bytes.len() as u64,
         part_size: PART_SIZE,
-        parts: chunks
-            .iter()
-            .zip(part_txids)
-            .map(|(chunk, txid)| BlobPart {
-                txid: txid.to_string(),
-                sha256: sha256_hex(chunk),
-                size: chunk.len() as u64,
-            })
-            .collect(),
+        parts: Some(
+            chunks
+                .iter()
+                .zip(part_txids)
+                .map(|(chunk, txid)| BlobPart {
+                    txid: txid.to_string(),
+                    sha256: sha256_hex(chunk),
+                    size: chunk.len() as u64,
+                })
+                .collect(),
+        ),
+        pages: None,
     }
+}
+
+/// A PAGED Blob Record for `bytes` (spec §8.2, §11 item 2): the same
+/// ordered parts as `blob_record_for`, grouped `parts_per_page` at a time
+/// into pages uploaded under `page_txids` (one per page, in order). Answers
+/// the record's content and, for each page, the exact bytes its upload
+/// serves — a JSON array of that page's part objects, in `parts`' own shape
+/// — so a fixture can mount them on the gateway and a check can re-hash
+/// them without guessing at a serialization.
+fn blob_record_paged_for(
+    bytes: &[u8],
+    part_txids: &[&str],
+    page_txids: &[&str],
+    parts_per_page: usize,
+) -> (BlobRecordContent, Vec<Vec<u8>>) {
+    let chunks: Vec<&[u8]> = bytes.chunks(PART_SIZE as usize).collect();
+    assert_eq!(chunks.len(), part_txids.len(), "one txid per part");
+    let parts: Vec<BlobPart> = chunks
+        .iter()
+        .zip(part_txids)
+        .map(|(chunk, txid)| BlobPart {
+            txid: txid.to_string(),
+            sha256: sha256_hex(chunk),
+            size: chunk.len() as u64,
+        })
+        .collect();
+    let groups: Vec<&[BlobPart]> = parts.chunks(parts_per_page).collect();
+    assert_eq!(groups.len(), page_txids.len(), "one txid per page");
+    let mut page_bytes = Vec::new();
+    let mut pages = Vec::new();
+    for (group, txid) in groups.iter().zip(page_txids) {
+        let bytes = serde_json::to_vec(group).unwrap();
+        pages.push(BlobPage {
+            txid: txid.to_string(),
+            sha256: sha256_hex(&bytes),
+            parts: group.len() as u64,
+        });
+        page_bytes.push(bytes);
+    }
+    (
+        BlobRecordContent {
+            digest: digest_of(bytes),
+            size: bytes.len() as u64,
+            part_size: PART_SIZE,
+            parts: None,
+            pages: Some(pages),
+        },
+        page_bytes,
+    )
 }
 
 /// The application layer's Blob Record: the one `registry.blob_record`
@@ -2868,7 +2947,8 @@ async fn mount_image_bytes(gateway: &MockServer, registry: &MockServer) {
         stored_blobs().into_iter().zip(stored_blob_record_events())
     {
         mount_raw(gateway, record_txid, serde_json::to_vec(&event).unwrap()).await;
-        for (part, chunk) in record.parts.iter().zip(bytes.chunks(PART_SIZE as usize)) {
+        let parts = record.parts.as_deref().unwrap_or_default();
+        for (part, chunk) in parts.iter().zip(bytes.chunks(PART_SIZE as usize)) {
             mount_raw(gateway, &part.txid, chunk.to_vec()).await;
         }
     }
@@ -2966,6 +3046,87 @@ fn one_publisher_event_per_milestone_2_kind() {
             &record,
         ),
     );
+
+    // The SAME application layer, published a second time as a PAGED Blob
+    // Record (spec §8.2, §11 item 2): `pages` replaces `parts`.
+    let (paged_content, page_bytes) = blob_record_paged_for(
+        &app_layer_bytes(),
+        &LAYER_PART_TXIDS,
+        &PAGED_LAYER_PAGE_TXIDS,
+        2,
+    );
+    let paged_record = with_reproducible_sig(
+        &blob_record_event(&paged_content, &publisher, NOW).unwrap(),
+        &publisher,
+    );
+    let mut paged_doc = event_fixture(
+        "registry",
+        "blob_record.paged",
+        "The SAME application layer as `registry.blob_record`, published a second time as \
+         a PAGED Blob Record (spec §8.2, §11 item 2) — the shape a blob over one TOON store \
+         data item (~700 parts, ~70 MB) needs. `pages` replaces `parts`: an ORDERED array \
+         of `{ txid, sha256, parts }`, each naming ONE store upload of its own, whose bytes \
+         are the JSON array of the part objects that page covers, in exactly `parts`' own \
+         shape. A reader fetches and digest-checks every page — `sha256` is the bare hex of \
+         the page's OWN bytes, checked before a single part from it is used — then \
+         concatenates the pages' part lists in page order into the same ordered list \
+         `parts` would have been; every rule `registry.blob_record` shows then applies \
+         unchanged. `page_bytes` (beside `content`, for this fixture only — not part of the \
+         signed event) is the literal bytes each page's upload serves, keyed by txid, so a \
+         check can re-hash them against `sha256` without guessing at a serialization. \
+         `spawn_image.digest_only.paged` is a spawn that runs by resolving this very record.",
+        "K_BLOB",
+        &paged_record,
+    );
+    let page_bytes_object = || -> Value {
+        Value::Object(
+            PAGED_LAYER_PAGE_TXIDS
+                .iter()
+                .zip(page_bytes.iter())
+                .map(|(txid, bytes)| {
+                    (
+                        txid.to_string(),
+                        json!(String::from_utf8(bytes.clone()).unwrap()),
+                    )
+                })
+                .collect(),
+        )
+    };
+    paged_doc["page_bytes"] = page_bytes_object();
+    golden("registry.blob_record.paged.json", paged_doc);
+
+    // INVALID: the same blob's record carrying BOTH `parts` and `pages`
+    // (spec §8.2, §11 item 2's one-of rule). A reader refuses this shape
+    // outright, never reading either list, and §8.4's chain moves to the
+    // next source — exactly as it does for a record whose parts fail their
+    // own checks.
+    let both_forms_content = BlobRecordContent {
+        pages: paged_content.pages.clone(),
+        ..blob_record_content()
+    };
+    assert!(
+        BlobRecord::from_event(&blob_record_event(&both_forms_content, &publisher, NOW).unwrap())
+            .is_err(),
+        "both forms is exactly the shape the reader refuses"
+    );
+    let both_forms_record = with_reproducible_sig(
+        &blob_record_event(&both_forms_content, &publisher, NOW).unwrap(),
+        &publisher,
+    );
+    let mut both_forms_doc = event_fixture(
+        "registry",
+        "blob_record.both_forms",
+        "INVALID: a Blob Record for the application layer carrying BOTH `parts` (as \
+         `registry.blob_record` shows) and `pages` (as `registry.blob_record.paged` \
+         shows) for the SAME blob (spec §8.2, §11 item 2). Exactly one of the two may \
+         be present; this provider's own reader refuses a record shaped like this one \
+         outright, and §8.4's chain treats it exactly like a record whose parts fail \
+         their own checks — that source fails and the next is tried.",
+        "K_BLOB",
+        &both_forms_record,
+    );
+    both_forms_doc["page_bytes"] = page_bytes_object();
+    golden("registry.blob_record.both_forms.json", both_forms_doc);
 
     let template = with_reproducible_sig(
         &template_event(TEMPLATE_NAME, &template_content(), &publisher, NOW).unwrap(),
@@ -3155,4 +3316,129 @@ async fn one_spawn_per_image_form() {
     assert_eq!(response["would_run"], false);
     assert_eq!(error_of(&response), "refused_image");
     golden("availability.image_unresolved.json", doc);
+}
+
+// ── paged Blob Records (spec §8.2, §11 item 2) ──────────────────────────────
+
+/// A provider over the Milestone 2 image whose Relay Set holds the
+/// application layer's Blob Record PAGED (`PAGED_LAYER_RECORD_TXID`)
+/// instead of inline: the manifest, the config and the base layer stay
+/// unpaged, since paging buys them nothing under `PART_SIZE`. No inline
+/// record for the layer exists here at all, so a spawn that runs proves
+/// resolution went through `pages` and nothing else.
+async fn fixture_provider_with_paged_layer(registry: MockServer) -> Fixture {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir
+        .keep()
+        .join("leases.json")
+        .to_string_lossy()
+        .into_owned();
+    let directory = FakeDirectory::new();
+    let gateway = MockServer::start().await;
+
+    for ((record, record_txid, bytes), event) in stored_blobs()
+        .into_iter()
+        .zip(stored_blob_record_events())
+        .filter(|((_, record_txid, _), _)| *record_txid != LAYER_RECORD_TXID)
+    {
+        mount_raw(&gateway, record_txid, serde_json::to_vec(&event).unwrap()).await;
+        let parts = record.parts.as_deref().unwrap_or_default();
+        for (part, chunk) in parts.iter().zip(bytes.chunks(PART_SIZE as usize)) {
+            mount_raw(&gateway, &part.txid, chunk.to_vec()).await;
+        }
+        directory.seed_blob_record(event);
+    }
+
+    let (paged_content, page_bytes) = blob_record_paged_for(
+        &app_layer_bytes(),
+        &LAYER_PART_TXIDS,
+        &PAGED_LAYER_PAGE_TXIDS,
+        2,
+    );
+    let paged_event = with_reproducible_sig(
+        &blob_record_event(&paged_content, &publisher(), NOW).unwrap(),
+        &publisher(),
+    );
+    mount_raw(
+        &gateway,
+        PAGED_LAYER_RECORD_TXID,
+        serde_json::to_vec(&paged_event).unwrap(),
+    )
+    .await;
+    for (txid, bytes) in PAGED_LAYER_PAGE_TXIDS.iter().zip(page_bytes.iter()) {
+        mount_raw(&gateway, txid, bytes.clone()).await;
+    }
+    for (txid, chunk) in LAYER_PART_TXIDS
+        .iter()
+        .zip(app_layer_bytes().chunks(PART_SIZE as usize))
+    {
+        mount_raw(&gateway, txid, chunk.to_vec()).await;
+    }
+    directory.seed_blob_record(paged_event);
+
+    let clock = FakeClock::at(NOW);
+    let service = ProviderService::with_backend_clock_and_directory(
+        ProviderConfig {
+            gateway_url_pattern: Some(format!("{}/raw/{{txid}}", gateway.uri())),
+            ..config(
+                state_path,
+                Some(registry.uri()),
+                ImagePolicyConfig::default(),
+            )
+        },
+        FakeBackend::new(),
+        clock.clone(),
+        directory.clone(),
+    )
+    .unwrap()
+    .with_hidden_service(FakeHiddenService::new());
+    Fixture {
+        app: router(service.app_state()),
+        service,
+        directory,
+        clock,
+        provider: keys(PROVIDER_SECRET),
+        tenant: root(TENANT_ROOT_SECRET),
+        other_tenant: root(OTHER_TENANT_ROOT_SECRET),
+        _registry: registry,
+        _gateway: gateway,
+    }
+}
+
+#[tokio::test]
+async fn a_spawn_resolves_a_paged_blob_record() {
+    let f = fixture_provider_with_paged_layer(stub_registry().await).await;
+    let content = spawn_content_with(0xd4, ImageRef::by_digest(image_digest()), None);
+    let request = lease_request(
+        &f.tenant,
+        &f.provider_pubkey(),
+        "spawn",
+        &content,
+        NOW + TTL,
+        "spawn_image.digest_only.paged",
+    );
+    let (status, response, mut doc) = exchange(
+        &f,
+        (
+            "spawn_image",
+            "digest_only.paged",
+            "Form 3 again (`{ digest }` alone), over a provider whose application layer is \
+             PAGED on the Relay Set instead of inline (spec §8.2, §11 item 2) — the \
+             manifest, the config and the base layer stay unpaged, since paging buys \
+             nothing under one store data item, and there is no inline record for the \
+             layer here at all. The provider fetches the layer's `registry.blob_record.paged` \
+             record, its two pages, checks each page's own digest and part count before \
+             trusting a part inside it, concatenates their parts in page order, and runs \
+             exactly what `spawn_image.digest_only` runs: the same image, the same bytes, \
+             the same success shape.",
+        ),
+        &route("basic.v1.spawn"),
+        "/listings/basic/v1/spawn",
+        envelope(&request),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    doc["image"] = content["image"].clone();
+    doc["spawn_content"] = content.clone();
+    golden("spawn_image.digest_only.paged.json", doc);
 }

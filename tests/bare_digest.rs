@@ -25,7 +25,10 @@ use serde_json::json;
 
 use common::harness::listing;
 use common::store::*;
-use common::BackendCall;
+use common::{sha256_hex, BackendCall};
+use toon_provider::nostr::image_events::{
+    blob_record_event, BlobPage, BlobPart, BlobRecordContent,
+};
 use toon_provider::nostr::wire::ImageRef;
 
 // ── the bare-digest form runs ───────────────────────────────────────────────
@@ -470,4 +473,227 @@ async fn an_upstream_reference_never_reaches_the_relay_set() {
         h.directory.blob_record_lookups()
     );
     assert!(h.directory.reads().is_empty());
+}
+
+// ── paged Blob Records (§8.2, §11 item 2) ───────────────────────────────────
+
+#[tokio::test]
+async fn a_paged_layer_resolves_to_the_same_bytes_as_inline_parts() {
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let layer = layer_bytes(7);
+    // Five parts at 1024 bytes, grouped two at a time into three pages.
+    let layer_digest = w.store_paged(&layer, LAYER, 1024, 2).await;
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest.clone(), layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    seed_blob_records(&w, &h.directory);
+
+    assert_eq!(
+        availability(&h, bare_image(&manifest_digest)).await,
+        json!({ "would_run": true })
+    );
+    let (status, body, _) = spawn(&h, 0xb1, ImageRef::by_digest(manifest_digest.clone())).await;
+
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    // Every page was fetched and digest-checked, and every part a page
+    // named was fetched after it — the same bytes an inline record would
+    // have taken, one level of indirection deeper. No record was fetched
+    // from the gateway at all: like an inline record found this way, the
+    // Relay Set handed it over as a signed event (§8.4 step 3).
+    let mut expected = BTreeSet::new();
+    expected.extend(w.page_paths(&layer_digest));
+    expected.extend(w.part_paths(&layer_digest));
+    expected.extend(w.part_paths(&config_digest));
+    expected.extend(w.part_paths(&manifest_digest));
+    assert_eq!(w.gateway_paths().await, expected);
+}
+
+#[tokio::test]
+async fn a_page_that_does_not_hash_to_its_record_is_refused_image() {
+    // A layer's bytes are not fetched for `availability` at all (only
+    // checked for a CANDIDATE, spec §6.4) — so a bad page is caught only
+    // once something actually asks to run it, exactly as a bad PART is
+    // (`tests/registry_image.rs` corrupts a part of the CONFIG instead, for
+    // the same reason: config is what `availability` really fetches).
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let layer = layer_bytes(5);
+    let layer_digest = digest_of(&layer);
+    w.store_paged_as(
+        &layer_digest,
+        &layer,
+        LAYER,
+        1024,
+        2,
+        Tamper::CorruptPage(0),
+    )
+    .await;
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest.clone(), layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    seed_blob_records(&w, &h.directory);
+
+    let (status, body, _) = spawn(&h, 0xb5, ImageRef::by_digest(manifest_digest)).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
+    assert_eq!(body["error"], "refused_image", "{}", body);
+    assert!(
+        body["message"].as_str().unwrap().contains("hashes to"),
+        "{}",
+        body
+    );
+    assert!(h.backend.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_page_that_cannot_be_fetched_falls_through_to_the_next_relay_record() {
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let layer = layer_bytes(7);
+    let layer_digest = digest_of(&layer);
+    // The first record's second page is a store that will not serve it; a
+    // second, honest, inline record for the same blob is on the Relay Set
+    // too.
+    let lying = w
+        .another_paged_record(
+            "lying",
+            &layer_digest,
+            &layer,
+            1024,
+            2,
+            Tamper::PageGatewayError(1),
+        )
+        .await;
+    let honest = w
+        .another_record("honest", &layer_digest, &layer, 1024, Tamper::None)
+        .await;
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest.clone(), layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory.seed_blob_record(w.record(&manifest_digest));
+    h.directory.seed_blob_record(w.record(&config_digest));
+    h.directory.seed_blob_record(lying);
+    h.directory.seed_blob_record(honest);
+
+    let (status, body, _) = spawn(&h, 0xb2, ImageRef::by_digest(manifest_digest)).await;
+
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    let paths = w.gateway_paths().await;
+    assert!(
+        paths.contains("/raw/lying-page0"),
+        "the first page of the failing record was tried: {:?}",
+        paths
+    );
+    assert!(
+        !paths.iter().any(|p| p.contains("lying-part")),
+        "no part was ever fetched on the failing record's account: {:?}",
+        paths
+    );
+    assert!(
+        paths.is_superset(&w.part_paths_of("honest").into_iter().collect()),
+        "and the next record on the Relay Set served the blob: {:?}",
+        paths
+    );
+}
+
+#[tokio::test]
+async fn a_relay_record_with_both_parts_and_pages_fails_that_source_and_the_chain_continues() {
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let layer = layer_bytes(7);
+    let layer_digest = digest_of(&layer);
+    let honest = w
+        .another_record("honest", &layer_digest, &layer, 1024, Tamper::None)
+        .await;
+    // A second record for the same blob carrying BOTH `parts` and `pages`
+    // (spec §8.2, §11 item 2's one-of rule): unreadable, so it never
+    // becomes a candidate at all and its own txids are never fetched.
+    let both_forms = BlobRecordContent {
+        digest: layer_digest.clone(),
+        size: layer.len() as u64,
+        part_size: 1024,
+        parts: Some(vec![BlobPart {
+            txid: "both-forms-unused-part".to_string(),
+            sha256: sha256_hex(&layer),
+            size: layer.len() as u64,
+        }]),
+        pages: Some(vec![BlobPage {
+            txid: "both-forms-unused-page".to_string(),
+            sha256: sha256_hex(&layer),
+            parts: 1,
+        }]),
+    };
+    let both_forms_event = blob_record_event(&both_forms, &w.publisher, NOW).unwrap();
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest.clone(), layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory.seed_blob_record(w.record(&manifest_digest));
+    h.directory.seed_blob_record(w.record(&config_digest));
+    h.directory.seed_blob_record(both_forms_event);
+    h.directory.seed_blob_record(honest);
+
+    let (status, body, _) = spawn(&h, 0xb3, ImageRef::by_digest(manifest_digest)).await;
+
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert!(
+        w.gateway_paths()
+            .await
+            .iter()
+            .all(|p| !p.contains("both-forms")),
+        "the invalid record's own txids were never fetched: {:?}",
+        w.gateway_paths().await
+    );
+}
+
+#[tokio::test]
+async fn a_relay_record_with_neither_parts_nor_pages_fails_that_source_and_the_chain_continues() {
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let layer = layer_bytes(7);
+    let layer_digest = digest_of(&layer);
+    let honest = w
+        .another_record("honest", &layer_digest, &layer, 1024, Tamper::None)
+        .await;
+    // A second record for the same blob carrying NEITHER `parts` nor
+    // `pages`: just as unreadable as carrying both.
+    let neither = BlobRecordContent {
+        digest: layer_digest.clone(),
+        size: layer.len() as u64,
+        part_size: 1024,
+        parts: None,
+        pages: None,
+    };
+    let neither_event = blob_record_event(&neither, &w.publisher, NOW).unwrap();
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest.clone(), layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory.seed_blob_record(w.record(&manifest_digest));
+    h.directory.seed_blob_record(w.record(&config_digest));
+    h.directory.seed_blob_record(neither_event);
+    h.directory.seed_blob_record(honest);
+
+    let (status, body, _) = spawn(&h, 0xb4, ImageRef::by_digest(manifest_digest)).await;
+
+    assert_eq!(status, StatusCode::OK, "{}", body);
 }

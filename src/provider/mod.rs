@@ -59,10 +59,12 @@ pub use persistence::persisted_leases;
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
 pub use self_stop::{reached_a_majority, SELF_STOP_CADENCES};
-pub use settle::{pick_winner, Claim, TakeoverSettlement};
+pub use settle::{pick_winner, Claim, TakeoverSettlement, SETTLE_CADENCES};
 pub use spawn::{spawn, standby_spawn, VOLUME_MOUNT_PATH};
 pub use standby::StandbySet;
-pub use watchdog::{silent_on_a_majority, TakeoverAnnouncement, WATCHDOG_INTERVAL_SECS};
+pub use watchdog::{
+    silent_on_a_majority, TakeoverAnnouncement, TRIGGER_CADENCES, WATCHDOG_INTERVAL_SECS,
+};
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -60,5 +60,14 @@
     "continuation_at_provider": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
     "root_secret": "1111111111111111111111111111111111111111111111111111111111111111"
   },
+  "timing": {
+    "liveness_cadence_s": 60,
+    "liveness_expiry_cadences": 5,
+    "request_window_s": 300,
+    "self_stop_cadences": 5,
+    "settle_window_cadences": 2,
+    "sweep_interval_s": 30,
+    "takeover_trigger_cadences": 1
+  },
   "warning": "TEST-ONLY KEYS, published on purpose. Never fund, trust or reuse them."
 }

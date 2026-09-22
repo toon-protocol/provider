@@ -1,0 +1,86 @@
+{
+  "fixture": {
+    "case": "digest_only.paged",
+    "description": "Form 3 again (`{ digest }` alone), over a provider whose application layer is PAGED on the Relay Set instead of inline (spec §8.2, §11 item 2) — the manifest, the config and the base layer stay unpaged, since paging buys nothing under one store data item, and there is no inline record for the layer here at all. The provider fetches the layer's `registry.blob_record.paged` record, its two pages, checks each page's own digest and part count before trusting a part inside it, concatenates their parts in page order, and runs exactly what `spawn_image.digest_only` runs: the same image, the same bytes, the same success shape.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "spawn_image"
+  },
+  "http_path": "/listings/basic/v1/spawn",
+  "image": {
+    "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126"
+  },
+  "request_body": {
+    "request": {
+      "content": {
+        "args": [
+          "-c",
+          "sleep 300"
+        ],
+        "entrypoint": [
+          "/bin/sh"
+        ],
+        "env": {
+          "GREETING": "hello"
+        },
+        "image": {
+          "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126"
+        },
+        "ports": [
+          {
+            "container_port": 443,
+            "protocol": "tcp"
+          }
+        ],
+        "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
+        "volume_gb": 2,
+        "workload_id": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "spawn",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "57bd103b820566a6802d9f1ee3dfa67c590dfee8053f6b33b0009393abfa5386"
+    }
+  },
+  "response_body": {
+    "access": {
+      "host": "203.0.113.7",
+      "ports": [
+        {
+          "container_port": 443,
+          "host_port": 41000
+        }
+      ],
+      "ssh_port": 40000
+    },
+    "expires_at": 1700003600,
+    "role": "standalone",
+    "workload_id": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+  },
+  "response_status": 200,
+  "route": "g.fixture.basic.v1.spawn",
+  "spawn_content": {
+    "args": [
+      "-c",
+      "sleep 300"
+    ],
+    "entrypoint": [
+      "/bin/sh"
+    ],
+    "env": {
+      "GREETING": "hello"
+    },
+    "image": {
+      "digest": "sha256:c0a665205c6d8d1f4ee8e2e217efd7a467527df34100ca78f11cca5c17486126"
+    },
+    "ports": [
+      {
+        "container_port": 443,
+        "protocol": "tcp"
+      }
+    ],
+    "ssh_public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxvbmdlbm91Z2hmb3JhdGVzdGtleQ tenant@fixture",
+    "volume_gb": 2,
+    "workload_id": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+  }
+}

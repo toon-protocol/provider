@@ -42,6 +42,14 @@ use crate::nostr::directory_events::{takeover_event, ProfileContent};
 /// else.
 pub const WATCHDOG_INTERVAL_SECS: u64 = 10;
 
+/// The Takeover trigger, in cadences of the primary this round watches (spec
+/// §7.1 step 1, normative table in §7.2): how long the primary's Liveness
+/// must be silent on a strict majority of its Relay Set, continuously,
+/// before a standby announces. One, so that the trigger fires as soon as a
+/// single cadence has passed with no majority reached — the shortest wait
+/// that still tells a flaky relay apart from a silent primary.
+pub const TRIGGER_CADENCES: u64 = 1;
+
 /// The Takeover a Warm Standby announced, kept with its lease (spec §7.1
 /// step 2).
 ///
@@ -249,7 +257,7 @@ impl ProviderService {
                 now
             })
         };
-        if now.saturating_sub(since) < cadence_s {
+        if now.saturating_sub(since) < TRIGGER_CADENCES.saturating_mul(cadence_s) {
             return;
         }
 

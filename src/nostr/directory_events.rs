@@ -118,6 +118,42 @@ fn label_value_tag(name: &str, value: &str) -> Result<Tag> {
 /// absence, so a false value would be a second way to say nothing.
 pub const HIDDEN_LABEL: &str = "hidden:true";
 
+/// The vendor segment of a `gpu:<vendor>-<model>` label (spec §4.4, §11 item
+/// 1). The list grows by amendment; a provider that sells a card from a
+/// vendor not yet here has no valid label for it until this list is amended.
+pub const GPU_VENDORS: [&str; 4] = ["nvidia", "amd", "intel", "apple"];
+
+/// Why `resources.gpu`'s value cannot become a `gpu:<vendor>-<model>` label,
+/// or `None` if it can (spec §4.2, §4.4, §11 item 1, closed).
+///
+/// The whole value must match `[a-z0-9]+(-[a-z0-9]+)*` — every
+/// hyphen-separated segment lowercase alphanumeric and non-empty — and its
+/// first segment, the vendor, must be one of `GPU_VENDORS`. A vendor with no
+/// model segment (`"nvidia"` alone) is refused too: the grammar is
+/// `<vendor>-<model>`, and `<model>` is not optional.
+pub fn gpu_grammar_refusal(value: &str) -> Option<String> {
+    let segments: Vec<&str> = value.split('-').collect();
+    let well_formed = segments.len() >= 2
+        && segments
+            .iter()
+            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+    if !well_formed {
+        return Some(format!(
+            "{:?} does not match gpu:<vendor>-<model> — the whole value must be lowercase \
+             [a-z0-9]+(-[a-z0-9]+)* with at least a vendor and a model segment (spec §4.4)",
+            value
+        ));
+    }
+    let vendor = segments[0];
+    if !GPU_VENDORS.contains(&vendor) {
+        return Some(format!(
+            "{:?}: vendor {:?} is not one of {:?} — the vendor list grows by amendment (spec §4.4)",
+            value, vendor, GPU_VENDORS
+        ));
+    }
+    None
+}
+
 /// The Provider Profile. Replaceable: one per provider, and republishing it
 /// is how a provider changes its connector, its Relay Set or its cadence.
 pub fn profile_event(config: &ProviderConfig, keys: &Keys, now: u64) -> Result<Event> {

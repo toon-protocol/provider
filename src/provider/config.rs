@@ -16,7 +16,7 @@ use super::persistence::LeaseRecord;
 use crate::capabilities;
 use crate::compute::EgressPolicy;
 use crate::hidden_service::is_anyone_host;
-use crate::nostr::directory_events::Settlement;
+use crate::nostr::directory_events::{gpu_grammar_refusal, Settlement};
 use crate::nostr::wire::{ErrorCode, ErrorResponse, Resources};
 
 /// Which `ComputeBackend` the provider runs workloads on.
@@ -713,6 +713,15 @@ impl ProviderConfig {
                     listing.name
                 );
             }
+            // A `gpu` that breaks the grammar would publish a label a tenant
+            // must ignore (spec §4.4) while resources.gpu still advertised
+            // the card, so the listing is refused here rather than sold
+            // unfindable (spec §11 item 1, closed).
+            if let Some(gpu) = &listing.resources.gpu {
+                if let Some(why) = gpu_grammar_refusal(gpu) {
+                    bail!("listing {:?}: gpu {:?}: {}", listing.name, gpu, why);
+                }
+            }
             let same = self
                 .listings
                 .iter()
@@ -1320,6 +1329,80 @@ storage_gb = 1
             ..ProviderConfig::default()
         };
         assert!(experiment.validate().is_ok());
+    }
+
+    #[test]
+    fn a_gpu_that_breaks_the_grammar_is_refused_at_load() {
+        // Spec §4.4, §11 item 1: a `gpu` that does not match
+        // `gpu:<vendor>-<model>` would publish a label a tenant must ignore
+        // while `resources.gpu` still claimed the card — refused at load,
+        // naming the listing and the value, rather than sold unfindable.
+        let no_hyphen = ProviderConfig {
+            listings: vec![Listing {
+                resources: Resources {
+                    gpu: Some("nvidia".to_string()),
+                    ..listing("gpu", 1).resources
+                },
+                ..listing("gpu", 1)
+            }],
+            ..ProviderConfig::default()
+        };
+        let err = no_hyphen.validate().expect_err("no model segment");
+        assert!(err.to_string().contains("gpu"), "{}", err);
+        assert!(err.to_string().contains("nvidia"), "{}", err);
+
+        let uppercase = ProviderConfig {
+            listings: vec![Listing {
+                resources: Resources {
+                    gpu: Some("NVIDIA-RTX-4090".to_string()),
+                    ..listing("gpu", 1).resources
+                },
+                ..listing("gpu", 1)
+            }],
+            ..ProviderConfig::default()
+        };
+        assert!(uppercase.validate().is_err(), "uppercase breaks the grammar");
+
+        let unknown_vendor = ProviderConfig {
+            listings: vec![Listing {
+                resources: Resources {
+                    gpu: Some("acme-rtx-4090".to_string()),
+                    ..listing("gpu", 1).resources
+                },
+                ..listing("gpu", 1)
+            }],
+            ..ProviderConfig::default()
+        };
+        let err = unknown_vendor.validate().expect_err("acme is not a vendor");
+        assert!(err.to_string().contains("acme-rtx-4090"), "{}", err);
+
+        let well_formed = ProviderConfig {
+            listings: vec![Listing {
+                resources: Resources {
+                    gpu: Some("nvidia-rtx-4090".to_string()),
+                    ..listing("gpu", 1).resources
+                },
+                ..listing("gpu", 1)
+            }],
+            ..ProviderConfig::default()
+        };
+        well_formed
+            .validate()
+            .expect("nvidia-rtx-4090 matches the grammar and names a known vendor");
+
+        let variant = ProviderConfig {
+            listings: vec![Listing {
+                resources: Resources {
+                    gpu: Some("nvidia-a100-80gb".to_string()),
+                    ..listing("gpu", 1).resources
+                },
+                ..listing("gpu", 1)
+            }],
+            ..ProviderConfig::default()
+        };
+        variant
+            .validate()
+            .expect("a memory-size variant is still a hyphenated model segment");
     }
 
     #[test]
