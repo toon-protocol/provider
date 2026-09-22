@@ -82,30 +82,89 @@ without the value that reads its lease (spec §12.1).
 **A withdrawal is not a revocation, and must not be read as one.** The
 withdrawn gateway keeps the grant it was handed, and that grant reads the
 lease's `status` until its `expires_at` whether or not a withdrawal was ever
-sent. A withdrawal asks a gateway to stop *serving* a workload; nothing in
-this protocol takes a derived value back. **There is no revocation before
-expiry** (spec §6.5.1), exactly as there is none for a Continuation Token.
+sent. A withdrawal asks a gateway to stop *serving* a workload; it takes no
+derived value back.
 
-So a tenant that needs a gateway unable to read sooner has two things and no
-third: derive grants for the **shortest `expires_at` it can live with**, and
-respawn under a new workload id when that is not short enough.
+**Rotating the lease's token is the revocation** (spec §6.5.1, §6.8,
+ADR 0018). `rotate` replaces the Continuation Token every member holds, and
+a provider recomputes a grant from the one token it stores — so every grant
+derived from the old token is `bad_grant` at once, at every member, and the
+gateway that held one stops *reading* too. A tenant that wants to keep its
+gateway runs `handover` again afterwards: the lease file now holds the new
+root secret, the grants derive from the new tokens, and the gateway's
+ordinary admission round replaces what it held.
 
-## Rotation is re-derivation at a later moment
+## A grant rotates by re-derivation; a token rotates by `rotate`
 
-There is no `rotate` and no `renew` command because there is nothing else to
-do. The same root secret, Standby Set and `expires_at` produce the same grant
-byte for byte on any machine, so:
+A grant has no rotation of its own. The same root secret, Standby Set and
+`expires_at` produce the same grant byte for byte on any machine, so:
 
 - run `handover` again with a **later `--expires-at`** and the gateway holds a
   grant that outlives the one it had — the old one keeps working until its own
   moment passes, which is what makes handing out a later grant an ordinary
   second derivation rather than a migration;
 - run `handover` against a **different gateway** and that gateway can read the
-  lease too; withdraw from the first one to stop it serving (above).
+  lease too; withdraw from the first one to stop it serving (above), and
+  `rotate` to stop it reading.
 
-Nothing moves, nothing is published and the provider is not told. A tenant
-holds **one secret per lease** rather than a list of grants, and a lost grant
-is re-derived rather than looked up.
+## Rotating the token
+
+```
+node seal.mjs rotate --lease <lease.json> \
+    --member <pubkey>,<ilp address>,<seal key> [--member …]
+```
+
+One command rotates the **whole Standby Set** (spec §6.8):
+
+1. It mints a **fresh root secret** — never re-used, never derived from the
+   old one — so if the old root secret is what leaked, it derives nothing that
+   works afterwards.
+2. It writes the new root secret into the lease file, as
+   `rotation.root_secret`, **before any request leaves**. A crash straight
+   after a member accepted cannot lose the only secret that now reads it there.
+3. It sends **one rotate request per member**, each naming only that member,
+   presenting the token the old root derives for it and naming as `next` the
+   token the new root derives for it. Every member ends with a different
+   token, exactly as at spawn.
+4. As each member confirms it is recorded (`rotation.confirmed`). Once
+   **every** member has, `root_secret` becomes the new one and the old one is
+   dropped. Until then the file keeps **both**, because a member that has not
+   rotated is still read with the old root.
+
+**A lost answer is recovered by reading, not by retrying.** The same rotate
+again is `stale_request`, and a new one with the old token after the first
+took effect is `not_tenant`. So when no answer comes back — or the answer is
+`not_tenant`, which is what an earlier run's lost answer looks like — the
+tool asks `status` presenting the **new** token: accepted means the rotation
+took effect (`"recovered": true` in the report), and `not_tenant` means it did
+not and the old token still holds.
+
+**A partly rotated set is a valid state.** A member that cannot be reached
+does not block the others. The tool exits `1`, the file records which members
+confirmed, and running the same command again **resumes** the rotation with
+the same new root secret, leaving the confirmed members alone. It refuses to
+resume naming other members than it started with, because a member left out
+would be read with a root secret the file no longer holds.
+
+The lease file is any JSON object holding `workload_id` and `root_secret` —
+the sandbox's `scripts/spawn.mjs` writes one — and every other key in it is
+kept as it was. It is replaced atomically, mode `0600`. The root secret is
+read from it and **only** from it: `--root-secret` and `TOON_ROOT_SECRET` are
+refused on `rotate`, because a rotation writes a root secret back and one
+from the command line would have nowhere to go.
+
+Each `--member` is a member's public key, the `ilp_address` its Provider
+Profile names (the tool sends to `<ilp address>.rotate`, and `.status` to
+recover) and its connector's **pinned** `connector_seal_key` (ADR 0011), as
+hex, with or without `0x`. There is no `--dry-run`: a new root secret is
+nothing until the members hold it. The report names each member and whether
+it rotated, and carries no secret:
+
+```json
+{ "workload_id": "…", "rotated": true,
+  "members": [ { "provider": "…", "rotated": true },
+               { "provider": "…", "rotated": true, "recovered": true } ] }
+```
 
 ## Usage
 
@@ -121,7 +180,13 @@ node seal.mjs withdrawal --workload <64 hex> \
     --standby <pubkey> [--standby <pubkey>…] --expires-at <unix seconds> \
     --gateway-route <ilp address> --gateway-seal-key <hex> \
     [--root-secret <64 hex>] [--dry-run]
+
+node seal.mjs rotate --lease <lease.json> \
+    --member <pubkey>,<ilp address>,<seal key> [--member …]
 ```
+
+`rotate`'s two flags are its own and are described [above](#rotating-the-token);
+the table below is `handover`'s and `withdrawal`'s.
 
 | Flag | Meaning |
 |---|---|
@@ -147,8 +212,9 @@ Stdout is one JSON report; progress goes to stderr:
 }
 ```
 
-Exit `0` when the gateway took the message (and on a `--dry-run`), `1` when it
-did not, and `2` for a refusal before anything was derived or paid for. A
+Exit `0` when the gateway took the message (and on a `--dry-run`) or every
+member rotated, `1` when it did not, and `2` for a refusal before anything was
+derived or paid for. A
 gateway that refused is reported in `failed` beside the message, never raised:
 a tenant must be able to see what it derived and send it again.
 
@@ -227,6 +293,12 @@ Against a running sandbox stack (`make up` in `infra/sandbox`), drop
   `gateway_sub.vector.json` for the vectors, and `status.delegated.json` —
   a request the provider's HTTP surface answered `200` — for the grant. A
   sender that must never be reached proves each refusal fired before sealing.
+- **`rotate.test.mjs`** — rotation against in-memory members that apply
+  spec §6.8 to the one token each stores: the fresh root secret, one request
+  per member naming only itself, the lease file keeping both roots until
+  every member confirmed, a lost answer recovered through `status`, and a
+  partly rotated set resumed. The request's bytes are checked against the
+  provider's `lease_request.rotate.json`.
 - **`seal.test.mjs`** — the command as a process: the flags, the environment,
   the report, and the exit codes. Each run gets a **bare** environment — no
   mnemonic, no connector, no chain — so a `--dry-run` that works there is one
@@ -239,8 +311,12 @@ Against a running sandbox stack (`make up` in `infra/sandbox`), drop
 provider: the grant the run derived is presented as a delegated `status` and
 answered `200`, byte for byte what the lease's own tenant is answered. The
 two-member case there proves each member takes its own grant and refuses the
-other's as `bad_grant`, and a third run proves that re-deriving is rotation.
-Nothing in that file is a mock of anything.
+other's as `bad_grant`, and a third run proves that re-deriving is how a
+grant rotates. `../../tests/rotate_tool.rs` runs this tool's `rotateLease`
+against two providers served on real TCP ports: every member of a two-member
+set rotated and the lease file updated, a partly rotated set answering each
+member with its own current token, and a lost answer recovered through
+`status`. Nothing in either file is a mock of anything.
 
 The one seam a message crosses is the sender it is handed
 (`send(route, body) → null | why`, the directory publisher's own shape); the

@@ -8,7 +8,9 @@
 
 import { strict as assert } from 'node:assert';
 import { execFile } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it } from 'node:test';
 import { promisify } from 'node:util';
 
@@ -134,8 +136,8 @@ describe('a refusal before anything is derived or sent', () => {
 
   it('refuses a subcommand it does not know, and asks for one when there is none', async () => {
     const env = { TOON_ROOT_SECRET: ROOT_SECRET };
-    assert.match((await seal(['publish', ...FLAGS], env)).stderr, /handover or withdrawal/);
-    assert.match((await seal([...FLAGS], env)).stderr, /handover or withdrawal/);
+    assert.match((await seal(['publish', ...FLAGS], env)).stderr, /handover, withdrawal or rotate/);
+    assert.match((await seal([...FLAGS], env)).stderr, /handover, withdrawal or rotate/);
   });
 
   it('refuses to send without a mnemonic, because a packet to a gateway is paid for', async () => {
@@ -145,6 +147,61 @@ describe('a refusal before anything is derived or sent', () => {
     );
     assert.equal(code, 2);
     assert.match(stderr, /TOON_MNEMONIC is required/);
+  });
+});
+
+describe('rotate', () => {
+  /** A lease file as the sandbox's spawn.mjs writes one. */
+  const leaseFile = () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'seal-rotate-')), 'spawn.json');
+    writeFileSync(path, JSON.stringify({ workload_id: WORKLOAD, root_secret: ROOT_SECRET }), { mode: 0o600 });
+    return path;
+  };
+  const MEMBER = `${PROVIDER},g.toon.provider,0x${SEAL_KEY}`;
+
+  it('refuses before anything is minted or sent when no mnemonic can pay, and leaves the lease file as it was', async () => {
+    const path = leaseFile();
+    const before = readFileSync(path, 'utf8');
+    const { code, stdout, stderr } = await seal(['rotate', '--lease', path, '--member', MEMBER]);
+    assert.equal(code, 2);
+    assert.equal(stdout, '');
+    assert.match(stderr, /TOON_MNEMONIC is required/);
+    assert.equal(readFileSync(path, 'utf8'), before, 'no new root secret was minted for a rotation that never started');
+  });
+
+  it('reads the root secret from the lease file and from nowhere else', async () => {
+    const path = leaseFile();
+    const refused = await seal(['rotate', '--lease', path, '--member', MEMBER, '--root-secret', ROOT_SECRET]);
+    assert.equal(refused.code, 2);
+    assert.match(refused.stderr, /--root-secret is not rotate's/);
+    assert.equal(refused.stderr.includes(ROOT_SECRET), false);
+  });
+
+  it('refuses a handover\'s flags, a dry run, a missing lease and a member it cannot reach', async () => {
+    const path = leaseFile();
+    const cases = [
+      [['rotate', '--lease', path, '--member', MEMBER, '--gateway-route', ROUTE], /--gateway-route is not rotate's/],
+      [['rotate', '--lease', path, '--member', MEMBER, '--dry-run'], /no dry run/],
+      [['rotate', '--member', MEMBER], /--lease <lease.json> is required/],
+      [['rotate', '--lease', path], /at least one member/],
+      [['rotate', '--lease', path, '--member', PROVIDER], /<pubkey>,<ilp address>,<seal key>/],
+      [['rotate', '--lease', path, '--member', `${PROVIDER},g.toon.provider,beef`], /sealing key/],
+      [['rotate', '--lease', `${path}.missing`, '--member', MEMBER], /not a lease file/],
+    ];
+    for (const [args, why] of cases) {
+      const { code, stderr } = await seal(args, { TOON_MNEMONIC: 'test test test test test test test test test test test junk' });
+      assert.equal(code, 2, args.join(' '));
+      assert.match(stderr, why);
+    }
+  });
+
+  it('is the only subcommand that takes --lease and --member', async () => {
+    const { code, stderr } = await seal(
+      ['handover', ...FLAGS, '--http-port', '443', '--expires-in', '24h', '--dry-run', '--member', MEMBER],
+      { TOON_ROOT_SECRET: ROOT_SECRET },
+    );
+    assert.equal(code, 2);
+    assert.match(stderr, /--member is rotate's/);
   });
 });
 

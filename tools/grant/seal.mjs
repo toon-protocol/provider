@@ -14,11 +14,20 @@
 //       --standby <pubkey> [--standby <pubkey>…] --expires-at <unix seconds> \
 //       --gateway-route <ilp address> --gateway-seal-key <hex> [--dry-run]
 //
+//   node seal.mjs rotate --lease <lease.json> \
+//       --member <pubkey>,<ilp address>,<seal key> [--member …]
+//
 //   handover      choose this gateway: the workload id, the Standby Set, the
 //                 HTTP container port, the grant's moment, the grant itself
 //                 and an optional readable name
 //   withdrawal    stop this gateway serving the workload, bearing the grant
 //                 currently in force — the moment the handover named
+//   rotate        replace the lease's Continuation Token at EVERY member of
+//                 its Standby Set (spec §6.8): mint a fresh root secret, send
+//                 each member one rotate naming only itself, and record the
+//                 new root in the lease file. This is the one thing that also
+//                 ends a gateway's READING: every grant of the old root is
+//                 `bad_grant` from then on. Hand over again to keep a gateway
 //
 //   --root-secret the lease's root secret, 64 hex; or TOON_ROOT_SECRET. The
 //                 only secret this tool takes: there is no Nostr key here
@@ -41,22 +50,31 @@
 //                 pinned out of band exactly as a Provider Profile's is
 //                 (ADR 0011): nothing is fetched to learn it
 //   --dry-run     derive the message, print it, and stop. Nothing is paid
-//                 for, no channel is opened and nothing is installed
+//                 for, no channel is opened and nothing is installed. Not for
+//                 `rotate`, which is nothing until the members have it
+//   --lease       rotate: the lease file — a JSON object holding the
+//                 `workload_id` and the `root_secret` (the sandbox's
+//                 spawn.mjs writes one). Read for both, and written back:
+//                 the new root secret goes in BEFORE a request leaves, and
+//                 replaces the old one only once every member has confirmed.
+//                 A file that records an unfinished rotation is resumed
+//   --member      rotate: one member of the Standby Set, primary first, as
+//                 <pubkey>,<ilp address>,<seal key> — its Profile's
+//                 `ilp_address` and pinned `connector_seal_key` (ADR 0011)
 //
 // Prints one JSON report on stdout and progress on stderr. Exit 0 when the
-// gateway took the message (or on a dry run), 1 when it did not, and 2 for a
-// refusal before anything was derived or paid for.
+// gateway took the message (or on a dry run) or every member rotated, 1 when
+// it did not, and 2 for a refusal before anything was derived or paid for.
 //
-// ROTATION IS RE-DERIVATION AT A LATER MOMENT. The same root secret, Standby
-// Set and `expires_at` give the same grant on any machine, so there is no
-// state to keep and nothing to migrate: run `handover` again with a later
-// `--expires-at` and the gateway holds a grant that outlives the one it had.
+// A GRANT ROTATES BY RE-DERIVATION AT A LATER MOMENT. The same root secret,
+// Standby Set and `expires_at` give the same grant on any machine, so run
+// `handover` again with a later `--expires-at` and the gateway holds a grant
+// that outlives the one it had.
 //
 // A WITHDRAWAL ENDS SERVING, NOT READING. The withdrawn gateway keeps the
-// grant it was handed and reads the lease's `status` until `expires_at`
-// whether or not a withdrawal was ever sent. There is no revocation before
-// expiry (spec §6.5.1), so derive grants for the shortest moment you can
-// live with and hand over again.
+// grant it was handed and reads the lease's `status` until `expires_at`. To
+// end the reading too, `rotate`: that revokes every grant derived from the
+// old token at once (spec §6.5.1, §6.8).
 //
 // The message is sealed to the gateway's pinned key by the connector
 // client's OWN sealing path — `sealTo`, the same path a tenant's request to a
@@ -81,6 +99,7 @@ import {
   withdraw,
   withdrawalFor,
 } from './handover.mjs';
+import { parseMember, readLease, membersProblem, rotateLease, sealedAsker } from './rotate.mjs';
 
 // The payer's configuration, name for name what tools/publisher reads, so a
 // tenant beside a sandbox provider sets one environment for both. There is no
@@ -184,6 +203,8 @@ async function main() {
         'gateway-route': { type: 'string' },
         'gateway-seal-key': { type: 'string' },
         'dry-run': { type: 'boolean' },
+        lease: { type: 'string' },
+        member: { type: 'string', multiple: true },
         help: { type: 'boolean', short: 'h' },
       },
     });
@@ -194,6 +215,10 @@ async function main() {
   if (values.help) usage();
   if (positionals.length > 1) {
     usage(`one thing is sealed at a time, not ${positionals.join(' and ')}`);
+  }
+  if (positionals[0] === 'rotate') return rotate(values);
+  for (const flag of ['lease', 'member']) {
+    if (values[flag] !== undefined) refuse(`--${flag} is rotate's: a ${positionals[0] ?? 'message'} takes --standby and a root secret`);
   }
 
   const now = Math.floor(Date.now() / 1000);
@@ -261,6 +286,50 @@ async function main() {
       : await handOver({ handover: subject, gateway, send, now: () => now, log });
     console.log(JSON.stringify(report, null, 2));
     return report.delivered ? 0 : 1;
+  } finally {
+    await client.close?.();
+  }
+}
+
+/**
+ * `rotate`: every member of the Standby Set, one request each, and the lease
+ * file kept true throughout (`rotate.mjs`, spec §6.8).
+ *
+ * The root secret is the lease file's and nothing else's. `--root-secret` and
+ * `TOON_ROOT_SECRET` are not read: a rotation WRITES a root secret, and one
+ * taken from the command line would have nowhere to be written back to.
+ */
+async function rotate(values) {
+  for (const flag of ['root-secret', 'workload', 'standby', 'http-port', 'ports', 'expires-at', 'expires-in', 'name', 'gateway-route', 'gateway-seal-key']) {
+    if (values[flag] !== undefined) {
+      refuse(`--${flag} is not rotate's: a rotation reads the workload and the root secret from --lease, and reaches each member through --member`);
+    }
+  }
+  if (values['dry-run']) {
+    refuse('a rotation has no dry run: the new root secret is nothing until the members hold it, and it is written to the lease file before anything is sent');
+  }
+  if (values.lease === undefined) refuse('--lease <lease.json> is required: the file holding the workload id and the root secret, which the new one is written back to');
+
+  let members;
+  try {
+    members = (values.member ?? []).map(parseMember);
+    readLease(values.lease);
+  } catch (e) {
+    refuse(e.message);
+  }
+  const problem = membersProblem(members);
+  if (problem !== null) refuse(`refused before sending: ${problem}`);
+  if (!MNEMONIC) {
+    refuse('TOON_MNEMONIC is required: a packet to a provider\'s connector is paid for, even on a free route, and this is what pays for it');
+  }
+
+  log(`rotate ${members.length === 1 ? 'the one member' : `all ${members.length} members of the Standby Set`}, one request each`);
+  const client = await openClient();
+  try {
+    const report = await rotateLease({ leaseFile: values.lease, members, ask: sealedAsker(client), log });
+    console.log(JSON.stringify(report, null, 2));
+    if (report.rotated) log('every grant derived from the old root secret is refused now: hand over again (`handover`) to keep a gateway');
+    return report.rotated ? 0 : 1;
   } finally {
     await client.close?.();
   }

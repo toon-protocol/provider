@@ -44,7 +44,8 @@ export const continuationFor = (rootSecret, provider) => expand(rootSecret, `${C
  */
 export const gatewaySub = (continuation, expiresAt) => expand(continuation, `${GATEWAY_DOMAIN}${expiresAt}`);
 
-const HEX64 = /^[0-9a-f]{64}$/;
+/** 32 bytes as 64 lowercase hex: a root secret, a token, a workload id, a key. */
+export const HEX64 = /^[0-9a-f]{64}$/;
 
 /**
  * Why `key` is not a provider's public key this tool will name, or `null`.
@@ -53,7 +54,7 @@ const HEX64 = /^[0-9a-f]{64}$/;
  * spelled exactly as the spec spells it (§6.1.1), so a key written any other
  * way would derive a token the provider does not hold.
  */
-function publicKeyProblem(what, key) {
+export function publicKeyProblem(what, key) {
   if (key === undefined || key === null || key === '') {
     return `${what} is required: the 64-hex Nostr public key it names`;
   }
@@ -214,9 +215,9 @@ export function handoverFor(handover, now) {
 // ── the gateway's connector ───────────────────────────────────────────────
 
 /** An ILP address: `g.toon.workload-gateway.handover`, and nothing with a space in it. */
-const ILP_ADDRESS = /^[a-zA-Z0-9._~-]+$/;
+export const ILP_ADDRESS = /^[a-zA-Z0-9._~-]+$/;
 /** A secp256k1 public key as hex: 65 bytes uncompressed (`04…`) or 33 compressed (`02…`/`03…`). */
-const SEAL_KEY = /^(04[0-9a-fA-F]{128}|0[23][0-9a-fA-F]{64})$/;
+export const SEAL_KEY = /^(04[0-9a-fA-F]{128}|0[23][0-9a-fA-F]{64})$/;
 
 /**
  * Why `gateway` is not a connector this tool will seal to, or `null`.
@@ -325,11 +326,11 @@ async function deliver(kind, body, gateway, send, log) {
  * Nothing is derived if `checkHandover` or `gatewayProblem` refuses, and
  * nothing is sent then either.
  *
- * ROTATION IS RE-DERIVATION AT A LATER MOMENT. Run this again with a later
- * `expiresAt` and the gateway holds a second grant that outlives the first;
- * the first keeps working until its own moment passes, because there is no
- * revocation before expiry (spec §6.5.1). Keep `expiresAt` short and hand
- * over again.
+ * A GRANT ROTATES BY RE-DERIVATION AT A LATER MOMENT. Run this again with a
+ * later `expiresAt` and the gateway holds a second grant that outlives the
+ * first; the first keeps working until its own moment passes, because
+ * re-deriving revokes nothing (spec §6.5.1). Only rotating the lease's token
+ * does (`rotate.mjs`, §6.8), which ends every grant of the old one at once.
  */
 export async function handOver({ handover, gateway, send, now = () => Math.floor(Date.now() / 1000), log = () => {} }) {
   const problem = gatewayProblem(gateway);
@@ -370,8 +371,8 @@ export function checkWithdrawal({ rootSecret, workloadId, standbySet, expiresAt 
  * A WITHDRAWAL ENDS SERVING, NOT READING. Bearing the grant is what makes it
  * safe without a signature — only the holder of the lease's token can derive
  * it — but the withdrawn gateway KEEPS that grant, and it reads the lease's
- * `status` until `expires_at` whether or not this was ever sent. There is no
- * revocation before expiry (spec §6.5.1); this is not one.
+ * `status` until `expires_at` whether or not this was ever sent. This is not
+ * a revocation; rotating the lease's token is (`rotate.mjs`, spec §6.8).
  */
 export function withdrawalFor(withdrawal) {
   const problem = checkWithdrawal(withdrawal);
@@ -452,7 +453,7 @@ export function parsePorts(text) {
  */
 export function optionsFrom(subcommand, values, env, now) {
   if (subcommand !== 'handover' && subcommand !== 'withdrawal') {
-    throw new Error(`the first argument is what to seal: handover or withdrawal, not ${JSON.stringify(subcommand)}`);
+    throw new Error(`the first argument is what to do: handover, withdrawal or rotate, not ${JSON.stringify(subcommand)}`);
   }
   const rootSecret = values['root-secret'] ?? env.TOON_ROOT_SECRET;
   if (rootSecret === undefined || rootSecret === '') {

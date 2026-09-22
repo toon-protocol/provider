@@ -471,7 +471,7 @@ describe('the command line', () => {
   });
 
   it('knows exactly two subcommands', () => {
-    assert.throws(() => optionsFrom('publish', FLAGS, { TOON_ROOT_SECRET: constants.tenant.root_secret }, NOW), /handover or withdrawal/);
+    assert.throws(() => optionsFrom('publish', FLAGS, { TOON_ROOT_SECRET: constants.tenant.root_secret }, NOW), /handover, withdrawal or rotate/);
   });
 });
 
