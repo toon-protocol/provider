@@ -905,6 +905,43 @@ fn a_blob_record_with_neither_parts_nor_pages_is_refused_as_a_one_of_violation()
     assert!(BlobRecord::from_event(&event).is_err());
 }
 
+// ── TOON_Network#104: a digest is checked for its shape where it is read ────
+
+#[test]
+fn an_image_registry_entrys_own_digest_must_be_sha256_shaped() {
+    let mut content: ImageEntryContent = serde_json::from_str(IMAGE_ENTRY_CONTENT).unwrap();
+    // Not `sha256:<64 lowercase hex>` — a path traversal, if this ever
+    // reached the blob cache's directory join (TOON_Network#104).
+    content.digest = "sha256:../../../../etc/passwd".to_string();
+    let event = image_entry_event("web", "1.0", &content, &publisher(), 1_700_000_000).unwrap();
+    assert!(
+        ImageEntry::from_event(&event).is_err(),
+        "a malformed digest fails this source, the same as any other unreadable entry"
+    );
+}
+
+#[test]
+fn an_image_registry_entrys_blob_digest_must_be_sha256_shaped() {
+    let mut content: ImageEntryContent = serde_json::from_str(IMAGE_ENTRY_CONTENT).unwrap();
+    content.blobs[0].digest = "sha256:../../../../etc/passwd".to_string();
+    let event = image_entry_event("web", "1.0", &content, &publisher(), 1_700_000_000).unwrap();
+    assert!(
+        ImageEntry::from_event(&event).is_err(),
+        "a malformed blob digest fails the entry, the same as any other unreadable one"
+    );
+}
+
+#[test]
+fn a_blob_records_digest_must_be_sha256_shaped() {
+    let mut content: BlobRecordContent = serde_json::from_str(BLOB_RECORD_CONTENT).unwrap();
+    content.digest = "sha256:../../../../etc/passwd".to_string();
+    let event = blob_record_event(&content, &publisher(), 1_700_000_000).unwrap();
+    assert!(
+        BlobRecord::from_event(&event).is_err(),
+        "a malformed digest fails this source, the same as any other unreadable record"
+    );
+}
+
 #[test]
 fn a_template_round_trips_byte_identically() {
     let content: TemplateContent = serde_json::from_str(TEMPLATE_CONTENT).unwrap();

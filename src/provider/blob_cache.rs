@@ -14,12 +14,22 @@
 // eviction: an operator who wants a bound sets `blob_cache_max_bytes`, and
 // a blob that would cross it is `NoSpace` — the same answer a full disk
 // gives, and what a spawn turns into `no_capacity`.
+//
+// `path_of` is where every lookup ultimately joins a digest onto this
+// directory, so it is the one place that MUST refuse a digest that is not
+// `sha256:<64 lowercase hex>` — a caller that skipped its own shape check
+// (TOON_Network#104) still cannot turn `..` in a digest into a path outside
+// `<dir>/sha256/`. A malformed digest is a miss: `get` and `contains` never
+// read, probe or delete a path built from one, and `put` refuses to write
+// one.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use tracing::warn;
+
+use crate::nostr::image_events::is_sha256_digest;
 
 use super::fetcher::{hex_sha256, verify_digest};
 
@@ -71,22 +81,34 @@ impl BlobCache {
         self.dir.join("tmp")
     }
 
-    /// Where `digest` lives if it is cached. The path is answered whether or
-    /// not the file exists; `contains` says which.
-    pub fn path_of(&self, digest: &str) -> PathBuf {
-        let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
-        self.dir.join("sha256").join(hex)
+    /// Where `digest` lives if it is cached, or `None` if `digest` is not
+    /// `sha256:<64 lowercase hex>` — the one shape this cache ever joins
+    /// onto its directory, so nothing else a digest might contain (`..`, a
+    /// `/`, anything shorter or longer than 64 hex characters) is ever
+    /// turned into a path. The path is answered whether or not the file
+    /// exists; `contains` says which.
+    pub fn path_of(&self, digest: &str) -> Option<PathBuf> {
+        if !is_sha256_digest(digest) {
+            return None;
+        }
+        let hex = digest
+            .strip_prefix("sha256:")
+            .expect("is_sha256_digest just checked the prefix");
+        Some(self.dir.join("sha256").join(hex))
     }
 
+    /// A malformed digest is never cached, so this is `false` for one
+    /// without probing the filesystem at all.
     pub fn contains(&self, digest: &str) -> bool {
-        self.path_of(digest).is_file()
+        self.path_of(digest).is_some_and(|path| path.is_file())
     }
 
-    /// The verified bytes of `digest`, or `None` if it is not cached. A
+    /// The verified bytes of `digest`, or `None` if it is not cached — which
+    /// includes a malformed digest, for which no path is ever read. A
     /// cached file that no longer hashes to its name is removed and reported
     /// as absent, so a fetch replaces it.
     pub async fn get(&self, digest: &str) -> Option<Bytes> {
-        let path = self.path_of(digest);
+        let path = self.path_of(digest)?;
         let bytes = match tokio::fs::read(&path).await {
             Ok(bytes) => Bytes::from(bytes),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -109,9 +131,18 @@ impl BlobCache {
 
     /// Keep `bytes` as `digest`. The caller has verified them — this is the
     /// one place that trust is taken on faith, so the fetcher is the only
-    /// caller. Idempotent: a blob already present is left as it is.
+    /// caller. Idempotent: a blob already present is left as it is. A
+    /// malformed digest is refused rather than written anywhere: the
+    /// fetcher only ever calls this once `verify_digest` has already
+    /// confirmed the bytes hash to `digest`, so this only fires if a future
+    /// caller skips that.
     pub async fn put(&self, digest: &str, bytes: &[u8]) -> Result<(), CacheError> {
-        let path = self.path_of(digest);
+        let path = self.path_of(digest).ok_or_else(|| {
+            CacheError::Io(anyhow::anyhow!(
+                "blob digest {:?} is not `sha256:<64 lowercase hex>`, refusing to cache it",
+                digest
+            ))
+        })?;
         if path.is_file() {
             return Ok(());
         }
@@ -205,10 +236,65 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cache = BlobCache::open(dir.path(), None).unwrap();
         let digest = digest_of(b"the real bytes");
-        std::fs::write(cache.path_of(&digest), b"rotted").unwrap();
+        std::fs::write(cache.path_of(&digest).unwrap(), b"rotted").unwrap();
 
         assert!(cache.get(&digest).await.is_none());
         assert!(!cache.contains(&digest), "the corrupt file is gone");
+    }
+
+    /// TOON_Network#104: a digest that is not `sha256:<64 lowercase hex>`
+    /// never becomes a path, at every one of the cache's own entry points —
+    /// so no future caller can reintroduce the traversal even if it skips
+    /// its own shape check.
+    #[tokio::test]
+    async fn a_malformed_digest_is_refused_at_every_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = BlobCache::open(dir.path(), None).unwrap();
+
+        // A file that a traversal digest would reach if `path_of` ever
+        // built a path from one: beside the cache directory itself.
+        let canary = dir.path().join("canary.txt");
+        std::fs::write(&canary, b"do not touch me").unwrap();
+
+        let malformed = [
+            "sha256:../../canary.txt",
+            "sha256:../canary.txt",
+            "../../canary.txt",
+            "canary.txt",
+            "",
+            "sha256:",
+            "sha256:00",                            // too short
+            &format!("sha256:{}0", "a".repeat(64)), // too long
+            &format!("SHA256:{}", "a".repeat(64)),  // wrong case prefix
+            &format!("sha256:{}", "A".repeat(64)),  // uppercase hex
+            &format!("sha256:{}", "g".repeat(64)),  // not hex
+            &format!("md5:{}", "a".repeat(32)),
+        ];
+        for digest in malformed {
+            assert!(
+                cache.path_of(digest).is_none(),
+                "{:?} must not become a path",
+                digest
+            );
+            assert!(
+                !cache.contains(digest),
+                "{:?} must be a miss, not a probe",
+                digest
+            );
+            assert!(
+                cache.get(digest).await.is_none(),
+                "{:?} must be a miss, not a read",
+                digest
+            );
+            let err = cache.put(digest, b"whatever").await.unwrap_err();
+            assert!(matches!(err, CacheError::Io(_)), "{}", err);
+        }
+
+        assert_eq!(
+            std::fs::read(&canary).unwrap(),
+            b"do not touch me",
+            "the file beside the cache directory was never read, probed or deleted"
+        );
     }
 
     #[tokio::test]
