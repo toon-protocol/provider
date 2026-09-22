@@ -406,3 +406,49 @@ async fn the_image_policy_applies_to_what_the_entry_resolved() {
     .await;
     assert_refused(&body, "max_image_bytes");
 }
+
+// ── TOON_Network#104: a manifest's own digests are checked too ──────────────
+
+#[tokio::test]
+async fn a_manifests_config_digest_naming_a_traversal_is_refused_through_the_entry_too() {
+    // The same attack as the bare-digest form's proof
+    // (`tests/bare_digest.rs`), but through an Image Registry entry: the
+    // entry itself is honest (it lists only the manifest's own, real
+    // digest), and the traversal lives inside the manifest bytes it
+    // points to — bytes a publisher fully controls. Before this ticket,
+    // this manifest's config digest would have been handed straight to
+    // `BlobCache::path_of`; now the manifest read itself refuses it.
+    //
+    // The cache lives at `<dir>/blobs`, one blob per file at
+    // `<dir>/blobs/sha256/<hex>` — so `../../canary.txt`, stripped of its
+    // `sha256:` prefix and joined there, walks back up through `sha256/`
+    // and `blobs/` to `<dir>/canary.txt` exactly: not a made-up path, the
+    // real one `BlobCache::path_of` used to build unchecked.
+    let mut w = World::new().await;
+    let traversal = "sha256:../../canary.txt";
+    let manifest = manifest_bytes((traversal, 4), &[]);
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory
+        .seed_image_entry(w.entry(&manifest_digest, MANIFEST));
+
+    // The file the traversal digest above resolves to: beside the cache
+    // directory itself, not inside it.
+    let canary = h
+        .config
+        .blob_cache_dir()
+        .parent()
+        .unwrap()
+        .join("canary.txt")
+        .to_path_buf();
+    std::fs::write(&canary, b"do not touch me").unwrap();
+
+    let body = availability(&h, registry_image(&w, &manifest_digest)).await;
+
+    assert_refused(&body, "sha256:<64 lowercase hex>");
+    assert_eq!(
+        std::fs::read(&canary).unwrap(),
+        b"do not touch me",
+        "the file beside the cache directory was never read, probed or deleted"
+    );
+}
