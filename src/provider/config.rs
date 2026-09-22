@@ -1361,7 +1361,10 @@ storage_gb = 1
             }],
             ..ProviderConfig::default()
         };
-        assert!(uppercase.validate().is_err(), "uppercase breaks the grammar");
+        assert!(
+            uppercase.validate().is_err(),
+            "uppercase breaks the grammar"
+        );
 
         let unknown_vendor = ProviderConfig {
             listings: vec![Listing {

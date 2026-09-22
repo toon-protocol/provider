@@ -134,9 +134,12 @@ pub const GPU_VENDORS: [&str; 4] = ["nvidia", "amd", "intel", "apple"];
 pub fn gpu_grammar_refusal(value: &str) -> Option<String> {
     let segments: Vec<&str> = value.split('-').collect();
     let well_formed = segments.len() >= 2
-        && segments
-            .iter()
-            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        && segments.iter().all(|seg| {
+            !seg.is_empty()
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        });
     if !well_formed {
         return Some(format!(
             "{:?} does not match gpu:<vendor>-<model> — the whole value must be lowercase \
