@@ -42,7 +42,7 @@ use toon_provider::nostr::continuation::{
     ContinuationToken, RootSecret, CONTINUATION_DOMAIN, GATEWAY_DOMAIN,
 };
 use toon_provider::nostr::directory_events::{
-    takeover_event, ProfileContent, Settlement, HIDDEN_LABEL,
+    takeover_event, ProfileContent, Settlement, HIDDEN_LABEL, LIVENESS_EXPIRY_CADENCES,
 };
 use toon_provider::nostr::image_events::{
     blob_record_event, image_entry_event, template_event, BlobPart, BlobRecordContent, BlobSource,
@@ -52,10 +52,14 @@ use toon_provider::nostr::kinds::{
     K_BLOB, K_EVICTION, K_IMAGE, K_LISTING, K_LIVENESS, K_PROFILE, K_TAKEOVER, K_TEMPLATE,
     TOON_LABEL,
 };
+use toon_provider::nostr::lease_request::MAX_REQUEST_WINDOW_SECS;
 use toon_provider::nostr::wire::{
     EvictionReason, ImageRef, PortRequest, Protocol, RegistryEntryRef, Resources, SpawnContent,
 };
-use toon_provider::provider::{evict, route_table, ImagePolicyConfig, SELF_STOP_CADENCES};
+use toon_provider::provider::{
+    evict, route_table, ImagePolicyConfig, SELF_STOP_CADENCES, SETTLE_CADENCES,
+    SWEEP_INTERVAL_SECS, TRIGGER_CADENCES,
+};
 use toon_provider::{router, Listing, LivenessState, ProviderConfig, ProviderService};
 
 // ── the fixed world every fixture is generated in ────────────────────────────
@@ -696,6 +700,20 @@ fn constants_and_test_keys() {
             },
             "standby_price": STANDBY_PRICE,
             "label": TOON_LABEL,
+            // Spec §7.2's normative timing table, read from this provider's
+            // OWN constants rather than typed again here as literals: a
+            // second implementation checks itself against the same values
+            // the reference provider runs on, and `check.mjs` fails the
+            // build if this block and the spec's table ever disagree.
+            "timing": {
+                "liveness_cadence_s": LIVENESS_CADENCE_S,
+                "liveness_expiry_cadences": LIVENESS_EXPIRY_CADENCES,
+                "takeover_trigger_cadences": TRIGGER_CADENCES,
+                "settle_window_cadences": SETTLE_CADENCES,
+                "self_stop_cadences": SELF_STOP_CADENCES,
+                "request_window_s": MAX_REQUEST_WINDOW_SECS,
+                "sweep_interval_s": SWEEP_INTERVAL_SECS,
+            },
             "signing": {
                 "id": "sha256 over the NIP-01 serialization [0, pubkey, created_at, kind, tags, content]",
                 "sig": "BIP-340 Schnorr over the id, by the event's pubkey",
