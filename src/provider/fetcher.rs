@@ -58,6 +58,24 @@ use crate::outbound_proxy::{http_client, OutboundProxy};
 /// transaction id of the part or record being read.
 pub const TXID_PLACEHOLDER: &str = "{txid}";
 
+/// The bound on a whole blob — a Blob Record's declared `size`, and the
+/// up-front allocation `assemble` reserves for it — when this provider's
+/// `max_image_bytes` is not configured (spec §8.4, TOON_Network#79).
+/// Generous enough for a real image layer; small enough that a hostile
+/// record's `size` alone cannot make a provider commit memory before a
+/// single byte of it is verified.
+const DEFAULT_MAX_BLOB_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// How large a Blob Record's own upload, or one of its pages, may be before
+/// a fetch gives up on it — the JSON a record or a page carries, never the
+/// blob's own bytes, so this bound has nothing to do with `max_image_bytes`
+/// and is not itself declared anywhere. It is the "fixed page ceiling,
+/// chosen by the implementation and not normative" spec §8.4 and §11 item 2
+/// call for: about a hundred times a real record or page's own size (a
+/// record at the ~700-part threshold that switches a publisher to `pages`,
+/// §8.2, is itself only ~100 KB), so an honest upload is never close to it.
+const GATEWAY_JSON_CEILING_BYTES: u64 = 16 * 1024 * 1024;
+
 /// One place a blob's bytes may come from. A fetch is handed these in the
 /// order §8.4 tries them.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -345,6 +363,12 @@ pub struct BlobFetcher {
     /// gateway and every `toon-store` source fails — refused, not a panic,
     /// so an operator sees why in the answer.
     gateway_url_pattern: Option<String>,
+    /// The provider's `image_policy.max_image_bytes`, reused here as the
+    /// bound on any ONE blob's declared `size` — `None` falls back to
+    /// `DEFAULT_MAX_BLOB_BYTES` (spec §8.4, TOON_Network#79). A single blob
+    /// can never exceed the whole image's cap anyway, so the same number
+    /// serves both without a second config key.
+    max_blob_bytes: Option<u64>,
     /// Verified bytes on disk, keyed by digest. Only bytes that hashed to
     /// their digest are ever put here, so a cache hit skips every source
     /// and every check.
@@ -355,6 +379,7 @@ impl BlobFetcher {
     pub fn new(
         gateway_url_pattern: Option<String>,
         registry_url_override: Option<String>,
+        max_blob_bytes: Option<u64>,
         cache: BlobCache,
     ) -> Self {
         let http = http_client(None, FETCH_TIMEOUT, "image fetches")
@@ -363,8 +388,15 @@ impl BlobFetcher {
             oci: OciClient::new(http.clone(), registry_url_override),
             http,
             gateway_url_pattern,
+            max_blob_bytes,
             cache,
         }
+    }
+
+    /// `max_blob_bytes`, or the fixed ceiling when this provider configures
+    /// none.
+    fn blob_byte_limit(&self) -> u64 {
+        self.max_blob_bytes.unwrap_or(DEFAULT_MAX_BLOB_BYTES)
     }
 
     /// The same fetcher, with every byte it pulls leaving through `proxy`:
@@ -520,7 +552,7 @@ impl BlobFetcher {
     /// event JSON the publisher uploaded beside publishing it to relays
     /// (ADR 0006).
     async fn blob_record(&self, txid: &str) -> Result<BlobRecordContent> {
-        let bytes = self.gateway_read(txid).await?;
+        let bytes = self.gateway_read(txid, GATEWAY_JSON_CEILING_BYTES).await?;
         let event: Event = serde_json::from_slice(&bytes)
             .with_context(|| format!("the upload {} is not a Nostr event", txid))?;
         event
@@ -537,6 +569,13 @@ impl BlobFetcher {
     /// straight from the record (`parts`) or through its `pages` (§8.2, §11
     /// item 2) — `resolve_parts` tells them apart, and everything after it
     /// is unchanged either way.
+    ///
+    /// Nothing here trusts `record.size` before it is verified
+    /// (TOON_Network#79): it is checked against the recorded parts' own
+    /// sizes, and against this provider's limit, BEFORE a single part is
+    /// fetched or a single byte is reserved for the blob — so a record that
+    /// lies about either fails cheaply, without the large allocation a
+    /// `size` near `u64::MAX` would otherwise cause.
     async fn assemble(&self, digest: &str, record: &BlobRecordContent) -> Result<Bytes> {
         if record.digest != digest {
             bail!(
@@ -545,10 +584,27 @@ impl BlobFetcher {
                 digest
             );
         }
+        let limit = self.blob_byte_limit();
+        if record.size > limit {
+            bail!(
+                "the Blob Record's size {} exceeds this provider's limit of {} bytes",
+                record.size,
+                limit
+            );
+        }
         let parts = self.resolve_parts(record).await?;
+        let declared_total: u64 = parts.iter().fold(0u64, |sum, p| sum.saturating_add(p.size));
+        if declared_total != record.size {
+            bail!(
+                "the Blob Record declares size {} but its {} part(s) total {}",
+                record.size,
+                parts.len(),
+                declared_total
+            );
+        }
         let mut blob = BytesMut::with_capacity(usize::try_from(record.size).unwrap_or(0));
         for (index, part) in parts.iter().enumerate() {
-            let bytes = self.gateway_read(&part.txid).await?;
+            let bytes = self.gateway_read(&part.txid, part.size).await?;
             if bytes.len() as u64 != part.size {
                 bail!(
                     "part {} ({}) is {} bytes, not the {} recorded",
@@ -594,9 +650,12 @@ impl BlobFetcher {
             (None, Some(pages)) => {
                 let mut all = Vec::new();
                 for (index, page) in pages.iter().enumerate() {
-                    let bytes = self.gateway_read(&page.txid).await.with_context(|| {
-                        format!("page {} ({}) could not be read", index, page.txid)
-                    })?;
+                    let bytes = self
+                        .gateway_read(&page.txid, GATEWAY_JSON_CEILING_BYTES)
+                        .await
+                        .with_context(|| {
+                            format!("page {} ({}) could not be read", index, page.txid)
+                        })?;
                     let got = hex_sha256(&bytes);
                     if !got.eq_ignore_ascii_case(&page.sha256) {
                         bail!(
@@ -631,10 +690,15 @@ impl BlobFetcher {
         }
     }
 
-    /// `GET` one upload from the gateway, by txid.
-    async fn gateway_read(&self, txid: &str) -> Result<Bytes> {
+    /// `GET` one upload from the gateway, by txid, streamed chunk by chunk
+    /// and cut off the instant it exceeds `limit` — never buffering more
+    /// than `limit` bytes of a body, however large a hostile or merely
+    /// broken gateway sends (spec §8.4, TOON_Network#79). A body that is
+    /// shorter than `limit` is unaffected: this only ever stops something
+    /// that was already too long.
+    async fn gateway_read(&self, txid: &str, limit: u64) -> Result<Bytes> {
         let url = self.gateway_url(txid)?;
-        let response = self
+        let mut response = self
             .http
             .get(&url)
             .send()
@@ -647,10 +711,22 @@ impl BlobFetcher {
                 url
             );
         }
-        response
-            .bytes()
+        let mut body = BytesMut::with_capacity(usize::try_from(limit).unwrap_or(0));
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .with_context(|| format!("could not read the body of {}", url))
+            .with_context(|| format!("could not read the body of {}", url))?
+        {
+            body.extend_from_slice(&chunk);
+            if body.len() as u64 > limit {
+                bail!(
+                    "the body of {} is longer than the {} bytes allowed for it",
+                    url,
+                    limit
+                );
+            }
+        }
+        Ok(body.freeze())
     }
 
     fn gateway_url(&self, txid: &str) -> Result<String> {
@@ -709,13 +785,17 @@ mod tests {
 
     #[test]
     fn the_gateway_pattern_is_filled_with_the_txid() {
-        let fetcher =
-            BlobFetcher::new(Some("http://gw:3000/raw/{txid}".to_string()), None, cache());
+        let fetcher = BlobFetcher::new(
+            Some("http://gw:3000/raw/{txid}".to_string()),
+            None,
+            None,
+            cache(),
+        );
         assert_eq!(
             fetcher.gateway_url("abc").unwrap(),
             "http://gw:3000/raw/abc"
         );
-        let none = BlobFetcher::new(None, None, cache());
+        let none = BlobFetcher::new(None, None, None, cache());
         assert!(none
             .gateway_url("abc")
             .unwrap_err()

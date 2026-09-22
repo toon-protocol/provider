@@ -148,7 +148,12 @@ async fn resolves_to(plan: &Plan, original: &[u8]) {
     directory.seed_blob_record(event);
 
     let cache = BlobCache::open(tempfile::tempdir().unwrap().keep(), None).unwrap();
-    let fetcher = BlobFetcher::new(Some(format!("{}/raw/{{txid}}", gateway.uri())), None, cache);
+    let fetcher = BlobFetcher::new(
+        Some(format!("{}/raw/{{txid}}", gateway.uri())),
+        None,
+        None,
+        cache,
+    );
     let sources = BlobSources::relay_set(directory);
 
     let bytes = fetcher
@@ -216,7 +221,12 @@ async fn a_page_the_tool_planned_but_never_uploaded_is_refused_image_not_a_crash
     directory.seed_blob_record(event);
 
     let cache = BlobCache::open(tempfile::tempdir().unwrap().keep(), None).unwrap();
-    let fetcher = BlobFetcher::new(Some(format!("{}/raw/{{txid}}", gateway.uri())), None, cache);
+    let fetcher = BlobFetcher::new(
+        Some(format!("{}/raw/{{txid}}", gateway.uri())),
+        None,
+        None,
+        cache,
+    );
     let sources = BlobSources::relay_set(directory);
 
     let err = fetcher

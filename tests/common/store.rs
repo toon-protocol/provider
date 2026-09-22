@@ -58,6 +58,21 @@ pub enum Tamper {
     /// A PAGED record only: the gateway answers 5xx for page `n`. Its parts
     /// are never reached, because the page itself could not be read.
     PageGatewayError(usize),
+    /// The gateway serves a body for part `n` far longer than the size the
+    /// (honest) record records for it — a store, or something in front of
+    /// one, sending more than it should (TOON_Network#79). A fetch MUST cut
+    /// this off at the recorded size rather than buffer all of it.
+    OversizePart(usize),
+    /// A PAGED record only: the gateway serves a body for page `n` longer
+    /// than the fixed ceiling a fetch allows a page (TOON_Network#79) — the
+    /// mirror of `OversizePart`, one level up, and page-only because only a
+    /// page has no size of its own to bound a read by.
+    OversizePage(usize),
+    /// The record's own `size` disagrees wildly with what its (honest)
+    /// parts or pages total — far beyond any real image and beyond any
+    /// provider's configured limit (TOON_Network#79). A fetch MUST refuse
+    /// this before reserving memory for it, let alone fetching a part.
+    AbsurdSize,
 }
 
 pub struct World {
@@ -161,7 +176,7 @@ impl World {
         self.parts.insert(label.to_string(), parts.len());
         let record = BlobRecordContent {
             digest: claimed.to_string(),
-            size: bytes.len() as u64,
+            size: declared_size(bytes, tamper),
             part_size: part_size as u64,
             parts: Some(parts),
             pages: None,
@@ -270,6 +285,15 @@ impl World {
             let page_bytes = serde_json::to_vec(&page_parts).unwrap();
             let served: Vec<u8> = match tamper {
                 Tamper::CorruptPage(n) if n == i => page_bytes.iter().map(|b| b ^ 0xff).collect(),
+                Tamper::OversizePage(n) if n == i => {
+                    // Far longer than the fixed ceiling a fetch allows a
+                    // page (TOON_Network#79) — the recorded `sha256` stays
+                    // the honest one's, so a cutoff (not a hash mismatch)
+                    // is what must catch this.
+                    let mut padded = page_bytes.clone();
+                    padded.resize(page_bytes.len() + OVERSIZE_PAGE_PADDING_BYTES, 0xaa);
+                    padded
+                }
                 _ => page_bytes.clone(),
             };
             let txid = format!("{}-page{}", label, i);
@@ -288,7 +312,7 @@ impl World {
         self.pages.insert(label.to_string(), pages.len());
         let record = BlobRecordContent {
             digest: claimed.to_string(),
-            size: bytes.len() as u64,
+            size: declared_size(bytes, tamper),
             part_size: part_size as u64,
             parts: None,
             pages: Some(pages),
@@ -513,11 +537,34 @@ impl World {
     }
 }
 
+/// How much longer than its recorded size `Tamper::OversizePart` and
+/// `Tamper::OversizePage` serve a body: far more than any part or page a
+/// real test uses, so a fetch that failed to cut the read off would be
+/// buffering many times what it should (TOON_Network#79).
+const OVERSIZE_PART_PADDING_BYTES: usize = 8 * 1024 * 1024;
+
+/// Longer than a fetch's fixed page ceiling (`GATEWAY_JSON_CEILING_BYTES`,
+/// 16 MiB — `src/provider/fetcher.rs`), so `Tamper::OversizePage` actually
+/// exceeds it rather than merely a page's own honest size.
+const OVERSIZE_PAGE_PADDING_BYTES: usize = 17 * 1024 * 1024;
+
+/// The `size` a Blob Record declares for `bytes`: the true length, unless
+/// `tamper` is `AbsurdSize`, which declares something far beyond any real
+/// image and beyond any provider's configured limit instead (TOON_Network
+/// #79).
+fn declared_size(bytes: &[u8], tamper: Tamper) -> u64 {
+    match tamper {
+        Tamper::AbsurdSize => u64::MAX / 2,
+        _ => bytes.len() as u64,
+    }
+}
+
 /// Mount `bytes` as parts of `part_size` under `<label>-part<n>`, honouring a
-/// part-level `Tamper`, and answer the ordered `BlobPart` list — the shared
-/// core of both `upload` (inline `parts`) and `upload_paged` (`pages`, §8.2,
-/// §11 item 2): the parts themselves are split, mounted and recorded exactly
-/// the same way whichever shape lists them.
+/// part-level `Tamper` — including a body served far longer than its
+/// recorded size (`OversizePart`) — and answer the ordered `BlobPart` list:
+/// the shared core of both `upload` (inline `parts`) and `upload_paged`
+/// (`pages`, §8.2, §11 item 2), since the parts themselves are split,
+/// mounted and recorded exactly the same way whichever shape lists them.
 async fn mount_parts(
     gateway: &MockServer,
     label: &str,
@@ -530,6 +577,14 @@ async fn mount_parts(
         let txid = format!("{}-part{}", label, i);
         let served: Vec<u8> = match tamper {
             Tamper::CorruptPart(n) if n == i => chunk.iter().map(|b| b ^ 0xff).collect(),
+            Tamper::OversizePart(n) if n == i => {
+                // Far longer than the (honest) recorded size (TOON_Network
+                // #79) — a fetch MUST cut this off at that size rather than
+                // buffer all of it.
+                let mut padded = chunk.to_vec();
+                padded.resize(chunk.len() + OVERSIZE_PART_PADDING_BYTES, 0xaa);
+                padded
+            }
             _ => chunk.to_vec(),
         };
         let size = match tamper {

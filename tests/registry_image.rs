@@ -160,7 +160,11 @@ async fn a_part_whose_size_differs_from_its_record_is_refused_image() {
 
     let body = availability(&h, registry_image(&w, &manifest_digest)).await;
 
-    assert_refused(&body, "bytes, not the");
+    // A part's declared size one byte off throws the record's own declared
+    // `size` and its parts' total out of agreement — caught by that upfront
+    // check (TOON_Network#79) before any part is fetched, rather than by
+    // comparing a fetched part's length afterwards.
+    assert_refused(&body, "declares size");
 }
 
 #[tokio::test]
