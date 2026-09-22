@@ -12,8 +12,8 @@
 //
 // The routes themselves are one module each: `spawn` starts a lease — or, on
 // `.standby`, reserves capacity for one without starting it — `lifecycle`
-// extends, reports, ends and re-keys one, `availability` answers whether a spawn would
-// run without starting anything, and `cleanup` is where every ending — Expiry
+// extends, reports, ends and rotates one, `availability` answers whether a
+// spawn would run without starting anything, and `cleanup` is where every ending — Expiry
 // or Termination — releases the slot and, when there is a workload, destroys
 // it. `standby` is the rule the two spawn routes share: which role a
 // `standby_set` and a route give this provider, and what the lease then

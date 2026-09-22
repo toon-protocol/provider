@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 use super::continuation::ContinuationToken;
 
 /// The body of every authenticated route (`.spawn`, `.standby`, `status`,
-/// `terminate`, `rotate`): one Lease Request. Validating it is `nostr::lease_request`.
+/// `terminate`, `rotate`): one Lease Request. Validating it is
+/// `nostr::lease_request`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseRequestEnvelope {
@@ -78,11 +79,12 @@ pub struct LeaseRequest {
     ///
     /// Optional in the SHAPE so that a request presenting no token is
     /// refused on its authority rather than on its spelling: `not_tenant` on
-    /// `status`, `terminate` and `rotate`, `invalid_request` on a spawn, which would
-    /// otherwise buy a lease nobody could act on (§6.1).
+    /// `status`, `terminate` and `rotate`, `invalid_request` on a spawn,
+    /// which would otherwise buy a lease nobody could act on (§6.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ContinuationToken>,
-    /// The op's own JSON object: `SpawnContent` or `WorkloadContent` below.
+    /// The op's own JSON object: `SpawnContent`, `StatusContent`,
+    /// `WorkloadContent` or `RotateContent` below.
     pub content: serde_json::Value,
 }
 

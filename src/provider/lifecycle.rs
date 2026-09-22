@@ -4,12 +4,13 @@
 // They differ in who may ask. An Extension only ADDS time and reveals
 // nothing, so it carries no Lease Request at all and any payer may buy one
 // for any lease (ADR 0005) — a sponsor pays for a lease it does not own.
-// Status, Termination and Rotation reveal, destroy or re-key, so each carries
-// a Lease Request presenting the lease's Continuation Token, and refuses
-// anyone else with `not_tenant`.
+// Status, Termination and Rotation reveal, destroy or replace the token, so
+// each carries a Lease Request presenting the lease's Continuation Token, and
+// refuses anyone else with `not_tenant`.
 //
 // The question the three ask is NOT who is this. It is whether whoever is
-// asking holds the token this lease was taken with (ADR 0016), which is the
+// asking holds the token this lease holds now — the one it was taken with,
+// or the one a rotation put in its place (ADR 0016, ADR 0018) — which is the
 // only question the provider ever needed answered and the one that leaks
 // nothing: the comparison is constant time, and the token reaches no log,
 // no metric and no message.

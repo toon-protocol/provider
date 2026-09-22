@@ -155,8 +155,8 @@ pub fn render_routes(config: &ProviderConfig, leases: &[LeaseRecord]) -> String 
         "# Connector routes for provider {:?} ({}). One spawn and one extend row\n\
          # per LIVE listing version at that version's price, plus a standby and a\n\
          # standby.extend row at its standby_price when it sells Warm Standbys;\n\
-         # availability, status, terminate and rotate are free. A retired version keeps its\n\
-         # rows until its last lease ends (ADR 0009), so regenerate with\n\
+         # availability, status, terminate and rotate are free. A retired version\n\
+         # keeps its rows until its last lease ends (ADR 0009), so regenerate with\n\
          # `toon-provider routes` after every listing change AND once the old\n\
          # version's leases are over.",
         config.provider_name, config.ilp_address
