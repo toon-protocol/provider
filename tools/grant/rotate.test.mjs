@@ -17,6 +17,7 @@ import { describe, it } from 'node:test';
 
 import { continuationFor } from './handover.mjs';
 import {
+  directedAsk,
   membersProblem,
   parseMember,
   readLease,
@@ -311,5 +312,112 @@ describe('what the tool reports and refuses', () => {
     assert.match(membersProblem([{ provider: PRIMARY, address: 'g.toon', sealKey: 'ab' }]), /sealing key/);
     assert.match(membersProblem([MEMBERS[0], MEMBERS[0]]), /twice/);
     assert.match(membersProblem([]), /at least one member/);
+  });
+});
+
+// ── a hidden member (spec §10, §12.8; TOON_Network #81) ────────────────────
+// No docker and no anon here: `directedAsk` is a pure dispatcher, tested the
+// same way `rotateLease` itself is — a fake `ask` standing in for whatever
+// `seal.mjs` opens to dial a member's own connector.
+describe('a hidden member', () => {
+  const HIDDEN = 'cc'.repeat(32);
+  const CONNECTOR = 'http://ms2rl6idnfnp3yrw2j42xvywqueh3isivkhsvdx6urihp5bhg6ogbbad.anyone';
+  const hiddenMember = () => ({ provider: HIDDEN, address: 'g.toon.provider-hs', sealKey: SEAL_KEY, connector: CONNECTOR });
+
+  /**
+   * ONE member, in memory, that applies §6.8's rules the same way `members()`
+   * above does for the clearnet pair — the hidden member's own simulator, kept
+   * separate because a fourth-field member is never in the same map as an
+   * ordinary one.
+   */
+  function hiddenSimulator(root = OLD_ROOT) {
+    let token = continuationFor(root, HIDDEN);
+    let losing;
+    const asked = [];
+    const ask = async (destination, body) => {
+      const { request } = body;
+      asked.push({ destination, request });
+      const loss = losing?.op === request.op ? losing.when : undefined;
+      if (loss === 'before') return { lost: 'T00 the packet timed out (over anon)' };
+      const answer =
+        request.continuation !== token
+          ? { status: 403, body: { error: 'not_tenant', message: 'not the tenant' } }
+          : request.op === 'status'
+            ? { status: 200, body: { workload_id: request.content.workload_id, state: 'running' } }
+            : (() => {
+                token = request.content.next;
+                return { status: 200, body: { workload_id: request.content.workload_id, rotated: true } };
+              })();
+      if (loss === 'after') return { lost: 'T00 the packet timed out (over anon)' };
+      return answer;
+    };
+    return { ask, asked, token: () => token, lose: (op, when) => { losing = { op, when }; } };
+  }
+
+  it('parses a fourth field as the connector to dial the member at directly', () => {
+    assert.deepEqual(
+      parseMember(`${HIDDEN},g.toon.provider-hs,0x${SEAL_KEY},${CONNECTOR}`),
+      { provider: HIDDEN, address: 'g.toon.provider-hs', sealKey: `0x${SEAL_KEY}`, connector: CONNECTOR },
+    );
+    assert.equal(membersProblem([hiddenMember()]), null);
+  });
+
+  it('refuses a connector that is not an absolute http(s) URL, without dialling anything', () => {
+    assert.match(
+      membersProblem([{ ...hiddenMember(), connector: 'ms2rl6idnfnp3yrw2j42xvywqueh3isivkhsvdx6urihp5bhg6ogbbad.anyone' }]),
+      /not a URL/,
+    );
+    assert.match(membersProblem([{ ...hiddenMember(), connector: 'ftp://x.anyone' }]), /http: or https:/);
+  });
+
+  it('directedAsk sends an ordinary member through `ask` and one naming its own connector through `direct`', async () => {
+    const seen = [];
+    const ask = async (destination, _body, member) => { seen.push(['ask', destination, member.provider]); return { status: 200, body: {} }; };
+    const direct = async (destination, _body, member) => { seen.push(['direct', destination, member.provider]); return { status: 200, body: {} }; };
+    const dispatch = directedAsk(ask, direct);
+
+    await dispatch('g.fixture.primary.rotate', {}, MEMBERS[0]);
+    await dispatch('g.toon.provider-hs.rotate', {}, hiddenMember());
+
+    assert.deepEqual(seen, [
+      ['ask', 'g.fixture.primary.rotate', PRIMARY],
+      ['direct', 'g.toon.provider-hs.rotate', HIDDEN],
+    ]);
+  });
+
+  it('rotates a Standby Set mixing an ordinary member with a hidden one, each over its own path', async () => {
+    const path = leaseFile({ standby_set: ['provider', 'provider-hs'] });
+    const clearnet = members();
+    const hidden = hiddenSimulator();
+    const memberSet = [MEMBERS[0], hiddenMember()];
+
+    const report = await rotateLease({ leaseFile: path, members: memberSet, ask: directedAsk(clearnet.ask, hidden.ask) });
+
+    const newRoot = lease(path).root_secret;
+    assert.equal(report.rotated, true);
+    assert.equal(clearnet.token(PRIMARY), continuationFor(newRoot, PRIMARY));
+    assert.equal(hidden.token(), continuationFor(newRoot, HIDDEN));
+    assert.deepEqual(hidden.asked.map((a) => [a.destination, a.request.op]), [['g.toon.provider-hs.rotate', 'rotate']]);
+    assert.ok(clearnet.asked.every((a) => a.member !== HIDDEN), 'the hidden member never reached the clearnet asker');
+  });
+
+  it('recovers a lost answer from the hidden member through `status`, over the same path', async () => {
+    const path = leaseFile({ standby_set: ['provider', 'provider-hs'] });
+    const clearnet = members();
+    const hidden = hiddenSimulator();
+    hidden.lose('rotate', 'after');
+    const memberSet = [MEMBERS[0], hiddenMember()];
+
+    const report = await rotateLease({ leaseFile: path, members: memberSet, ask: directedAsk(clearnet.ask, hidden.ask) });
+
+    assert.equal(report.rotated, true);
+    assert.deepEqual(report.members[1], { provider: HIDDEN, rotated: true, recovered: true });
+    const newRoot = lease(path).root_secret;
+    assert.equal(hidden.token(), continuationFor(newRoot, HIDDEN));
+    assert.deepEqual(hidden.asked.map((a) => [a.destination, a.request.op]), [
+      ['g.toon.provider-hs.rotate', 'rotate'],
+      ['g.toon.provider-hs.status', 'status'],
+    ]);
+    assert.equal(hidden.asked[1].request.continuation, continuationFor(newRoot, HIDDEN), 'the recovery status presents `next`');
   });
 });

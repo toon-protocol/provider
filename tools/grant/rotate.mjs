@@ -15,6 +15,15 @@
 // Workload Gateway handed one stops READING the lease, not only serving it.
 // A tenant that keeps its gateway hands it grants of the new root afterwards
 // (`seal.mjs handover`, which reads the lease file's root secret).
+//
+// A MEMBER CAN BE HIDDEN (spec §10, §12.8; TOON_Network #81). A Hidden
+// Provider's connector is an `.anyone` address a hub does not peer with, so
+// it cannot be reached the way an ordinary member is — through the ONE
+// client `seal.mjs` opens for the shared connector. `parseMember`'s optional
+// fourth field names such a member's own connector, and `directedAsk` routes
+// it, and it alone, to whatever `seal.mjs` opens to dial that URL — over
+// anon, when it names one. `rotateLease` and `rotateMember` know none of
+// this: they still call one `ask`, exactly as before.
 
 import { randomBytes } from 'node:crypto';
 import { readFileSync, renameSync, writeFileSync } from 'node:fs';
@@ -73,22 +82,47 @@ export const statusRequest = ({ workloadId, root, provider, now }) =>
 // ── the members ───────────────────────────────────────────────────────────
 
 /**
- * `--member <pubkey>,<ilp address>,<seal key>`: one member of the Standby Set
- * and the two facts that reach it — its Profile's `ilp_address`, the prefix
- * of its `.rotate` and `.status` routes, and its connector's PINNED sealing
- * key (ADR 0011), which nothing here fetches. One flag per member, because a
- * member and the way to reach it are one fact and not three lists to line up.
+ * `--member <pubkey>,<ilp address>,<seal key>[,<connector>]`: one member of
+ * the Standby Set and the facts that reach it — its Profile's `ilp_address`,
+ * the prefix of its `.rotate` and `.status` routes, its connector's PINNED
+ * sealing key (ADR 0011), which nothing here fetches, and, only for a member
+ * reached DIRECTLY rather than through the shared client — a Hidden Provider,
+ * whose connector is an `.anyone` address a hub does not peer with (spec §10,
+ * Appendix A) — the URL to dial it at. One flag per member, because a member
+ * and the way to reach it are one fact and not three (or four) lists to line
+ * up. A member with no fourth field is reached exactly as before: through
+ * whichever client `seal.mjs` opens for the shared connector.
  */
 export function parseMember(text) {
   const parts = String(text).split(',');
-  if (parts.length !== 3) {
+  if (parts.length !== 3 && parts.length !== 4) {
     throw new Error(
-      `--member ${JSON.stringify(text)} must be <pubkey>,<ilp address>,<seal key>: ` +
-        'the member, the address its Profile names, and its connector\'s pinned sealing key',
+      `--member ${JSON.stringify(text)} must be <pubkey>,<ilp address>,<seal key>[,<connector>]: ` +
+        'the member, the address its Profile names, its connector\'s pinned sealing key, and — only for a ' +
+        'member dialled directly, such as a Hidden Provider\'s .anyone connector — the URL to reach it at',
     );
   }
-  const [provider, address, sealKey] = parts.map((p) => p.trim());
-  return { provider, address, sealKey };
+  const [provider, address, sealKey, connector] = parts.map((p) => p.trim());
+  return { provider, address, sealKey, ...(connector === undefined ? {} : { connector }) };
+}
+
+/**
+ * Why `connector` is not a URL this tool will dial a member at directly, or
+ * `null`. It is never resolved or dialled here — that is `seal.mjs`'s job,
+ * over anon when the host it names calls for it (spec §10, §12.8) — so this
+ * checks only the shape: an absolute `http:` or `https:` URL.
+ */
+function connectorProblem(what, connector) {
+  let url;
+  try {
+    url = new URL(connector);
+  } catch {
+    return `${what}'s connector ${JSON.stringify(connector)} is not a URL: http://<address> (or https://) to dial it at directly`;
+  }
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return `${what}'s connector ${JSON.stringify(connector)} must be http: or https:, not ${url.protocol}`;
+  }
+  return null;
 }
 
 /** Why these members cannot be rotated, or `null`. */
@@ -96,7 +130,7 @@ export function membersProblem(members) {
   if (!Array.isArray(members) || members.length === 0) {
     return 'the Standby Set must name at least one member, primary first (--member <pubkey>,<ilp address>,<seal key>, once per member)';
   }
-  for (const [i, { provider, address, sealKey }] of members.entries()) {
+  for (const [i, { provider, address, sealKey, connector }] of members.entries()) {
     const problem = publicKeyProblem(`Standby Set member ${i + 1}`, provider);
     if (problem !== null) return problem;
     if (typeof address !== 'string' || !ILP_ADDRESS.test(address)) {
@@ -107,6 +141,10 @@ export function membersProblem(members) {
         `member ${provider}'s sealing key must be a secp256k1 public key as hex: the \`connector_seal_key\` ` +
         'its Profile pins, 65-byte uncompressed (04…) or 33-byte compressed (02…/03…)'
       );
+    }
+    if (connector !== undefined) {
+      const connectorIssue = connectorProblem(`member ${provider}`, connector);
+      if (connectorIssue !== null) return connectorIssue;
     }
   }
   if (new Set(members.map((m) => m.provider)).size !== members.length) {
@@ -381,3 +419,21 @@ export const sealedAsker = (client) => async (destination, body, member) => {
   }
   return { status: answer.status, body: parsed };
 };
+
+/**
+ * One `ask` for `rotateLease` that reaches a member naming its own
+ * `connector` (`parseMember`'s optional fourth field — a Hidden Provider's
+ * `.anyone` address, spec §10, §12.8) through `direct`, and every other
+ * member — the ordinary case, reached at the shared client's own connector —
+ * through `ask`. Dispatch reads the `member` `rotateLease` is already
+ * calling `ask` WITH, so `rotateMember`'s `status` probe after a lost answer
+ * (spec §6.8) takes the SAME path its `rotate` did: recovery over a hidden
+ * member's path needs nothing of its own, here or in `rotateLease`.
+ *
+ * Neither `ask` nor `direct` is opened lazily by this function — that a
+ * Standby Set names a hidden member at all is known before anything is
+ * asked (`membersProblem`), so `seal.mjs` decides once, up front, which
+ * clients this run needs and opens only those.
+ */
+export const directedAsk = (ask, direct) => (destination, body, member) =>
+  (member.connector === undefined ? ask : direct)(destination, body, member);
