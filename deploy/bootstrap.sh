@@ -85,7 +85,14 @@ if [ -z "${CONNECTOR_SEAL_KEY:-}" ]; then
   printf '%s\n' "${OPERATOR_WRITE_KEY}" > operator-write.keys
   chmod 600 connector.toml operator-bearer.token operator-write.keys
   chown 10001:10001 connector.toml operator-bearer.token operator-write.keys
-  docker compose up -d provider-connector
+  # --no-deps, and it is load-bearing. The connector `depends_on` the app, so
+  # without it compose starts the app too -- and the app's bind mount names a
+  # provider.toml that this step has not rendered yet, which docker answers by
+  # creating an empty DIRECTORY at that path. The app then dies on "read
+  # provider config at /etc/toon-provider/provider.toml: Is a directory", the
+  # dependency gate fails, and the connector never starts at all. Only the
+  # connector is wanted here; the app comes up in step 7 with its config.
+  docker compose up -d --no-deps provider-connector
 
   echo "    waiting for the connector to answer GET /ilp/identity"
   for _ in $(seq 1 40); do

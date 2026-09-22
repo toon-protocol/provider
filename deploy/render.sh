@@ -52,6 +52,26 @@ if [ -z "${CONNECTOR_SEAL_KEY:-}" ]; then
   exit 1
 fi
 
+# ── A directory where a file belongs ─────────────────────────────────────────
+# docker answers a bind mount naming a path that does not exist by CREATING an
+# empty directory there. Anything that starts the app before its config is
+# rendered leaves one behind, and the app then dies on "read provider config
+# at /etc/toon-provider/provider.toml: Is a directory" for the rest of time,
+# because envsubst below cannot write over a directory either. An EMPTY one
+# can only have come from that, so clear it; a non-empty one is somebody's
+# work and is refused instead.
+for path in provider.toml connector.toml; do
+  [ -d "$path" ] || continue
+  if rmdir "$path" 2>/dev/null; then
+    echo "note: removed an empty directory at ./${path} — docker creates one when a" >&2
+    echo "      bind mount names a file that has not been rendered yet." >&2
+  else
+    echo "./${path} is a directory and is not empty. It must be a file; something" >&2
+    echo "other than this script put it there. Move it aside and re-run." >&2
+    exit 1
+  fi
+done
+
 # ── provider.toml — the one rendered file in this fleet that IS a secret ─────
 # It carries `nostr_private_key` inline: the identity that signs this
 # provider's Profile, Listings, Liveness and Eviction Notices. Everything else
