@@ -152,14 +152,19 @@ $EDITOR .env          # every variable is documented in the file
 openssl rand -hex 32 > signer.key             # THE SEALING KEY
 openssl rand -hex 32 > settlement.key         # the EVM settlement key
 openssl rand -hex 32 > settlement-solana.key  # the Solana settlement key
-chmod 600 *.key
 
 # The provider's own identity, into .env as NOSTR_PRIVATE_KEY.
 openssl rand -hex 32
 ```
 
-and a BIP-39 phrase of its own for `PUBLISHER_MNEMONIC`, shared with nothing
-else: two payers on one channel share one nonce watermark, and the loser of
+`render.sh` sets each key's mode and hands the connector's three to uid 10001,
+which is what it runs as. That used to be a step in a runbook, and a step a
+human has to remember is a step a human forgets — the failure is a container
+that restarts forever with `failed to read signer key_file at
+/app/data/signer.key: Permission denied` while everything around it looks fine.
+
+You also need a BIP-39 phrase of its own for `PUBLISHER_MNEMONIC`, shared with
+nothing else: two payers on one channel share one nonce watermark, and the loser of
 that race has every later claim refused.
 
 Record how each was derived, somewhere off this box. A lost `NOSTR_PRIVATE_KEY`
