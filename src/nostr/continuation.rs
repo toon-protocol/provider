@@ -10,15 +10,21 @@
 //
 // Both sides of the wire are here, because the formula has to be one thing.
 // A TENANT mints one `RootSecret` per lease and derives one token per
-// provider; a PROVIDER only ever stores one and compares against it. Like
-// `gateway_grant`'s builder, the deriving half is for whoever holds the
-// tenant's secret — a tenant's own tooling, the wire fixtures — and never
-// runs inside a serving provider.
+// provider; a PROVIDER only ever stores one and compares against it. The
+// deriving half is for whoever holds the tenant's secret — a tenant's own
+// tooling, the wire fixtures — and never runs inside a serving provider.
 //
 // Deriving PER PROVIDER is what keeps a Standby Set honest: every member of
 // the set holds a different token by construction, so one member cannot act
 // as the tenant against another (spec §7). That is the whole reason the
 // derivation exists rather than one secret sent to everybody.
+//
+// One more thing derives, and this one the PROVIDER computes: a Gateway
+// Grant, `gateway_sub`, which delegates reading a lease to one Workload
+// Gateway until a moment the tenant chose (spec §6.5.1). It hangs off the
+// token rather than off the root secret, so the provider — which holds the
+// token and not the root — can recompute any grant it is shown, and needs
+// to store nothing per gateway and read no relay to check one.
 //
 // Nothing here can be printed. `ContinuationToken` has a `Debug` that
 // redacts and no `Display` at all, and no accessor hands its bytes back —
@@ -42,6 +48,13 @@ use super::wire::is_lower_hex;
 /// the whole `info` is ASCII and a second implementation has nothing to
 /// guess about byte order or encoding.
 pub const CONTINUATION_DOMAIN: &str = "toon-network-continuation:";
+
+/// The HKDF `info` prefix a Gateway Grant is derived under (spec §6.5.1). The
+/// moment the grant was derived for follows it as unix seconds written in
+/// ASCII decimal with no padding and no sign, so this `info` is ASCII too
+/// and a gateway and a provider cannot disagree about how a number was
+/// spelled.
+pub const GATEWAY_DOMAIN: &str = "toon-network-gateway:";
 
 /// A tenant's root secret for ONE lease: 32 random bytes it mints and keeps.
 ///
@@ -70,17 +83,26 @@ impl RootSecret {
     /// HKDF-SHA256 with the root secret as the input keying material, an
     /// empty salt, the ASCII string above as `info`, and 32 bytes of output.
     pub fn continuation_for(&self, provider: &PublicKey) -> ContinuationToken {
-        let info = format!("{}{}", CONTINUATION_DOMAIN, provider.to_hex());
-        // An empty salt is HKDF's own default: RFC 5869 extracts with
-        // `HashLen` zero bytes when none is given, which is what `None` is
-        // here. There is nothing per-lease to put in a salt that the root
-        // secret is not already.
-        let hk = Hkdf::<Sha256>::new(None, &self.0);
-        let mut token = [0u8; 32];
-        hk.expand(info.as_bytes(), &mut token)
-            .expect("32 bytes is one SHA-256 block, far inside HKDF's limit");
-        ContinuationToken(token)
+        ContinuationToken(expand(
+            &self.0,
+            &format!("{}{}", CONTINUATION_DOMAIN, provider.to_hex()),
+        ))
     }
+}
+
+/// 32 bytes of HKDF-SHA256 over `ikm` under `info`.
+///
+/// One function for both derivations, so the two cannot drift on the thing
+/// they must agree about: an empty salt — HKDF's own default, which RFC 5869
+/// extracts with `HashLen` zero bytes — and an ASCII `info` whose domain
+/// prefix is the only thing that tells the two apart. There is nothing
+/// per-lease to put in a salt that the input keying material is not already.
+fn expand(ikm: &[u8; 32], info: &str) -> [u8; 32] {
+    let hk = Hkdf::<Sha256>::new(None, ikm);
+    let mut out = [0u8; 32];
+    hk.expand(info.as_bytes(), &mut out)
+        .expect("32 bytes is one SHA-256 block, far inside HKDF's limit");
+    out
 }
 
 /// One lease's Continuation Token: 32 bytes on the wire as 64 lowercase hex
@@ -98,6 +120,39 @@ impl ContinuationToken {
     /// lowercase hex characters. Anything else is not a token.
     pub fn from_hex(hex: &str) -> Option<Self> {
         bytes_from_hex(hex).map(Self)
+    }
+
+    /// The Gateway Grant this lease's token derives for the moment
+    /// `expires_at` (spec §6.5.1):
+    ///
+    /// ```text
+    /// gateway_sub(provider, expires_at) = HKDF-SHA256(continuation(provider),
+    ///                                         "toon-network-gateway:" || expires_at)
+    /// ```
+    ///
+    /// The spec writes `provider` because the input keying material is
+    /// `continuation(provider)`; here that IS the receiver, so there is no
+    /// such parameter — a grant is derived from one lease's token at one
+    /// provider, and from nothing else.
+    ///
+    /// The same HKDF as a Continuation Token's, over the token rather than
+    /// the root secret, with `expires_at` as ASCII decimal unix seconds.
+    ///
+    /// The result is a `ContinuationToken` because that is what it is ON THE
+    /// WIRE: a gateway presents it in the request's `continuation` field, so
+    /// it is compared — in constant time, like any other — against what a
+    /// request presented. It is NOT the lease's token, and a provider stores
+    /// it nowhere: it is recomputed from the stored token for the one moment
+    /// a request names, and forgotten again.
+    ///
+    /// Both sides derive it. A TENANT computes one and hands it to a gateway
+    /// out of band; a PROVIDER recomputes it to check one, which is why
+    /// there is no relay read and nothing stored per gateway.
+    pub fn gateway_sub(&self, expires_at: u64) -> Self {
+        Self(expand(
+            &self.0,
+            &format!("{}{}", GATEWAY_DOMAIN, expires_at),
+        ))
     }
 }
 

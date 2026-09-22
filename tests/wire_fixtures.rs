@@ -38,7 +38,9 @@ use common::{
     sha256_hex, stub_registry, valid_digest, FakeBackend, FakeClock, FakeDirectory,
     FakeHiddenService,
 };
-use toon_provider::nostr::continuation::{RootSecret, CONTINUATION_DOMAIN};
+use toon_provider::nostr::continuation::{
+    ContinuationToken, RootSecret, CONTINUATION_DOMAIN, GATEWAY_DOMAIN,
+};
 use toon_provider::nostr::directory_events::{
     takeover_event, ProfileContent, Settlement, HIDDEN_LABEL,
 };
@@ -65,6 +67,10 @@ const INTERVAL: u64 = 3600;
 /// How far past `created_at` a fixture Lease Request expires, well inside
 /// `lease_request::MAX_REQUEST_WINDOW_SECS`.
 const TTL: u64 = 60;
+/// How far past `NOW` the fixture tenant derives its Gateway Grant for
+/// (spec §6.5): a day, which is the moment `gateway_expires_at` names in
+/// `status.delegated` and the one `error.bad_grant` is refused against.
+const GRANT_TTL: u64 = 86_400;
 
 /// TEST-ONLY secrets, chosen to be obviously synthetic.
 ///
@@ -352,12 +358,33 @@ fn lease_request(
     expiration: u64,
     label: &str,
 ) -> Value {
+    lease_request_with(
+        &root.continuation_for(provider),
+        provider,
+        op,
+        content,
+        expiration,
+        label,
+    )
+}
+
+/// The same request, presenting a token that is not derived here — a Gateway
+/// Grant (spec §6.5), which is what a Workload Gateway holds and a tenant's
+/// root secret is not what produces.
+fn lease_request_with(
+    continuation: &ContinuationToken,
+    provider: &PublicKey,
+    op: &str,
+    content: &Value,
+    expiration: u64,
+    label: &str,
+) -> Value {
     json!({
         "request_id": fixture_request_id(label),
         "op": op,
         "provider": provider.to_hex(),
         "expiration": expiration,
-        "continuation": root.continuation_for(provider),
+        "continuation": continuation,
         "content": content,
     })
 }
@@ -488,6 +515,29 @@ impl Fixture {
             &self.provider_pubkey(),
             op,
             &about(seed),
+            NOW + TTL,
+            label,
+        )
+    }
+
+    /// A WORKLOAD GATEWAY's `status` (spec §6.5.1): the Gateway Grant it holds
+    /// presented as the request's `continuation`, exactly where the lease's
+    /// own token would ride, and the moment it was derived for named in the
+    /// content. The request is an ordinary Lease Request in every other way.
+    fn delegated_request(
+        &self,
+        grant: &ContinuationToken,
+        seed: u8,
+        expires_at: u64,
+        label: &str,
+    ) -> Value {
+        let mut content = about(seed);
+        content["gateway_expires_at"] = json!(expires_at);
+        lease_request_with(
+            grant,
+            &self.provider_pubkey(),
+            "status",
+            &content,
             NOW + TTL,
             label,
         )
@@ -769,6 +819,62 @@ fn the_continuation_derivation_vector() {
                    "at_other_provider": {
                        "provider_public_key": keys(PRIMARY_SECRET).public_key().to_hex(),
                        "continuation": at_primary,
+                   },
+               }),
+    );
+}
+
+/// The Gateway Grant derivation (spec §6.5.1): one fixed Continuation Token,
+/// one fixed moment, and the grant they produce.
+///
+/// The second half of the story `continuation.vector` tells, and a vector
+/// for the same reason: a provider only ever recomputes a grant it was
+/// handed, so no route can show the formula. A tenant's tooling and a
+/// gateway both need it before either sends anything.
+#[test]
+fn the_gateway_grant_derivation_vector() {
+    let provider = keys(PROVIDER_SECRET).public_key();
+    let token = root(TENANT_ROOT_SECRET).continuation_for(&provider);
+    let expires_at = NOW + GRANT_TTL;
+    let grant = token.gateway_sub(expires_at);
+    // Rotation is re-derivation at a new moment (spec §6.5.1), so a grant is
+    // bound to the one moment it names: a second moment is a second value,
+    // and a gateway presenting one with the other is refused `bad_grant`.
+    let later = token.gateway_sub(expires_at + 1);
+    assert_ne!(grant, later);
+    // And a grant is not the token it came from: handing a gateway one hands
+    // it reading, never the lease.
+    assert_ne!(grant, token);
+    golden(
+        "gateway_sub.vector.json",
+        json!({
+                   "fixture": header(
+                       "gateway_sub",
+                       "vector",
+        "The Gateway Grant derivation (spec §6.5.1): HKDF-SHA256 over the LEASE'S \
+                        CONTINUATION TOKEN — not the tenant's root secret — with an empty salt and \
+                        an ASCII `info` of the domain string followed by the moment the grant is \
+                        derived for, written as unpadded decimal unix seconds, for 32 bytes of \
+                        output. A tenant hands the result and that moment to one Workload Gateway \
+                        out of band; the gateway presents it as its request's `continuation` and \
+                        names the moment in `gateway_expires_at`, and the provider recomputes it \
+                        from the token it already stores. Nothing is published and nothing is kept \
+                        per gateway. `at_the_next_second` is the same token one second later, which \
+                        is why rotation is re-derivation, and why a grant presented with another \
+                        moment is refused.",
+                   ),
+                   "algorithm": "HKDF-SHA256 (RFC 5869)",
+                   "salt": "empty (RFC 5869 then extracts with 32 zero bytes)",
+                   "info_prefix": GATEWAY_DOMAIN,
+                   "info_encoding": "the prefix above, as ASCII, followed by `expires_at` as \
+                                     decimal unix seconds with no padding and no sign",
+                   "output_bytes": 32,
+                   "continuation": token,
+                   "expires_at": expires_at,
+                   "gateway_sub": grant,
+                   "at_the_next_second": {
+                       "expires_at": expires_at + 1,
+                       "gateway_sub": later,
                    },
                }),
     );
@@ -1208,7 +1314,8 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
         (
             "status",
             "running",
-            "Status (spec §6.5) of the running lease, signed by its tenant, with \
+            "Status (spec §6.5) of the running lease, presenting its own Continuation \
+             Token, with \
              `lease_request.status` as its body. `state` is the one-word `running`.",
         ),
         &route("status"),
@@ -1219,6 +1326,79 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
     assert_eq!(status, StatusCode::OK, "{}", response);
     assert_eq!(response["state"], "running");
     golden("status.running.json", doc);
+    let tenants_answer = response;
+
+    // The same status, asked by a WORKLOAD GATEWAY the tenant delegated to.
+    let expires_at = NOW + GRANT_TTL;
+    let grant = root(TENANT_ROOT_SECRET)
+        .continuation_for(&f.provider_pubkey())
+        .gateway_sub(expires_at);
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "status",
+            "delegated",
+            "Status of the same running lease, asked by a WORKLOAD GATEWAY rather than by the \
+             tenant (spec §6.5.1). The request presents the Gateway Grant \
+             (`gateway_sub.vector`) as its `continuation` — exactly where the lease's own token \
+             rides — and names the moment it was derived for in the content's \
+             `gateway_expires_at`. The answer is byte-for-byte what the tenant was told in \
+             `status.running` — `role`, `state`, `expires_at`, `access`, and `template` and \
+             `takeover` where there are any — because a grant delegates READING this lease and \
+             changes nothing about what reading it says. It is an ordinary Lease Request in \
+             every other way: the same six keys, the same 60 s window and the same replay rule \
+             (§6.1). The provider recomputes the grant from the token it already stores, so \
+             there is no relay read, nothing kept per gateway, and a Hidden Provider answers \
+             one without opening anything (§10).",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.delegated_request(&grant, aa, expires_at, "status.delegated")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(
+        response, tenants_answer,
+        "a gateway holding a grant is answered exactly what the tenant is answered"
+    );
+    golden("status.delegated.json", doc);
+
+    // And the refusal that keeps a grant a delegation rather than a bearer
+    // credential: one derived from a token this lease was not taken with.
+    let stolen = root(OTHER_TENANT_ROOT_SECRET)
+        .continuation_for(&f.provider_pubkey())
+        .gateway_sub(expires_at);
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "error",
+            "bad_grant",
+            "A `status` asserting a delegation — the content names a `gateway_expires_at` that \
+             has not passed — presenting a grant derived from a token this lease was not taken \
+             with (spec §6.5.1). Every other defect earns this same code: a grant derived for a \
+             different moment from the one asserted, a grant for another lease, a moment \
+             already past — refused before anything is derived — and 32 bytes that were derived \
+             for nothing. One code on purpose, so a gateway learns that its delegation does not \
+             apply and nothing about the lease; `message` is for people and says which defect \
+             it was, and every fact in it is one the gateway sent (§5). Distinct from \
+             `not_tenant`, which is what the same value hears when the request asserts no \
+             delegation at all — the assertion decides the refusal, not the defect.",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.delegated_request(&stolen, aa, expires_at, "error.bad_grant")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{}", response);
+    assert_eq!(error_of(&response), "bad_grant");
+    golden(
+        "error.bad_grant.json",
+        with_validation_step(
+            doc,
+            "§6.5.1 step 3: the presented value MUST be the grant this lease's token derives \
+             for the moment the request asserts",
+        ),
+    );
 
     // Extend.
     let (status, response, doc) = exchange(
@@ -1244,7 +1424,9 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
         (
             "error",
             "not_tenant",
-            "Status signed by a key that is not the lease's tenant (spec §6.5).",
+            "Status presenting a Continuation Token this lease was not taken with, and \
+             asserting no delegation (spec §6.1.2, §6.5.1). A request that DOES assert one hears \
+             `bad_grant` instead: the assertion decides the refusal.",
         ),
         &route("status"),
         "/status",
@@ -1255,7 +1437,10 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
     assert_eq!(error_of(&response), "not_tenant");
     golden(
         "error.not_tenant.json",
-        with_validation_step(doc, "§6.5: the signer MUST be the lease's tenant"),
+        with_validation_step(
+            doc,
+            "§6.1.2 step 4: the request MUST present the token the lease was taken with",
+        ),
     );
 
     let (status, response, doc) = exchange(

@@ -1,0 +1,40 @@
+{
+  "fixture": {
+    "case": "delegated",
+    "description": "Status of the same running lease, asked by a WORKLOAD GATEWAY rather than by the tenant (spec §6.5.1). The request presents the Gateway Grant (`gateway_sub.vector`) as its `continuation` — exactly where the lease's own token rides — and names the moment it was derived for in the content's `gateway_expires_at`. The answer is byte-for-byte what the tenant was told in `status.running` — `role`, `state`, `expires_at`, `access`, and `template` and `takeover` where there are any — because a grant delegates READING this lease and changes nothing about what reading it says. It is an ordinary Lease Request in every other way: the same six keys, the same 60 s window and the same replay rule (§6.1). The provider recomputes the grant from the token it already stores, so there is no relay read, nothing kept per gateway, and a Hidden Provider answers one without opening anything (§10).",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "status"
+  },
+  "http_path": "/status",
+  "request_body": {
+    "request": {
+      "content": {
+        "gateway_expires_at": 1700086400,
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "d86f4764fa750ebd0a7f27303878c0b31afd941de27960fe538649f376a3d10f",
+      "expiration": 1700000060,
+      "op": "status",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "aa1dc379466cb6d5e5e2004a2365289fc0a686e9954498d5016fb8c63f4ce1e5"
+    }
+  },
+  "response_body": {
+    "access": {
+      "host": "203.0.113.7",
+      "ports": [
+        {
+          "container_port": 443,
+          "host_port": 41000
+        }
+      ],
+      "ssh_port": 40000
+    },
+    "expires_at": 1700003600,
+    "role": "standalone",
+    "state": "running",
+    "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "response_status": 200,
+  "route": "g.fixture.status"
+}

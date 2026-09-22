@@ -1,0 +1,29 @@
+{
+  "fixture": {
+    "case": "bad_grant",
+    "description": "A `status` asserting a delegation — the content names a `gateway_expires_at` that has not passed — presenting a grant derived from a token this lease was not taken with (spec §6.5.1). Every other defect earns this same code: a grant derived for a different moment from the one asserted, a grant for another lease, a moment already past — refused before anything is derived — and 32 bytes that were derived for nothing. One code on purpose, so a gateway learns that its delegation does not apply and nothing about the lease; `message` is for people and says which defect it was, and every fact in it is one the gateway sent (§5). Distinct from `not_tenant`, which is what the same value hears when the request asserts no delegation at all — the assertion decides the refusal, not the defect.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/status",
+  "request_body": {
+    "request": {
+      "content": {
+        "gateway_expires_at": 1700086400,
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "4508ec8b405c41c5ab1e709d1681d37893e7d00c5efbd3a6f4b208893743da4e",
+      "expiration": 1700000060,
+      "op": "status",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "a82b7578d58a507863b9085ef69f38f664ea9bdb88142ba61f291127dca9a018"
+    }
+  },
+  "response_body": {
+    "error": "bad_grant",
+    "message": "this delegation does not apply here; ask the tenant for one derived for this workload and this moment"
+  },
+  "response_status": 403,
+  "route": "g.fixture.status",
+  "validation_step": "§6.5.1 step 3: the presented value MUST be the grant this lease's token derives for the moment the request asserts"
+}

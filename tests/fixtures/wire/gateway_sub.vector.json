@@ -1,0 +1,20 @@
+{
+  "algorithm": "HKDF-SHA256 (RFC 5869)",
+  "at_the_next_second": {
+    "expires_at": 1700086401,
+    "gateway_sub": "11d53bef1ff05fba7708ae428018d7cfd9b0c5fd362be0c561111a041b237430"
+  },
+  "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+  "expires_at": 1700086400,
+  "fixture": {
+    "case": "vector",
+    "description": "The Gateway Grant derivation (spec §6.5.1): HKDF-SHA256 over the LEASE'S CONTINUATION TOKEN — not the tenant's root secret — with an empty salt and an ASCII `info` of the domain string followed by the moment the grant is derived for, written as unpadded decimal unix seconds, for 32 bytes of output. A tenant hands the result and that moment to one Workload Gateway out of band; the gateway presents it as its request's `continuation` and names the moment in `gateway_expires_at`, and the provider recomputes it from the token it already stores. Nothing is published and nothing is kept per gateway. `at_the_next_second` is the same token one second later, which is why rotation is re-derivation, and why a grant presented with another moment is refused.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "gateway_sub"
+  },
+  "gateway_sub": "d86f4764fa750ebd0a7f27303878c0b31afd941de27960fe538649f376a3d10f",
+  "info_encoding": "the prefix above, as ASCII, followed by `expires_at` as decimal unix seconds with no padding and no sign",
+  "info_prefix": "toon-network-gateway:",
+  "output_bytes": 32,
+  "salt": "empty (RFC 5869 then extracts with 32 zero bytes)"
+}

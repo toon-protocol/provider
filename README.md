@@ -1209,7 +1209,7 @@ CI job here that clones it and runs that diff.
 
 ```sh
 cargo build
-cargo test                 # no Docker daemon needed
+cargo test                 # no Docker daemon needed; Node on PATH (see below)
 cargo test -- --ignored    # the Docker backend and a registry-entry spawn against a real daemon,
                            # and the anon control port against a real one (see Hidden Provider)
 cargo clippy --all-targets
@@ -1218,10 +1218,13 @@ cargo run -- --config provider.toml
 
 Two Node tools live beside the app under `tools/`, each with its own
 `npm install` and `npm test`: the [directory publisher](tools/publisher/README.md),
-the provider's payer for relay writes, and the [grant tool](tools/grant/README.md),
-the tenant-side command for a Workload Gateway's delegation. The grant tool
-still signs and publishes a kind `30438` event and so does not work against
-this app any more; TOON_Network#59 replaces it with a handover tool.
+the provider's payer for relay writes, and the [handover tool](tools/grant/README.md),
+the tenant-side command that derives a Gateway Grant from a lease's root
+secret and seals a Gateway Handover to a Workload Gateway's connector. It
+holds no Nostr key and publishes nothing, and `tests/gateway_handover.rs`
+runs it — `node tools/grant/seal.mjs handover … --dry-run` — against this
+app, so `cargo test` needs Node on `PATH`. That test is the proof that the
+derivation here and the derivation there are one derivation.
 
 ## License
 
