@@ -4,7 +4,9 @@ The tenant's side of a Workload Gateway: one command that **derives** a
 [Gateway Grant](https://github.com/toon-protocol/TOON_Network/blob/main/CONTEXT.md)
 from a lease's **Root Secret** and **seals** it to the gateway's own
 connector. It holds no Nostr key, signs nothing, publishes nothing and reads
-no relay.
+no relay. Its third command, [`rotate`](#rotating-the-token), replaces the
+lease's Continuation Token at every member of its Standby Set — the one act
+that also takes a grant back.
 
 A Gateway Grant is a value, not an event (spec §6.5.1):
 

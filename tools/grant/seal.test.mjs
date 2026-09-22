@@ -195,6 +195,17 @@ describe('rotate', () => {
     }
   });
 
+  it('refuses, before any channel is opened, to finish a rotation naming other members than it started with', async () => {
+    const path = leaseFile();
+    const lease = JSON.parse(readFileSync(path, 'utf8'));
+    writeFileSync(path, JSON.stringify({ ...lease, rotation: { root_secret: 'ab'.repeat(32), members: [PROVIDER, 'cd'.repeat(32)], confirmed: [PROVIDER] } }));
+    const { code, stderr } = await seal(['rotate', '--lease', path, '--member', MEMBER], {
+      TOON_MNEMONIC: 'test test test test test test test test test test test junk',
+    });
+    assert.equal(code, 2);
+    assert.match(stderr, /same members/);
+  });
+
   it('is the only subcommand that takes --lease and --member', async () => {
     const { code, stderr } = await seal(
       ['handover', ...FLAGS, '--http-port', '443', '--expires-in', '24h', '--dry-run', '--member', MEMBER],

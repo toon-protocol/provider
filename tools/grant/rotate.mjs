@@ -178,6 +178,24 @@ export function writeLease(path, lease) {
   renameSync(next, path);
 }
 
+/**
+ * Why `members` cannot finish the rotation `lease` records, or `null` — also
+ * when it records none. A rotation under way is finished naming the SAME
+ * members it started with: one left out would be read, once the rest confirm,
+ * with a root secret this file no longer holds.
+ */
+export function resumeProblem(leaseFile, lease, members) {
+  const { rotation } = lease;
+  if (rotation === undefined) return null;
+  const named = members.map((m) => m.provider);
+  const same = rotation.members.length === named.length && rotation.members.every((m) => named.includes(m));
+  if (same) return null;
+  return (
+    `${leaseFile} records a rotation of ${rotation.members.length} member(s) still under way; ` +
+    'finish it naming the same members, or the ones left out would be read with a root secret this file no longer holds'
+  );
+}
+
 // ── one member ────────────────────────────────────────────────────────────
 
 /** An answer, said in a line that carries no token: the code, or the status. */
@@ -300,13 +318,8 @@ export async function rotateLease({
     writeLease(leaseFile, { ...lease, rotation });
     log(`workload ${workloadId}: a fresh root secret, recorded in ${leaseFile} before anything is sent`);
   } else {
-    const same = rotation.members.length === named.length && rotation.members.every((m) => named.includes(m));
-    if (!same) {
-      throw new Error(
-        `${leaseFile} records a rotation of ${rotation.members.length} member(s) still under way; ` +
-          'finish it naming the same members, or the ones left out would be read with a root secret this file no longer holds',
-      );
-    }
+    const resuming = resumeProblem(leaseFile, lease, members);
+    if (resuming !== null) throw new Error(resuming);
     log(`workload ${workloadId}: resuming the rotation ${leaseFile} records (${rotation.confirmed.length} of ${named.length} confirmed)`);
   }
 

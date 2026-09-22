@@ -2,7 +2,9 @@
 // The handover tool: a tenant chooses a Workload Gateway, or stops one
 // serving (spec §6.5.1, §12; TOON_Network #59). It derives the Gateway
 // Grant from the lease's root secret and seals the message to the gateway's
-// own connector. No key, no signature, no relay, nothing published.
+// own connector. No key, no signature, no relay, nothing published. And it
+// rotates the lease's Continuation Tokens (spec §6.8; TOON_Network #75),
+// which is what takes every grant of the old ones back.
 //
 //   node seal.mjs handover --root-secret <64 hex> --workload <64 hex> \
 //       --standby <pubkey> [--standby <pubkey>…] --http-port <container port> \
@@ -99,7 +101,7 @@ import {
   withdraw,
   withdrawalFor,
 } from './handover.mjs';
-import { parseMember, readLease, membersProblem, rotateLease, sealedAsker } from './rotate.mjs';
+import { membersProblem, parseMember, readLease, resumeProblem, rotateLease, sealedAsker } from './rotate.mjs';
 
 // The payer's configuration, name for name what tools/publisher reads, so a
 // tenant beside a sandbox provider sets one environment for both. There is no
@@ -311,13 +313,14 @@ async function rotate(values) {
   if (values.lease === undefined) refuse('--lease <lease.json> is required: the file holding the workload id and the root secret, which the new one is written back to');
 
   let members;
+  let lease;
   try {
     members = (values.member ?? []).map(parseMember);
-    readLease(values.lease);
+    lease = readLease(values.lease);
   } catch (e) {
     refuse(e.message);
   }
-  const problem = membersProblem(members);
+  const problem = membersProblem(members) ?? resumeProblem(values.lease, lease, members);
   if (problem !== null) refuse(`refused before sending: ${problem}`);
   if (!MNEMONIC) {
     refuse('TOON_MNEMONIC is required: a packet to a provider\'s connector is paid for, even on a free route, and this is what pays for it');
