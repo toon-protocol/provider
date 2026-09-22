@@ -1,0 +1,29 @@
+{
+  "fixture": {
+    "case": "not_tenant.rotate",
+    "description": "A rotate presenting a Continuation Token this lease was not taken with — the OTHER tenant's. Nobody but the lease's own token may rotate it, so nobody can rotate a tenant out of its own lease.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/rotate",
+  "request_body": {
+    "request": {
+      "content": {
+        "next": "50298d09923211780db604d4ccb6d3b1d42e3e02b847f56cc98299829466361e",
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "322e0a76e5bd865675d4a2d9b1cbfcec78af4abd68576759ef79162fdabcf3f2",
+      "expiration": 1700000060,
+      "op": "rotate",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "eb009186cec678774122f758e50deb63590fc491300fea1065d896d1f80cbf70"
+    }
+  },
+  "response_body": {
+    "error": "not_tenant",
+    "message": "this lease was taken with another continuation token"
+  },
+  "response_status": 403,
+  "route": "g.fixture.rotate",
+  "validation_step": "§6.8 step 4: the request MUST present the lease's own token; step 4 does not branch on this route"
+}

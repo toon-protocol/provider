@@ -1,0 +1,37 @@
+{
+  "content": {
+    "next": "50298d09923211780db604d4ccb6d3b1d42e3e02b847f56cc98299829466361e",
+    "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "fixture": {
+    "case": "rotate",
+    "description": "Replaces the lease's Continuation Token on the free `<addr>.rotate` route (spec §6.8): the request presents the CURRENT token, and `next` is the one the lease holds from then on — derived at this provider from a fresh root secret (`constants.rotated_tenant`). The body of `rotate.ok`.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "lease_request"
+  },
+  "packet_body": {
+    "request": {
+      "content": {
+        "next": "50298d09923211780db604d4ccb6d3b1d42e3e02b847f56cc98299829466361e",
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "rotate",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "017627f394590061dd4f370abc0d214cd6230f45bacb697ef9fa033a60122416"
+    }
+  },
+  "packet_body_encoding": "The HTTP request body is this JSON object: the request, unmodified, as the value of the single key `request`. No other key is allowed, and nothing is signed — a Lease Request is a plain JSON object carrying the lease's Continuation Token (spec §6.1, ADR 0016). The connector carries the whole HTTP request inside its sealed envelope; the provider app receives this body as plaintext JSON.",
+  "request": {
+    "content": {
+      "next": "50298d09923211780db604d4ccb6d3b1d42e3e02b847f56cc98299829466361e",
+      "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+    "expiration": 1700000060,
+    "op": "rotate",
+    "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+    "request_id": "017627f394590061dd4f370abc0d214cd6230f45bacb697ef9fa033a60122416"
+  }
+}

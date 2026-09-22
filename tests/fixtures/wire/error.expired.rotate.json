@@ -1,0 +1,29 @@
+{
+  "fixture": {
+    "case": "expired.rotate",
+    "description": "A rotate for a lease that is over (here: terminated), presenting the token it was taken with. `expired` rather than anything about the token: however it ended, the tenant learns the lease is gone.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/rotate",
+  "request_body": {
+    "request": {
+      "content": {
+        "next": "50298d09923211780db604d4ccb6d3b1d42e3e02b847f56cc98299829466361e",
+        "workload_id": "abababababababababababababababababababababababababababababababab"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "rotate",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "15a7947a0984eb371cef9d9071dcc728ba6f84446770d12fee220cee5224bb34"
+    }
+  },
+  "response_body": {
+    "error": "expired",
+    "message": "this lease was terminated; spawn a new one"
+  },
+  "response_status": 409,
+  "route": "g.fixture.rotate",
+  "validation_step": "§6.8 step 5: the lease has not ended"
+}

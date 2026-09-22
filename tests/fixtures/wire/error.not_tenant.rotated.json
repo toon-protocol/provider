@@ -1,0 +1,28 @@
+{
+  "fixture": {
+    "case": "not_tenant.rotated",
+    "description": "Status of the rotated lease presenting the token it was taken with — the one `rotate.ok` replaced. It is a stranger's token now, answered exactly as the other tenant's is.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/status",
+  "request_body": {
+    "request": {
+      "content": {
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "status",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "09bf7ba5a330aada06dbde30910c14b91f28e87d4e67989829b5f446411e5054"
+    }
+  },
+  "response_body": {
+    "error": "not_tenant",
+    "message": "this lease was taken with another continuation token"
+  },
+  "response_status": 403,
+  "route": "g.fixture.status",
+  "validation_step": "§6.1.2 step 4: the request MUST present the token the lease holds now"
+}

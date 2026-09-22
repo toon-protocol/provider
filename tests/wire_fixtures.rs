@@ -84,6 +84,11 @@ const PROVIDER_SECRET: &str = "2222222222222222222222222222222222222222222222222
 /// token is therefore refused (`error.not_tenant`).
 const OTHER_TENANT_ROOT_SECRET: &str =
     "3333333333333333333333333333333333333333333333333333333333333333";
+/// The FRESH root secret the tenant mints when it rotates (spec §6.8): the
+/// `next` token of every rotate fixture is what it derives at the fixture
+/// provider, so the old root secret derives nothing that still works.
+const ROTATED_ROOT_SECRET: &str =
+    "7777777777777777777777777777777777777777777777777777777777777777";
 /// The PUBLISHER: whoever signs an Image Registry entry, a Blob Record or a
 /// Template. Never a provider — spec §8's events are a publisher's, and the
 /// provider only reads them — so it gets a key of its own here.
@@ -399,6 +404,11 @@ fn about(seed: u8) -> Value {
     json!({ "workload_id": workload_id(seed) })
 }
 
+/// A rotate's content (spec §6.8): the workload, and the token it holds next.
+fn rotate_content(seed: u8, next: &ContinuationToken) -> Value {
+    json!({ "workload_id": workload_id(seed), "next": next })
+}
+
 // ── the provider's side: a fixed configuration over faked I/O ────────────────
 
 fn listing(
@@ -681,6 +691,7 @@ fn constants_and_test_keys() {
             },
             "tenant": tenant_root(TENANT_ROOT_SECRET),
             "other_tenant": tenant_root(OTHER_TENANT_ROOT_SECRET),
+            "rotated_tenant": tenant_root(ROTATED_ROOT_SECRET),
             "publisher": key(&keys(PUBLISHER_SECRET)),
             "primary_provider": key(&keys(PRIMARY_SECRET)),
             "standby_provider": key(&keys(STANDBY_SECRET)),
@@ -748,6 +759,14 @@ fn a_lease_request_per_op() {
             "terminate",
             about(0xaa),
             "Ends the lease on the free `<addr>.terminate` route. The body of `terminate.ok`.",
+        ),
+        (
+            "rotate",
+            rotate_content(0xaa, &root(ROTATED_ROOT_SECRET).continuation_for(&provider)),
+            "Replaces the lease's Continuation Token on the free `<addr>.rotate` route (spec \
+             §6.8): the request presents the CURRENT token, and `next` is the one the lease \
+             holds from then on — derived at this provider from a fresh root secret \
+             (`constants.rotated_tenant`). The body of `rotate.ok`.",
         ),
     ];
     for (op, content, description) in cases {
@@ -896,7 +915,7 @@ fn the_routes_a_listing_generates() {
                 "The connector routes this provider's Profile and Listings generate: one paid \
                  `.spawn` and `.extend` per listing version, a `.standby` and a \
                  `.standby.extend` beside them at the listing's `standby_price` when it sells \
-                 Warm Standbys (here `warm` only), then the three free provider-wide routes. A \
+                 Warm Standbys (here `warm` only), then the four free provider-wide routes. A \
                  listing that prices no standby gets neither standby row: a connector must \
                  never terminate a route the provider did not price. `prefix` is what a tenant \
                  pays; `handler_url` is the provider's own HTTP path behind its connector and \
@@ -924,6 +943,7 @@ fn the_routes_a_listing_generates() {
                 "availability": "<ilp_address>.availability",
                 "status": "<ilp_address>.status",
                 "terminate": "<ilp_address>.terminate",
+                "rotate": "<ilp_address>.rotate",
             },
             "routes": rows,
         }),
@@ -1516,6 +1536,360 @@ async fn a_lease_lifecycle_request_and_response_per_route() {
     golden(
         "error.expired.json",
         with_validation_step(doc, "§6.3: the lease MUST be running"),
+    );
+}
+
+/// Rotation (spec §6.8, TOON_Network #70): the request and its answer, every
+/// refusal in the order the route weighs them, and what `status` says to the
+/// old token, a grant of the old token and the new token afterwards.
+///
+/// One story over one lease, `aa`, taken with the fixture tenant's token and
+/// rotated to the token `constants.rotated_tenant` derives here; a second
+/// lease, `ab`, is terminated first so the `expired` refusal is about a lease
+/// that is over rather than one this story rotated.
+#[tokio::test]
+async fn a_rotation_and_its_refusals_in_validation_order() {
+    let f = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let aa = 0xaa;
+    let provider = f.provider_pubkey();
+    let current = f.tenant.continuation_for(&provider);
+    let next = root(ROTATED_ROOT_SECRET).continuation_for(&provider);
+    let rotate_route = route("rotate");
+    let rotate_request = |root: &RootSecret, content: &Value, label: &str| {
+        envelope(&lease_request(
+            root,
+            &provider,
+            "rotate",
+            content,
+            NOW + TTL,
+            label,
+        ))
+    };
+
+    let (status, response) = post(
+        &f.app,
+        "/listings/basic/v1/spawn",
+        envelope(&f.spawn_request(aa, "rotate.spawn")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+
+    // ── the content (§6.8 step 2): exactly { workload_id, next } ─────────
+    let expires_at = NOW + GRANT_TTL;
+    let grant = current.gateway_sub(expires_at);
+    let mut asserted = rotate_content(aa, &next);
+    asserted["gateway_expires_at"] = json!(expires_at);
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "error",
+            "invalid_request.rotate_grant",
+            "A WORKLOAD GATEWAY trying to rotate the lease it was delegated to read: its \
+             grant presented as `continuation`, and the moment it was derived for named in \
+             `gateway_expires_at` (spec §6.5.1). That field is named by `status` content and \
+             by nothing else, so the request is refused on its shape before any lease is \
+             looked at. A gateway that leaves the field out presents a value that is not the \
+             lease's token, which is `not_tenant`: only the lease's own token may rotate it.",
+        ),
+        &rotate_route,
+        "/rotate",
+        envelope(&lease_request_with(
+            &grant,
+            &provider,
+            "rotate",
+            &asserted,
+            NOW + TTL,
+            "error.invalid_request.rotate_grant",
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", response);
+    assert_eq!(error_of(&response), "invalid_request");
+    golden(
+        "error.invalid_request.rotate_grant.json",
+        with_validation_step(
+            doc,
+            "§6.8 step 2: the content is exactly { workload_id, next }; gateway_expires_at is \
+             named by status content alone",
+        ),
+    );
+
+    let mut malformed = rotate_content(aa, &next);
+    malformed["next"] = json!(serde_json::to_value(&next)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_uppercase());
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "error",
+            "invalid_request.rotate_malformed_next",
+            "A rotate whose `next` is not 32 bytes as 64 LOWERCASE hex characters — here the \
+             right token in upper case. A corrupt rotation is refused rather than guessed at, \
+             and the refusal quotes no token back.",
+        ),
+        &rotate_route,
+        "/rotate",
+        rotate_request(
+            &f.tenant,
+            &malformed,
+            "error.invalid_request.rotate_malformed_next",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", response);
+    assert_eq!(error_of(&response), "invalid_request");
+    golden(
+        "error.invalid_request.rotate_malformed_next.json",
+        with_validation_step(
+            doc,
+            "§6.8 step 2: next is 32 bytes as 64 lowercase hex characters",
+        ),
+    );
+
+    // ── the lease (§6.8 step 3) ──────────────────────────────────────────
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "error",
+            "unknown_workload.rotate",
+            "A rotate for a workload id this provider holds no lease for.",
+        ),
+        &rotate_route,
+        "/rotate",
+        rotate_request(
+            &f.tenant,
+            &rotate_content(0xff, &next),
+            "error.unknown_workload.rotate",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{}", response);
+    assert_eq!(error_of(&response), "unknown_workload");
+    golden(
+        "error.unknown_workload.rotate.json",
+        with_validation_step(doc, "§6.8 step 3: the workload id names a lease here"),
+    );
+
+    // ── the token (§6.8 step 4, §6.1.2 step 4 with no branch) ────────────
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "error",
+            "not_tenant.rotate",
+            "A rotate presenting a Continuation Token this lease was not taken with — the \
+             OTHER tenant's. Nobody but the lease's own token may rotate it, so nobody can \
+             rotate a tenant out of its own lease.",
+        ),
+        &rotate_route,
+        "/rotate",
+        rotate_request(
+            &f.other_tenant,
+            &rotate_content(aa, &next),
+            "error.not_tenant.rotate",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{}", response);
+    assert_eq!(error_of(&response), "not_tenant");
+    golden(
+        "error.not_tenant.rotate.json",
+        with_validation_step(
+            doc,
+            "§6.8 step 4: the request MUST present the lease's own token; step 4 does not \
+             branch on this route",
+        ),
+    );
+
+    // ── the new token (§6.8 step 6) ──────────────────────────────────────
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "error",
+            "invalid_request.rotate_same_token",
+            "A rotate presenting the lease's current token and naming that same token as \
+             `next`: a no-op dressed as a rotation, refused rather than answered \
+             `rotated: true`. It is weighed only after the request has proved it holds the \
+             token, so it is no oracle for anyone guessing one.",
+        ),
+        &rotate_route,
+        "/rotate",
+        rotate_request(
+            &f.tenant,
+            &rotate_content(aa, &current),
+            "error.invalid_request.rotate_same_token",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", response);
+    assert_eq!(error_of(&response), "invalid_request");
+    golden(
+        "error.invalid_request.rotate_same_token.json",
+        with_validation_step(doc, "§6.8 step 6: next is not the token the lease holds"),
+    );
+
+    // ── the rotation ─────────────────────────────────────────────────────
+    let rotation = rotate_request(&f.tenant, &rotate_content(aa, &next), "rotate.ok");
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "rotate",
+            "ok",
+            "Rotation (spec §6.8) by the tenant with `lease_request.rotate` as its body: it \
+             presents the lease's CURRENT token and names `next`. The provider stores `next` \
+             in place of the old token and persists the lease before it answers. The answer \
+             is `{ workload_id, rotated: true }` and carries no token. From here the old \
+             token is `not_tenant` and every grant derived from it is `bad_grant` \
+             (`error.not_tenant.rotated`, `error.bad_grant.rotated`), while `next` reads the \
+             lease (`status.rotated`). There is no grace period and nothing is published.",
+        ),
+        &rotate_route,
+        "/rotate",
+        rotation.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(
+        response,
+        json!({ "workload_id": workload_id(aa), "rotated": true })
+    );
+    golden("rotate.ok.json", doc);
+
+    // ── replay (§6.1.2 step 3) ───────────────────────────────────────────
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "error",
+            "stale_request.rotate_replay",
+            "`rotate.ok`'s request body sent again, byte for byte. A captured rotation \
+             cannot be applied a second time: the replay set refuses its `request_id` before \
+             its token is weighed. A tenant that lost the answer to a rotation does not \
+             retry it — it asks `status` with the NEW token, and acceptance means the \
+             rotation took effect (§6.8).",
+        ),
+        &rotate_route,
+        "/rotate",
+        rotation,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", response);
+    assert_eq!(error_of(&response), "stale_request");
+    golden(
+        "error.stale_request.rotate_replay.json",
+        with_validation_step(doc, "§6.8 step 1 (§6.1.2 step 3): request_id is unseen"),
+    );
+
+    // ── what the lease answers afterwards ────────────────────────────────
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "status",
+            "rotated",
+            "Status of the rotated lease presenting the NEW token (`next` in `rotate.ok`). \
+             The answer is what `status.running` answered before the rotation, byte for \
+             byte: rotation replaces the token and changes nothing else about the lease.",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.about_request(&root(ROTATED_ROOT_SECRET), "status", aa, "status.rotated")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["state"], "running");
+    golden("status.rotated.json", doc);
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "error",
+            "not_tenant.rotated",
+            "Status of the rotated lease presenting the token it was taken with — the one \
+             `rotate.ok` replaced. It is a stranger's token now, answered exactly as the \
+             other tenant's is.",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.about_request(&f.tenant, "status", aa, "error.not_tenant.rotated")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{}", response);
+    assert_eq!(error_of(&response), "not_tenant");
+    golden(
+        "error.not_tenant.rotated.json",
+        with_validation_step(
+            doc,
+            "§6.1.2 step 4: the request MUST present the token the lease holds now",
+        ),
+    );
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "error",
+            "bad_grant.rotated",
+            "A Workload Gateway's status on the rotated lease, presenting the grant the \
+             tenant derived from the token `rotate.ok` replaced — the same grant \
+             `status.delegated` shows being admitted. The provider recomputes a grant from \
+             whatever token it stores, and it stores only the new one, so every grant of \
+             the old token stopped working at the rotation. A tenant that keeps its gateway \
+             hands it grants derived from the new token (§12).",
+        ),
+        &route("status"),
+        "/status",
+        envelope(&f.delegated_request(&grant, aa, expires_at, "error.bad_grant.rotated")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{}", response);
+    assert_eq!(error_of(&response), "bad_grant");
+    golden(
+        "error.bad_grant.rotated.json",
+        with_validation_step(
+            doc,
+            "§6.5.1 step 3: the presented value MUST be the grant the lease's CURRENT token \
+             derives for the moment the request asserts",
+        ),
+    );
+
+    // ── an ended lease (§6.8 step 5) ─────────────────────────────────────
+    let ab = 0xab;
+    let (status, response) = post(
+        &f.app,
+        "/listings/basic/v1/spawn",
+        envelope(&f.spawn_request(ab, "rotate.expired.spawn")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    let (status, response) = post(
+        &f.app,
+        "/terminate",
+        envelope(&f.about_request(&f.tenant, "terminate", ab, "rotate.expired.terminate")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "error",
+            "expired.rotate",
+            "A rotate for a lease that is over (here: terminated), presenting the token it \
+             was taken with. `expired` rather than anything about the token: however it \
+             ended, the tenant learns the lease is gone.",
+        ),
+        &rotate_route,
+        "/rotate",
+        rotate_request(
+            &f.tenant,
+            &rotate_content(ab, &next),
+            "error.expired.rotate",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{}", response);
+    assert_eq!(error_of(&response), "expired");
+    golden(
+        "error.expired.rotate.json",
+        with_validation_step(doc, "§6.8 step 5: the lease has not ended"),
     );
 }
 

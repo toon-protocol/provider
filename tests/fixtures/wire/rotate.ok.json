@@ -1,0 +1,28 @@
+{
+  "fixture": {
+    "case": "ok",
+    "description": "Rotation (spec §6.8) by the tenant with `lease_request.rotate` as its body: it presents the lease's CURRENT token and names `next`. The provider stores `next` in place of the old token and persists the lease before it answers. The answer is `{ workload_id, rotated: true }` and carries no token. From here the old token is `not_tenant` and every grant derived from it is `bad_grant` (`error.not_tenant.rotated`, `error.bad_grant.rotated`), while `next` reads the lease (`status.rotated`). There is no grace period and nothing is published.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "rotate"
+  },
+  "http_path": "/rotate",
+  "request_body": {
+    "request": {
+      "content": {
+        "next": "50298d09923211780db604d4ccb6d3b1d42e3e02b847f56cc98299829466361e",
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "rotate",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "9632458c69e425c5acd35ec8da10c8e17d41d3c5d577620f9c40caa7d00f5904"
+    }
+  },
+  "response_body": {
+    "rotated": true,
+    "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "response_status": 200,
+  "route": "g.fixture.rotate"
+}

@@ -1,0 +1,30 @@
+{
+  "fixture": {
+    "case": "invalid_request.rotate_grant",
+    "description": "A WORKLOAD GATEWAY trying to rotate the lease it was delegated to read: its grant presented as `continuation`, and the moment it was derived for named in `gateway_expires_at` (spec §6.5.1). That field is named by `status` content and by nothing else, so the request is refused on its shape before any lease is looked at. A gateway that leaves the field out presents a value that is not the lease's token, which is `not_tenant`: only the lease's own token may rotate it.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/rotate",
+  "request_body": {
+    "request": {
+      "content": {
+        "gateway_expires_at": 1700086400,
+        "next": "50298d09923211780db604d4ccb6d3b1d42e3e02b847f56cc98299829466361e",
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "d86f4764fa750ebd0a7f27303878c0b31afd941de27960fe538649f376a3d10f",
+      "expiration": 1700000060,
+      "op": "rotate",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "234bc13a91ca2ed24a92b25a33cb0303c0164148cc7dc597bb236438f8e8270c"
+    }
+  },
+  "response_body": {
+    "error": "invalid_request",
+    "message": "rotate content: unknown field `gateway_expires_at`, expected `workload_id` or `next`"
+  },
+  "response_status": 400,
+  "route": "g.fixture.rotate",
+  "validation_step": "§6.8 step 2: the content is exactly { workload_id, next }; gateway_expires_at is named by status content alone"
+}

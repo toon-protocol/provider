@@ -41,6 +41,10 @@
     "public_key": "2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
     "secret_key": "4444444444444444444444444444444444444444444444444444444444444444"
   },
+  "rotated_tenant": {
+    "continuation_at_provider": "50298d09923211780db604d4ccb6d3b1d42e3e02b847f56cc98299829466361e",
+    "root_secret": "7777777777777777777777777777777777777777777777777777777777777777"
+  },
   "signing": {
     "applies_to": "the published events only. A Lease Request is signed by nobody (spec §6.1, ADR 0016).",
     "aux_rand": "32 zero bytes, so every fixture signature is reproducible; real signers use fresh randomness",

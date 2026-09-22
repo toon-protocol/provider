@@ -1,0 +1,29 @@
+{
+  "fixture": {
+    "case": "invalid_request.rotate_malformed_next",
+    "description": "A rotate whose `next` is not 32 bytes as 64 LOWERCASE hex characters — here the right token in upper case. A corrupt rotation is refused rather than guessed at, and the refusal quotes no token back.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/rotate",
+  "request_body": {
+    "request": {
+      "content": {
+        "next": "50298D09923211780DB604D4CCB6D3B1D42E3E02B847F56CC98299829466361E",
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "rotate",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "d3693f8a6b761ce80af84055b5a71af32636b99d0aee192c5a337577355bdffc"
+    }
+  },
+  "response_body": {
+    "error": "invalid_request",
+    "message": "rotate content: a continuation token is 64 lowercase hex characters"
+  },
+  "response_status": 400,
+  "route": "g.fixture.rotate",
+  "validation_step": "§6.8 step 2: next is 32 bytes as 64 lowercase hex characters"
+}
