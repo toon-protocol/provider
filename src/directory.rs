@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
 use crate::nostr::kinds::{K_BLOB, K_LIVENESS, K_PROFILE, K_TAKEOVER};
+use crate::outbound_guard::OutboundGuard;
 use crate::outbound_proxy::{http_client, is_private_url, OutboundProxy};
 
 /// The `<kind>:<pubkey>:<d>` coordinate of an addressable event, as a
@@ -244,6 +245,8 @@ pub struct NullDirectory {
     /// The `anon` SOCKS port every relay read leaves through on a Hidden
     /// Provider (spec §10). `None` — direct — on every other provider.
     proxy: Option<OutboundProxy>,
+    /// Where a TENANT's relay hint may point (TOON_Network#107).
+    relay_guard: OutboundGuard,
 }
 
 impl NullDirectory {
@@ -251,6 +254,7 @@ impl NullDirectory {
     /// Records.
     pub fn new(relay_set: Vec<String>) -> Self {
         Self {
+            relay_guard: relay_hint_guard(&relay_set),
             relay_set,
             proxy: None,
         }
@@ -284,7 +288,7 @@ impl Directory for NullDirectory {
     /// A provider with no publisher can still READ: an Image Registry
     /// entry lives on whatever relay the spawn named, which needs no money.
     async fn get_image_entry(&self, address: &str, relay: &str) -> Result<Option<Event>> {
-        fetch_addressable(address, relay, self.proxy.as_ref()).await
+        fetch_addressable(address, relay, self.proxy.as_ref(), &self.relay_guard).await
     }
 
     /// The same free search of the Relay Set the publishing Directory does:
@@ -577,15 +581,42 @@ async fn fetch_blob_records(
     Ok(events)
 }
 
+/// Where a TENANT's relay hint may point: nowhere inside the operator's own
+/// network, unless it is a relay the operator themselves configured
+/// (spec §8.4, ADR 0022, TOON_Network#107).
+///
+/// The Relay Set is exempt by AUTHORITY — host AND port — the way
+/// TOON_Network#105 exempts `gateway_url_pattern`: a provider that already
+/// publishes to `ws://relay:7100` on its own compose network dials it every
+/// cadence, so a tenant naming it asks for nothing new. It is the ONLY
+/// exemption, and it needs no config key: an operator whose relay is
+/// internal has already written it down, in `relay_set`.
+fn relay_hint_guard(relay_set: &[String]) -> OutboundGuard {
+    relay_set
+        .iter()
+        .fold(OutboundGuard::default(), |guard, relay| {
+            guard.exempting(Some(relay))
+        })
+}
+
 /// One free NIP-01 REQ to `relay` for the addressable event at `address`,
 /// newest publication first — two publications of one `d` may both be on
 /// the wire while the older one is being replaced.
+///
+/// The one relay URL on this port a TENANT chooses, so the one that is
+/// guarded: `guard` refuses it before `add_relay`, and the refusal names the
+/// URL the tenant wrote and never what it resolved to (TOON_Network#107).
 async fn fetch_addressable(
     address: &str,
     relay: &str,
     proxy: Option<&OutboundProxy>,
+    guard: &OutboundGuard,
 ) -> Result<Option<Event>> {
     let (kind, pubkey, d) = parse_coordinate(address)?;
+    // On a Hidden Provider the SOCKS proxy resolves every name, and this
+    // process resolves none (spec §10, ADR 0008): an address literal is
+    // still checked, a name is the proxy's to resolve.
+    guard.check_relay(relay, proxy.is_none()).await?;
     let client = relay_client(proxy);
     client
         .add_relay(relay)
@@ -667,6 +698,8 @@ pub struct ConnectorDirectory {
     /// hop to the connector. `None` — direct, and named to nobody — on every
     /// other provider.
     proxy: Option<OutboundProxy>,
+    /// Where a TENANT's relay hint may point (TOON_Network#107).
+    relay_guard: OutboundGuard,
 }
 
 /// How long a paid publication may take: a channel-backed packet through a
@@ -684,6 +717,7 @@ impl ConnectorDirectory {
     pub fn new(publish_url: impl Into<String>, relay_set: Vec<String>) -> Result<Self> {
         Ok(Self {
             publish_url: publish_url.into(),
+            relay_guard: relay_hint_guard(&relay_set),
             relay_set,
             http: http_client(None, PUBLISH_TIMEOUT, "the directory publisher")?,
             proxy: None,
@@ -773,7 +807,7 @@ impl Directory for ConnectorDirectory {
     }
 
     async fn get_image_entry(&self, address: &str, relay: &str) -> Result<Option<Event>> {
-        fetch_addressable(address, relay, self.proxy.as_ref()).await
+        fetch_addressable(address, relay, self.proxy.as_ref(), &self.relay_guard).await
     }
 
     async fn find_blob_records(&self, digest: &str) -> Result<Vec<Event>> {

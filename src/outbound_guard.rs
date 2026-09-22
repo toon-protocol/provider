@@ -1,5 +1,5 @@
-// Where an image fetch is allowed to go (spec §8.4, ADR 0022,
-// TOON_Network#105).
+// Where a tenant's image may send this provider (spec §8.4, ADR 0022,
+// TOON_Network#105, TOON_Network#107).
 //
 // A spawn's `image.reference` names the registry, and the provider dials it:
 // `reference.example/team/app` becomes `https://reference.example/v2/...`.
@@ -26,6 +26,14 @@
 // second lookup to rebind. A host written as an address literal never
 // reaches a resolver at all, so `check_url` refuses those before the request
 // is sent.
+//
+// A spawn's `registry_entry.relay` is the same exposure over a different
+// transport: a tenant-chosen URL this provider dials as a websocket to read
+// the Image Registry entry, on the same free `availability` route. It gets
+// the same rule (`check_relay`), with one difference the transport forces —
+// nostr-sdk resolves and dials the name itself, so the name is resolved here
+// and refused before the dial rather than resolved ONCE for both. What that
+// costs is written out on `check_relay`.
 //
 // Two things this does NOT cover, on purpose:
 //
@@ -334,6 +342,96 @@ impl OutboundGuard {
         self.check_url(url)
     }
 
+    /// The same rule for the one outbound address a tenant names that is NOT
+    /// an image fetch: the `relay` of a spawn's `registry_entry`, dialled as
+    /// a websocket to read the entry (spec §6.2 step 5, TOON_Network#107).
+    ///
+    /// `ws` or `wss` and nothing else: a relay speaks NIP-01 over a
+    /// websocket, and every other scheme a URL parser accepts is a different
+    /// protocol being reached through this door.
+    ///
+    /// Why this is a check and not a resolver, unlike the image path: the
+    /// websocket is nostr-sdk's, which resolves the name itself inside
+    /// `connect` and hands the addresses to nobody. There is no seam to be
+    /// the resolver of, so the name is resolved HERE and refused before
+    /// `add_relay` — which leaves a window: the lookup this makes and the
+    /// lookup the dial makes are two lookups, and a name whose owner answers
+    /// them differently (DNS rebinding) is dialled on the second answer.
+    /// Two things narrow it as far as a check can. EVERY address must pass,
+    /// not merely one — the dialler tries them all (RFC 8305 happy
+    /// eyeballs), so one private address among public ones is a private
+    /// address that gets dialled. And a name that cannot be resolved at all
+    /// is refused rather than passed on: a resolver that answers SERVFAIL
+    /// once and the truth once would otherwise be a bypass that needs no
+    /// race to win.
+    ///
+    /// `resolve_names` is false on a Hidden Provider, where the SOCKS proxy
+    /// resolves every name and this process must resolve none (spec §10,
+    /// ADR 0008) — the same trade `outbound_proxy` makes for image fetches,
+    /// for the same reason: an exit relay's idea of "private" is not the
+    /// operator's network, and a lookup here would undo the hiding that is
+    /// the point. An address literal is still checked.
+    pub async fn check_relay(&self, relay: &str, resolve_names: bool) -> Result<()> {
+        let url = Url::parse(relay)
+            .with_context(|| format!("the relay hint {:?} is not a URL", relay))?;
+        if !matches!(url.scheme(), "ws" | "wss") {
+            bail!(
+                "the relay hint {} is not ws or wss: a provider reads an Image Registry entry \
+                 over a websocket and nothing else (spec §8.4, TOON_Network#107)",
+                relay
+            );
+        }
+        let Some(host) = url.host() else {
+            bail!("the relay hint {} names no relay to read from", relay);
+        };
+        // By AUTHORITY, not by name: an operator whose relay is at
+        // `ws://relay:7100` has said that relay is theirs, not that the rest
+        // of the host's ports are.
+        if self.exempts_host(
+            &host.to_string().to_ascii_lowercase(),
+            url.port_or_known_default(),
+        ) {
+            return Ok(());
+        }
+        let refuse = || {
+            anyhow!(
+                "the relay hint {} is not at a publicly routable address: this provider does not \
+                 read an Image Registry entry from inside its operator's own network (spec §8.4, \
+                 TOON_Network#107). An operator whose relay is internal names it in relay_set",
+                relay
+            )
+        };
+        match host {
+            Host::Ipv4(ip) => self.allow_addr(IpAddr::V4(ip)).ok_or_else(refuse),
+            Host::Ipv6(ip) => self.allow_addr(IpAddr::V6(ip)).ok_or_else(refuse),
+            Host::Domain(name) if resolve_names => {
+                let addrs = resolve_all(name).await.map_err(|e| {
+                    anyhow!(
+                        "the relay hint {} could not be resolved, so this provider will not dial \
+                         it (TOON_Network#107): {}",
+                        relay,
+                        e
+                    )
+                })?;
+                if addrs.is_empty()
+                    || !addrs
+                        .iter()
+                        .all(|addr| self.allow_addr(addr.ip()).is_some())
+                {
+                    return Err(refuse());
+                }
+                Ok(())
+            }
+            Host::Domain(_) => Ok(()),
+        }
+    }
+
+    /// `Some(())` when a packet to `ip` may leave: publicly routable, or
+    /// somewhere the operator has exempted.
+    fn allow_addr(&self, ip: IpAddr) -> Option<()> {
+        (is_publicly_routable(ip) || self.exempts_addr(ip)).then_some(())
+    }
+
     /// The redirect policy for a client that fetches images: every hop is
     /// checked like the first request, and the chain is capped.
     pub fn redirect_policy(self: &Arc<Self>) -> reqwest::redirect::Policy {
@@ -525,6 +623,110 @@ mod tests {
             .is_ok());
         // https is not enough on its own.
         assert!(guard.check_realm(&url("https://127.0.0.1/token")).is_err());
+    }
+
+    #[tokio::test]
+    async fn a_relay_hint_is_ws_or_wss_and_nothing_else() {
+        let guard = OutboundGuard::default();
+        for written in [
+            "http://relay.example",
+            "https://relay.example",
+            "socks5h://relay.example",
+            "file:///etc/passwd",
+            "redis://203.0.113.7:6379",
+        ] {
+            let why = guard
+                .check_relay(written, true)
+                .await
+                .expect_err(written)
+                .to_string();
+            assert!(why.contains("ws or wss"), "{}: {}", written, why);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_relay_hint_at_the_operators_own_network_is_refused() {
+        let guard = OutboundGuard::default();
+        for written in [
+            "ws://127.0.0.1:7100",
+            "wss://169.254.169.254",
+            "ws://10.0.0.5:7100",
+            "ws://[::1]:7100",
+            "ws://[::ffff:127.0.0.1]:7100",
+            // A name is judged on what it resolves to, and the refusal
+            // names the NAME.
+            "ws://localhost:7100",
+        ] {
+            let why = guard
+                .check_relay(written, true)
+                .await
+                .expect_err(written)
+                .to_string();
+            assert!(why.contains(written), "{}: {}", written, why);
+        }
+        assert!(guard.check_relay("wss://203.0.113.7", true).await.is_ok());
+        assert!(guard
+            .check_relay("ws://[2001:db8::1]:7100", true)
+            .await
+            .is_ok());
+    }
+
+    /// The refusal is about the source the tenant named. What the operator's
+    /// DNS says about it is not the tenant's to learn.
+    #[tokio::test]
+    async fn a_refused_relay_hint_never_names_the_address_it_resolved_to() {
+        let why = OutboundGuard::default()
+            .check_relay("ws://localhost:7100", true)
+            .await
+            .expect_err("localhost resolves inward")
+            .to_string();
+        assert!(why.contains("ws://localhost:7100"), "{}", why);
+        assert!(
+            !why.contains("127.0.0.1") && !why.contains("::1"),
+            "{}",
+            why
+        );
+    }
+
+    /// A name nobody answers for is refused rather than dialled: a resolver
+    /// that fails once and answers the truth once would otherwise be a
+    /// bypass that needs no race to win.
+    #[tokio::test]
+    async fn a_relay_hint_that_does_not_resolve_is_refused() {
+        assert!(OutboundGuard::default()
+            .check_relay("ws://relay.invalid:7100", true)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn the_operators_own_relay_is_exempt_by_authority() {
+        let guard = OutboundGuard::default().exempting(Some("ws://relay:7100"));
+        assert!(guard.check_relay("ws://relay:7100", true).await.is_ok());
+        // The rest of that host is not the operator's relay.
+        assert!(guard.check_relay("ws://relay:9944", true).await.is_err());
+        // And the scheme rule still applies to it.
+        assert!(guard.check_relay("http://relay:7100", true).await.is_err());
+    }
+
+    /// A Hidden Provider resolves no name itself — the `anon` SOCKS proxy
+    /// does (spec §10, ADR 0008) — so a name passes and a literal is still
+    /// checked.
+    #[tokio::test]
+    async fn a_hidden_provider_checks_literals_and_leaves_names_to_the_proxy() {
+        let guard = OutboundGuard::default();
+        assert!(guard
+            .check_relay("ws://ykjcp2i3ur4bnkmcrt5x.anyone:7100", false)
+            .await
+            .is_ok());
+        assert!(guard
+            .check_relay("ws://localhost:7100", false)
+            .await
+            .is_ok());
+        assert!(guard
+            .check_relay("ws://127.0.0.1:7100", false)
+            .await
+            .is_err());
     }
 
     #[test]

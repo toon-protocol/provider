@@ -16,6 +16,7 @@ use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+use common::relay::StubRelay;
 use common::{sha256_hex, valid_digest, valid_manifest_bytes, FakeBackend};
 use toon_provider::nostr::continuation::ContinuationToken;
 use toon_provider::nostr::wire::{Resources, Role};
@@ -58,12 +59,16 @@ struct Harness {
 
 /// A harness whose lease table starts from `state_path` (empty unless the
 /// caller pre-populates it — see `a_full_listing_is_no_capacity`) and whose
-/// image fetches all go to `registry`.
+/// image fetches all go to `registry`. `relay_set` is this provider's OWN
+/// Relay Set: empty unless a test means to hint a `registry_entry` at a
+/// relay, which a tenant may only do at an address that is publicly routable
+/// or at one of these (TOON_Network#107).
 async fn harness_over(
     listings: Vec<Listing>,
     image_policy: ImagePolicyConfig,
     registry: MockServer,
     state_path: String,
+    relay_set: Vec<String>,
 ) -> Harness {
     let backend = FakeBackend::new();
     let config = ProviderConfig {
@@ -75,6 +80,7 @@ async fn harness_over(
         ssh_port_start: Some(40000),
         workload_port_start: 41000,
         lease_state_path: state_path,
+        relay_set,
         image_policy: ImagePolicyConfig {
             registry_url_override: Some(registry.uri()),
             ..image_policy
@@ -101,7 +107,7 @@ async fn harness(
         .join("leases.json")
         .to_string_lossy()
         .into_owned();
-    harness_over(listings, image_policy, registry, state_path).await
+    harness_over(listings, image_policy, registry, state_path, vec![]).await
 }
 
 fn image_body(listing: &str, version: u32, reference: &str, digest: &str) -> Value {
@@ -359,6 +365,7 @@ async fn a_full_listing_is_no_capacity() {
         ImagePolicyConfig::default(),
         registry,
         state_path,
+        vec![],
     )
     .await;
     // `restore_leases` only keeps a persisted lease if the backend agrees
@@ -474,17 +481,30 @@ async fn an_image_registry_form_answers_refused_image_before_a_tenant_pays() {
     // Image Registry forms are resolved: here the relay hinted at holds no
     // such entry, and this provider's Relay Set holds no Blob Record for
     // the bare digest.
+    //
+    // The relay hinted at is the provider's OWN, which is how a hint at a
+    // relay on loopback is dialled at all (TOON_Network#107) — and it holds
+    // nothing, which is the answer this test is about.
     let registry = common::stub_registry().await;
-    let h = harness(
+    let relay = StubRelay::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir
+        .keep()
+        .join("leases.json")
+        .to_string_lossy()
+        .into_owned();
+    let h = harness_over(
         vec![listing("basic", 1, 2, "amd64")],
         ImagePolicyConfig::default(),
         registry,
+        state_path,
+        vec![relay.url()],
     )
     .await;
 
     let entry = json!({
         "address": "30434:4444444444444444444444444444444444444444444444444444444444444444:web:1.0",
-        "relay": "wss://relay.example",
+        "relay": relay.url(),
     });
     for (label, image, expected) in [
         (
