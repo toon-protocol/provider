@@ -97,3 +97,14 @@ test('a non-positive part size is refused', () => {
   assert.throws(() => planBlobRecord({ bytes: bytesOf('x'), partSize: 0 }), /positive integer/);
   assert.throws(() => planBlobRecord({ bytes: bytesOf('x'), partSize: -1 }), /positive integer/);
 });
+
+test('the threshold is the SIGNED event: at the sandbox part size 689 parts stay inline and the 690th pages', () => {
+  // The same boundary infra/sandbox/scripts/publisher/blob.mjs measures on
+  // the whole signed event — tags, `created_at`, and the part list escaped
+  // inside `content`. Measured on the content alone, a record of ~780 parts
+  // would stay inline and be refused by the store it was planned for.
+  const partSize = 102_400;
+  const at = (n) => planBlobRecord({ bytes: Buffer.alloc(n * partSize), partSize });
+  assert.ok(at(689).parts, '689 parts fit one data item inline');
+  assert.ok(at(690).pages, '690 parts do not, and page');
+});

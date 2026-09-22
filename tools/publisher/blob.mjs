@@ -54,7 +54,21 @@ export function splitParts(bytes, partSize) {
 const ARWEAVE_TXID_LEN = 43;
 const templatePart = (size) => ({ txid: 'T'.repeat(ARWEAVE_TXID_LEN), sha256: 'h'.repeat(64), size });
 
-/** How many bytes the SIGNED record JSON would be, over `parts` (real txids and hashes; only their lengths matter here). */
+// A Blob Record's kind (spec §8.2) and the label every toon.network event
+// carries: the record is measured as the event it will be, tags and all.
+const K_BLOB = 30435;
+const TOON_LABEL = 'toon.network';
+// Any ten-digit `created_at`: every moment from 2001 to 2286 is ten digits.
+const CREATED_AT_PLACEHOLDER = 1_700_000_000;
+
+/**
+ * How many bytes the SIGNED record JSON would be, over `parts` (real txids
+ * and hashes; only their lengths matter here) — the WHOLE event, measured as
+ * the store will receive it: `kind`, `created_at`, the `d`/`x`/`L` tags, and
+ * `content` as the escaped JSON string it is inside the event, where every
+ * quote of the part list costs two bytes. Measuring the content alone would
+ * keep a record inline that the store then refuses.
+ */
 function signedRecordBytes({ digest, size, partSize, parts }) {
   const content = JSON.stringify({
     digest,
@@ -62,12 +76,19 @@ function signedRecordBytes({ digest, size, partSize, parts }) {
     part_size: partSize,
     parts: parts.map((p) => templatePart(p.size)),
   });
-  // A signed event is the content plus `id` (64 hex), `pubkey` (64 hex) and
-  // `sig` (128 hex): the JSON grows by exactly these three fields, however
-  // the caller ends up sealing them in (spec §8.2's Blob Record is signed
-  // by whoever uploaded the parts — never this tool, which has no key).
+  const hex = digest.slice('sha256:'.length);
+  const unsigned = JSON.stringify({
+    kind: K_BLOB,
+    created_at: CREATED_AT_PLACEHOLDER,
+    tags: [['d', digest], ['x', hex], ['L', TOON_LABEL]],
+    content,
+  });
+  // A signed event is that plus `id` (64 hex), `pubkey` (64 hex) and `sig`
+  // (128 hex): the JSON grows by exactly these three fields, however the
+  // caller ends up sealing them in (spec §8.2's Blob Record is signed by
+  // whoever uploaded the parts — never this tool, which has no key).
   const eventOverhead = JSON.stringify({ id: 'a'.repeat(64), pubkey: 'b'.repeat(64), sig: 'c'.repeat(128) }).length - 1;
-  return content.length + eventOverhead;
+  return unsigned.length + eventOverhead;
 }
 
 /** How many part objects fit one page's own upload (no event envelope: a page is raw bytes, not a signed event). */
