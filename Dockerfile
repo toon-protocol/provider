@@ -7,7 +7,13 @@
 #
 # Workloads then run on the HOST daemon, and their SSH forwards and ports are
 # published on the host — so `public_ip` is the host's address.
-FROM rust:1.85-slim-bookworm AS builder
+# 1.90, not 1.85. `usize::is_multiple_of` stabilised in 1.87 and the fetcher
+# uses it (src/provider/fetcher.rs), so the old pin could not build this crate
+# at all -- `cargo build --release` failed with E0658 while every developer's
+# toolchain and CI, which run a current stable, were green. A deploy bundle
+# that builds the app from the checkout (deploy/README.md) is what turned that
+# into a visible failure rather than a latent one.
+FROM rust:1.90-slim-bookworm AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./

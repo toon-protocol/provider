@@ -653,8 +653,10 @@ impl ProviderConfig {
                 .connector_seal_key
                 .strip_prefix("0x")
                 .unwrap_or(&self.connector_seal_key);
-            // `%` rather than `is_multiple_of`: the release image builds on
-            // the Rust in Dockerfile, where that method is still unstable.
+            // `%` rather than `is_multiple_of`, which needs no justification
+            // any more: the Dockerfile's Rust moved to 1.90 and the method has
+            // been stable since 1.87. Left as it is because parity of a length
+            // reads the same either way, and the lint below says so.
             #[allow(clippy::manual_is_multiple_of)]
             let odd = digits.len() % 2 != 0;
             if digits.len() < 64 || odd || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
