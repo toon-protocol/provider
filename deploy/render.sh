@@ -9,11 +9,29 @@
 #
 # Every output is gitignored. Edit the templates.
 #
+#   ./render.sh                  everything
+#   ./render.sh --connector-only everything EXCEPT provider.toml
+#
+# The second mode exists for one moment in bootstrap.sh: provider.toml cannot
+# be rendered until the connector has said what its sealing key is, and the
+# connector cannot say until it is running. So the connector's own files are
+# rendered first, it is started alone, asked, and then everything is rendered
+# properly. That is ONE renderer with two scopes rather than two renderers --
+# the thing this script knows that a hand-rolled copy in bootstrap.sh kept
+# forgetting is that the key files need their ownership fixed too.
+#
 # envsubst is given an EXPLICIT variable list. Without one it would substitute
 # every $NAME it sees, and the nginx template contains nginx variables ($host,
 # $upstream, $binary_remote_addr) that must survive to the rendered file.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+CONNECTOR_ONLY=0
+case "${1:-}" in
+  --connector-only) CONNECTOR_ONLY=1 ;;
+  '') ;;
+  *) echo "usage: ./render.sh [--connector-only]" >&2; exit 2 ;;
+esac
 
 [ -f .env ] || { echo "Missing .env — copy .env.example and fill it in." >&2; exit 1; }
 set -a; . ./.env; set +a
@@ -37,7 +55,7 @@ export CERT_NAME
 # bootstrap.sh reads it from `GET /ilp/identity` and writes it into .env, so
 # nobody transcribes it by hand. Refuse rather than render a Profile that would
 # be rejected by every tenant that read it.
-if [ -z "${CONNECTOR_SEAL_KEY:-}" ]; then
+if [ "$CONNECTOR_ONLY" = 0 ] && [ -z "${CONNECTOR_SEAL_KEY:-}" ]; then
   echo "CONNECTOR_SEAL_KEY is not set in .env." >&2
   echo >&2
   echo "It is this box's connector's own sealing key, copied verbatim — a tenant" >&2
@@ -52,13 +70,35 @@ if [ -z "${CONNECTOR_SEAL_KEY:-}" ]; then
   exit 1
 fi
 
+# ── A directory where a file belongs ─────────────────────────────────────────
+# docker answers a bind mount naming a path that does not exist by CREATING an
+# empty directory there. Anything that starts the app before its config is
+# rendered leaves one behind, and the app then dies on "read provider config
+# at /etc/toon-provider/provider.toml: Is a directory" for the rest of time,
+# because envsubst below cannot write over a directory either. An EMPTY one
+# can only have come from that, so clear it; a non-empty one is somebody's
+# work and is refused instead.
+for path in provider.toml connector.toml; do
+  [ -d "$path" ] || continue
+  if rmdir "$path" 2>/dev/null; then
+    echo "note: removed an empty directory at ./${path} — docker creates one when a" >&2
+    echo "      bind mount names a file that has not been rendered yet." >&2
+  else
+    echo "./${path} is a directory and is not empty. It must be a file; something" >&2
+    echo "other than this script put it there. Move it aside and re-run." >&2
+    exit 1
+  fi
+done
+
 # ── provider.toml — the one rendered file in this fleet that IS a secret ─────
 # It carries `nostr_private_key` inline: the identity that signs this
 # provider's Profile, Listings, Liveness and Eviction Notices. Everything else
 # here names key files; this one cannot, because the app takes the value.
-envsubst '${PROVIDER_NAME} ${PUBLIC_IP} ${NOSTR_PRIVATE_KEY} ${DOMAIN} ${RELAY_WS} ${CONNECTOR_SEAL_KEY}' \
-  < provider.toml.template > provider.toml
-chmod 600 provider.toml
+if [ "$CONNECTOR_ONLY" = 0 ]; then
+  envsubst '${PROVIDER_NAME} ${PUBLIC_IP} ${NOSTR_PRIVATE_KEY} ${DOMAIN} ${RELAY_WS} ${CONNECTOR_SEAL_KEY}' \
+    < provider.toml.template > provider.toml
+  chmod 600 provider.toml
+fi
 
 envsubst '${DOMAIN}' < connector.toml.template > connector.toml
 
@@ -98,7 +138,7 @@ if [ "$(id -u)" = 0 ]; then
   for key in signer.key settlement.key settlement-solana.key; do
     [ -f "$key" ] && chown "${CONNECTOR_UID:-10001}:${CONNECTOR_UID:-10001}" "$key"
   done
-  chown 0:0 provider.toml
+  [ "$CONNECTOR_ONLY" = 0 ] && chown 0:0 provider.toml
 else
   echo "note: not running as root, so the rendered files stay owned by $(id -un)." >&2
   echo "      The connector container runs as uid 10001 and will not be able to" >&2
@@ -109,8 +149,13 @@ mkdir -p nginx/conf.d
 envsubst '${DOMAIN} ${CERT_NAME}' \
   < nginx/node.conf.template > nginx/conf.d/node.conf
 
-echo "rendered provider.toml (0600 — a secret), connector.toml, the operator"
-echo "  credential files and nginx/conf.d/node.conf"
+if [ "$CONNECTOR_ONLY" = 1 ]; then
+  echo "rendered connector.toml, the operator credential files and"
+  echo "  nginx/conf.d/node.conf — NOT provider.toml (--connector-only)"
+else
+  echo "rendered provider.toml (0600 — a secret), connector.toml, the operator"
+  echo "  credential files and nginx/conf.d/node.conf"
+fi
 echo "  paid ILP edge       : https://proxy.provider.${DOMAIN}/ilp"
 echo "  health              : https://provider.${DOMAIN}/health"
 echo "  certificate lineage : ${CERT_NAME}"

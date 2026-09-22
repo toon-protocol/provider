@@ -600,14 +600,22 @@ fn the_rendered_secret_and_every_key_are_gitignored() {
 #[test]
 fn the_publisher_pays_over_a_carriage_the_relay_will_accept() {
     // The devnet relay PINS `g.toon.relay` to BTP. An HTTP one-shot there is
-    // refused with `extra.requiredTransport`, and the Profile, the Listings
-    // and the Liveness are never written at all — a provider that is running
-    // fine and is invisible.
+    // refused, and the Profile, the Listings and the Liveness are never
+    // written at all — a provider that is running fine and is invisible.
+    //
+    // The carriage is NAMED here rather than left to `auto`, because `auto`
+    // reads the pin out of the node's own self-description and this relay
+    // publishes none: its `GET /ilp` advertises `peerCarriages: []` and its
+    // routes carry only a prefix and a price. `auto` therefore falls back to
+    // HTTP and is refused `TRANSPORT_REQUIRED` — observed against the devnet
+    // relay on 2026-09-22, once its connector carried ADR 0069's wire and
+    // could refuse in words rather than in a parse error. When a connector
+    // publishes the pin it enforces, this may go back to `auto`.
     let compose = deploy("docker-compose.yml");
-    assert!(compose.contains("TOON_TRANSPORT: auto"));
+    assert!(compose.contains("TOON_TRANSPORT: btp"));
 
     // And the two things a websocket carriage cannot carry are absent, which
-    // is what makes `auto` safe here rather than a silent leak: the SOCKS5h
+    // is what makes this carriage safe here rather than a silent leak: the SOCKS5h
     // proxy and the endpoint rewrite both live inside the publisher's `fetch`.
     // Settings only — the comments beside them say why they are absent, and
     // saying so is not setting them.

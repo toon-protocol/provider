@@ -94,7 +94,15 @@ if "${DC[@]}" run --rm --entrypoint certbot certbot \
   "${d_args[@]}" \
   --email "${LETSENCRYPT_EMAIL}" \
   --rsa-key-size 2048 --agree-tos --no-eff-email --keep-until-expiring; then
-  "${DC[@]}" exec nginx nginx -s reload
+  # Tolerant, like the other two reloads in this file, and for a reason worth
+  # stating: under `set -e` in bootstrap.sh a failed reload aborted the WHOLE
+  # bring-up at the TLS step — which silently skipped installing the
+  # auto-apply timer, leaving a box that looked deployed and would never
+  # update itself again. nginx is a container that can be mid-restart at this
+  # moment; the certificate is on disk either way, and the reload loop in
+  # docker-compose.yml picks it up within six hours regardless.
+  "${DC[@]}" exec nginx nginx -s reload 2>/dev/null \
+    || echo "::warning:: nginx would not reload; it will pick the new certificate up on its own within 6h."
   echo "Done.${staging_arg:+ STAGING certificate — re-run with LETSENCRYPT_STAGING=0 once DNS resolves.}"
 else
   echo "::warning:: Certificate issuance failed (DNS may not have propagated yet)."
