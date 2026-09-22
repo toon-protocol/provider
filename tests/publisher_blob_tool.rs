@@ -151,9 +151,11 @@ async fn resolves_to(plan: &Plan, original: &[u8]) {
     let fetcher = BlobFetcher::new(
         Some(format!("{}/raw/{{txid}}", gateway.uri())),
         None,
+        &[],
         None,
         cache,
-    );
+    )
+    .unwrap();
     let sources = BlobSources::relay_set(directory);
 
     let bytes = fetcher
@@ -224,9 +226,11 @@ async fn a_page_the_tool_planned_but_never_uploaded_is_refused_image_not_a_crash
     let fetcher = BlobFetcher::new(
         Some(format!("{}/raw/{{txid}}", gateway.uri())),
         None,
+        &[],
         None,
         cache,
-    );
+    )
+    .unwrap();
     let sources = BlobSources::relay_set(directory);
 
     let err = fetcher
