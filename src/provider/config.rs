@@ -106,6 +106,23 @@ pub struct ImagePolicyConfig {
     /// reference. Tests point it at a `wiremock` server; it has no other use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub registry_url_override: Option<String>,
+    /// Hosts and CIDRs this provider MAY fetch an image from although they
+    /// are not publicly routable (spec §8.4, ADR 0022, TOON_Network#105).
+    ///
+    /// A tenant's `image.reference` names the registry the provider dials,
+    /// so without a rule a tenant can aim this provider's fetches at
+    /// `127.0.0.1`, at `169.254.169.254`, or anywhere in the operator's
+    /// private network — free, over `availability`. The rule is that the
+    /// address dialled must be publicly routable; this list is the operator
+    /// saying "except these, which are mine".
+    ///
+    /// EMPTY BY DEFAULT, which is the strict case. Each entry is a host
+    /// (`registry.internal`, matching that name whatever it resolves to), a
+    /// `host:port`, or a CIDR (`10.0.0.0/8`, matching an address literal and
+    /// every address a name resolves to). An entry that is none of those is
+    /// refused at load.
+    #[serde(default)]
+    pub exempt_registries: Vec<String>,
 }
 
 /// `[anon]`: everything a Hidden Provider needs from its `anon` daemon
@@ -675,6 +692,10 @@ impl ProviderConfig {
                 bail!("capabilities: {}", why);
             }
         }
+        // An operator who meant to let their own registry through and
+        // mistyped it hears about it at load, rather than discovering it as
+        // an image that will not fetch (TOON_Network#105).
+        crate::outbound_guard::OutboundGuard::new(&self.image_policy.exempt_registries)?;
         // A pattern with nothing to fill in would read the same URL for
         // every part; refused at load, where the operator is looking.
         if let Some(pattern) = &self.gateway_url_pattern {
