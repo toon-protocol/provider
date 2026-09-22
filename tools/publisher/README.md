@@ -51,6 +51,7 @@ Environment only; there is no config file.
 | `TOON_CHANNEL_STORE` | `/var/lib/toon-publisher/channels.json` | The channel watermark. Must outlive a restart and die with the chain. |
 | `TOON_DEPOSIT` | `10000000` | Channel deposit in the token's smallest unit (10 USDC at 6 dp). |
 | `TOON_TIMEOUT_MS` | `60000` | Per-packet timeout. |
+| `TOON_TRANSPORT` | `http` | The ILP carriage the packets are paid over: `http`, `auto` or `btp`. See below. |
 | `RELAY_WRITE_ROUTES` | `{}` | JSON map of relay READ url -> the PAID ILP destination that writes to it, e.g. `{"ws://relay:7100":"g.toon.relay"}`. |
 | `TOON_ENDPOINT_REWRITE` | `{}` | JSON map of advertised URL prefix -> the address this process can actually reach it at. |
 | `TOON_SOCKS_PROXY` | — | `socks5h://<host>:<port>` used when a publish request names none. |
@@ -58,6 +59,35 @@ Environment only; there is no config file.
 
 `RELAY_WRITE_ROUTES` is what keeps the ephemeral lane out: a destination
 ending in `.ephemeral` is refused at startup by name.
+
+### Which carriage the packets ride
+
+`TOON_TRANSPORT` defaults to `http` — a one-shot POST per packet — because
+that is what publishing is: a handful of packets a minute, serialized through
+one channel. BTP's ordered socket buys nothing for that.
+
+But **a node may pin a route to one carriage**, and the devnet relay pins
+`g.toon.relay` to BTP. An HTTP one-shot there comes back refused carrying
+`extra.requiredTransport`, and the provider's Profile, Listings and Liveness
+are never written at all. `TOON_TRANSPORT=auto` reads the pin out of the
+node's own self-description and dials whatever it asks for, which is what a
+deployment against such a relay wants.
+
+**Two things the HTTP carriage carries that a websocket does not**, and both
+are startup refusals rather than warnings, because both fail silently:
+
+* **`TOON_SOCKS_PROXY` / `TOON_HIDDEN`.** The SOCKS5h carriage is installed as
+  this process's `fetch`. BTP opens a websocket that never passes through it,
+  so a hidden publisher on BTP would reach the connector from this host's real
+  address while every log line still said it was proxied — the exact leak
+  `TOON_HIDDEN` exists to prevent (spec §10, ADR 0008).
+* **`TOON_ENDPOINT_REWRITE`.** The rewrite is applied inside that same `fetch`,
+  so BTP would dial the advertised address verbatim and fail to connect for a
+  reason nothing names.
+
+Either combination refuses to start, by name. The sandbox sets both a rewrite
+and (on the `hs` profile) a proxy, so it stays on `http`; a devnet box sets
+neither and uses `auto`.
 
 `TOON_ENDPOINT_REWRITE` exists because a client dials the endpoint a
 connector's **self-description advertises**, not the URL it was configured

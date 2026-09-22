@@ -31,7 +31,7 @@ use super::config::{ImagePolicyConfig, Listing};
 use super::fetcher::{BlobFetcher, BlobSources};
 use super::oci::parse_reference;
 use crate::directory::Directory;
-use crate::nostr::image_events::{ImageEntry, SpawnImage};
+use crate::nostr::image_events::{is_sha256_digest, ImageEntry, SpawnImage};
 use crate::nostr::wire::{ErrorCode, ErrorResponse, RegistryEntryRef};
 
 fn refused(message: impl Into<String>) -> ErrorResponse {
@@ -233,6 +233,20 @@ async fn resolve_fetched(
 ) -> Result<ResolvedImage, ErrorResponse> {
     let (manifest_digest, size_bytes, manifest) = resolve(fetcher, digest, arch, &sources).await?;
     for blob in manifest_blob_digests(&manifest) {
+        // A digest the manifest names — its config, or a layer — is read
+        // straight out of JSON a tenant's own registry, Image Registry
+        // entry or Blob Record ultimately controls (TOON_Network#104). It
+        // is about to be handed to the fetcher, which caches by digest, so
+        // its shape is checked HERE, where it is read, rather than trusted
+        // down to the cache: a malformed one fails this source outright,
+        // the same as a blob nothing can serve.
+        if !is_sha256_digest(blob) {
+            return Err(refused(format!(
+                "image manifest {} names a blob digest {:?} that is not \
+                 `sha256:<64 lowercase hex>`",
+                manifest_digest, blob
+            )));
+        }
         if !fetcher.can_serve(blob, &sources).await {
             return Err(refused(sources.no_source_message(blob)));
         }
@@ -282,6 +296,17 @@ async fn resolve(
                     digest, arch
                 ))
             })?;
+        // The index is read from the same untrusted sources a manifest is
+        // (TOON_Network#104), and `child_digest` is about to be fetched —
+        // through the cache, like everything else — so its shape is
+        // checked before that, not after.
+        if !is_sha256_digest(child_digest) {
+            return Err(refused(format!(
+                "image index {} entry for arch {:?} names a digest {:?} that is not \
+                 `sha256:<64 lowercase hex>`",
+                digest, arch, child_digest
+            )));
+        }
         // A nested index is refused rather than recursed into forever.
         let leaf = fetch_json(fetcher, child_digest, sources).await?;
         if leaf.get("manifests").is_some() {

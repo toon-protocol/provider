@@ -1,0 +1,220 @@
+# =============================================================================
+# The TOON devnet provider — rendered by ./render.sh, THEN A SECRET
+# =============================================================================
+# `provider.example.toml` at the repository root documents every key; this is
+# the deployment, and only the decisions specific to it are explained here.
+#
+# ── The rendered file is a SECRET, unlike every other config in this fleet ───
+# `nostr_private_key` is the value, inline, not a path to it. That key IS this
+# provider's identity: it signs the Profile, the Listings, the Liveness and
+# every Eviction Notice, and it is the key a Lease Request is addressed to.
+# Lose it and this provider cannot be impersonated; leak it and it can. So
+# render.sh writes provider.toml 0600, .gitignore refuses it, and it is
+# mounted read-only.
+#
+# One TOML file, read once at startup, no environment layer. A change here is
+# not live until the container restarts, and `toon-provider` refuses an
+# unknown key rather than ignoring it.
+# =============================================================================
+
+# The only ComputeBackend there is. Workloads are containers on this host's
+# own Docker daemon (the compose service mounts its socket), each under a
+# per-lease cgroup slice carrying the tier's CPU and memory limits.
+backend = "docker"
+
+provider_name = "${PROVIDER_NAME}"
+
+# Every route is a suffix of this: g.toon.provider.<tier>.v1.spawn / .extend
+# (and .standby / .standby.extend for a tier that prices one), plus the free
+# g.toon.provider.availability / .status / .terminate / .rotate.
+ilp_address = "g.toon.provider"
+
+# Where tenants reach their workloads: this box's public address, and the
+# host ports the daemon publishes there. No hostnames, no TLS — a workload
+# behind a hostname is what the Workload Gateway is for.
+public_ip = "${PUBLIC_IP}"
+
+# Not a Hidden Provider. This box publishes a host and is found at it.
+hidden = false
+
+# THIS IS THE SECRET. 64 hex characters, from .env.
+nostr_private_key = "${NOSTR_PRIVATE_KEY}"
+
+# The Relay Set: where the Profile, the Listings and the Liveness are
+# published, and the list the Profile itself carries. It is ALSO what this
+# provider searches for Blob Records by digest (spec §8.4), which is how an
+# image named by digest alone is resolved — a provider with no relay refuses
+# every bare digest.
+relay_set = ["${RELAY_WS}"]
+
+# ── The Provider Directory (spec §4) ─────────────────────────────────────────
+# What the Profile tells a tenant about reaching and paying this provider.
+#
+# The URL is a LOCATION HINT. The sealing key is what a tenant actually seals
+# its spawn to, and it refuses to proceed if the URL reports a different one
+# (ADR 0011) — so it must be byte-for-byte what this box's own connector
+# answers with, including the `0x`. bootstrap.sh reads it off
+# `GET /ilp/identity` and writes it into .env rather than asking anyone to
+# copy it by hand; two copies of a key is how they come to disagree.
+connector_url = "https://proxy.provider.${DOMAIN}/ilp"
+connector_seal_key = "${CONNECTOR_SEAL_KEY}"
+
+# Containers on a shared host kernel, and it says so. `dedicated-host` would
+# be a claim this deployment cannot make: there is no hypervisor here, and
+# Linode's shared-CPU plans offer no nested virtualization to build one on.
+# A relay filters on this tag, so it has to be true.
+isolation = "shared-kernel"
+
+# How often Liveness is republished. Each one expires five cadences out (ADR
+# 0007), so four may be lost before this provider reads as down. 60s at 1
+# µUSDC a write is 1,440 µUSDC a day — about $0.0014 — which is what the
+# publisher's channel deposit is sized against.
+liveness_cadence_s = 60
+
+# Where directory events are handed over to be PAID FOR: the publisher
+# sidecar, which holds the payment channel. A relay write is a paid packet
+# (ADR 0007) and the provider app holds no money — it holds identity.
+publish_url = "http://directory-publisher:8081/publish"
+
+# Where TOON-store blobs are read from (spec §8.4): a Blob Record by the txid
+# of its own upload, and each part by its txid. The devnet store uploads to
+# real Arweave through Turbo, so a public Arweave gateway is where those bytes
+# are. Unset, an image whose bytes are in the TOON store would be
+# `refused_image`.
+gateway_url_pattern = "https://arweave.net/raw/{txid}"
+
+# Nothing is granted to EVERY tier. `docker` is granted per tier, below, so a
+# lease that does not need a daemon of its own does not get one.
+capabilities = []
+
+# The app's listener. 0.0.0.0 inside the container, reachable only over the
+# compose network: the connector dials it, and nginx exposes exactly one path
+# of it (GET /health) and 404s the rest. See nginx/node.conf.template.
+http_bind_addr = "0.0.0.0:8080"
+handler_base_url = "http://provider:8080"
+
+# The operator endpoint (`POST /operator/evict`). Loopback INSIDE this
+# container — `docker compose exec provider toon-provider evict …` runs in the
+# same container, so 127.0.0.1 already reaches it. It carries no signature and
+# no payment, so reaching it at all is what authorises an eviction: it is
+# published on no compose port and never should be.
+operator_bind_addr = "127.0.0.1:8090"
+operator_url = "http://127.0.0.1:8090"
+
+# ── The ports this box hands out ─────────────────────────────────────────────
+# 100 workload ids. Each gets one SSH forward (40000 + i) and a block of 16
+# published ports (41000 + 16i), so the two ranges are 40000-40099 and
+# 41000-42599 and they do not overlap — which the app checks at load.
+#
+# THESE ARE PUBLIC. The daemon publishes them on this host's address because
+# that is how a tenant reaches its workload, and bootstrap.sh opens them in
+# ufw so `ufw status` tells the truth about a box that is already reachable
+# there (docker's iptables rules run ahead of ufw either way).
+workload_id_range_start = 1000
+workload_id_range_end = 1099
+ssh_port_start = 40000
+workload_port_start = 41000
+
+# How long an ended lease is still answerable by `status` before the sweep
+# forgets it. It stops counting against capacity the moment it ends.
+ended_retention_s = 86400
+
+# The lease table. It is the ONLY record that a lease exists, so it lives on a
+# named volume: a restart without it strands every paid workload.
+lease_state_path = "/var/lib/toon-provider/leases.json"
+
+# Verified image blobs, by digest, kept across leases and restarts so a
+# popular layer is fetched once. There is no eviction yet, so it is capped:
+# a blob that would cross the cap is not kept and the spawn answers
+# `no_capacity`, which is the same answer a full disk gives. 20 GiB of this
+# box's 80 GB disk.
+blob_cache_dir = "/var/lib/toon-provider/blobs"
+blob_cache_max_bytes = 21474836480
+
+# ── What this provider's connector settles in ────────────────────────────────
+# Published in the Profile so a tenant knows what it can pay with. These must
+# mirror connector.toml.template's [settlement.*] tables; the connector proves
+# each of them against a live chain at boot, and this file is what says so to
+# a tenant who has not asked the connector yet.
+[[settlement]]
+chain = "evm:84532"                                            # Base Sepolia
+token = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"           # mock USDC
+decimals = 6
+
+[[settlement]]
+chain = "solana"                                               # Solana devnet
+token = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"         # mock USDC
+decimals = 6
+
+# ── What this provider sells ─────────────────────────────────────────────────
+# Two tiers. A price or resource change is a NEW VERSION — bump `version`,
+# keep the old entry until its last lease ends — so running leases keep the
+# price they started at.
+#
+# CAPACITY IS A PROMISE, NOT A MEASUREMENT. Sold out, the two tiers below
+# commit 2.5 GiB of this box's 4 GiB to tenants, leaving the rest for the five
+# containers that run the provider and for the page cache. That is deliberate
+# and it is the number to change — `capacity`, or the Linode plan — if the
+# OOM killer ever shows up in `dmesg`. deploy/README.md § "Sizing the box"
+# does the arithmetic.
+
+# `basic` — the tier the console demos, and the one that sells Warm Standbys.
+#
+# `standby_price` is what makes the standby routes exist at all: `toon-provider
+# routes` prints a `.standby` and a `.standby.extend` row at this price for a
+# tier that sets it, and neither for one that does not — so a connector never
+# terminates a standby route the provider did not price, and an unset price is
+# never read as free. Never 0: that would sell held capacity for nothing.
+#
+# A Standby Set has to span two PROVIDERS (spec §7) — a standby bought from
+# the provider already running the primary is no standby at all — so this tier
+# sells the standby HALF of a set whose other half is somebody else's box.
+# Until the devnet has a second provider, that half is what exists.
+[[listings]]
+name = "basic"
+version = 1
+arch = "amd64"
+lease_interval_s = 3600
+price = 1000          # µUSDC per hour, on spawn and on extend
+standby_price = 400   # µUSDC per hour for held capacity with nothing running
+capabilities = []
+capacity = 3
+[listings.resources]
+cpu_millicores = 500
+memory_mb = 512
+storage_gb = 5
+
+# `ci` — spec Appendix A.1: the tier a workflow runner buys when it needs a
+# Docker daemon INSIDE the workload. `capabilities = ["docker"]` is what makes
+# it that (spec §4.4): the provider runs a privileged `dind` sidecar of its
+# own beside each such workload, under the same per-lease cgroup slice, whose
+# socket is the workload's /var/run/docker.sock — never this host's.
+#
+# Capacity 1, and smaller than the spec's example tier, because the sidecar
+# and the workload share the slice's memory and this is a 4 GiB box. An
+# operator with more to sell raises both together.
+[[listings]]
+name = "ci"
+version = 1
+arch = "amd64"
+lease_interval_s = 3600
+price = 5000
+capabilities = ["docker"]
+capacity = 1
+[listings.resources]
+cpu_millicores = 1000
+memory_mb = 1024
+storage_gb = 10
+
+# ── What this provider refuses to run ────────────────────────────────────────
+# Applied identically by the free `availability` route and by a paid spawn, so
+# a tenant can ask before paying and get the same answer.
+#
+# The default is permissive and stays that way, with one exception: an image
+# larger than this box's blob cache can hold would be fetched, verified and
+# then refused for lack of room. Saying so up front costs the tenant nothing
+# and this box a great deal less.
+[image_policy]
+deny_digests = []
+deny_references = []
+max_image_bytes = 5000000000
