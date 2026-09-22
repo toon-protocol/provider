@@ -11,6 +11,6 @@
     "test": "node --test"
   },
   "dependencies": {
-    "@toon-protocol/client": "^3.0.0"
+    "@toon-protocol/client": "3.1.0"
   }
 }
