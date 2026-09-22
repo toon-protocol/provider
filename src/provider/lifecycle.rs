@@ -1,14 +1,14 @@
-// What happens to a lease after the spawn: Extension, Status and Termination
-// (spec §6.3, §6.5, §6.6).
+// What happens to a lease after the spawn: Extension, Status, Termination
+// and Rotation (spec §6.3, §6.5, §6.6, §6.8).
 //
-// The three differ in who may ask. An Extension only ADDS time and reveals
+// They differ in who may ask. An Extension only ADDS time and reveals
 // nothing, so it carries no Lease Request at all and any payer may buy one
 // for any lease (ADR 0005) — a sponsor pays for a lease it does not own.
-// Status and Termination reveal or destroy, so both carry a Lease Request
-// presenting the lease's Continuation Token, and refuse anyone else with
-// `not_tenant`.
+// Status, Termination and Rotation reveal, destroy or re-key, so each carries
+// a Lease Request presenting the lease's Continuation Token, and refuses
+// anyone else with `not_tenant`.
 //
-// The question the two ask is NOT who is this. It is whether whoever is
+// The question the three ask is NOT who is this. It is whether whoever is
 // asking holds the token this lease was taken with (ADR 0016), which is the
 // only question the provider ever needed answered and the one that leaks
 // nothing: the comparison is constant time, and the token reaches no log,
@@ -19,7 +19,9 @@
 // the lease's token for a moment the tenant chose (spec §6.5.1), which the
 // provider recomputes from the token it already holds. That is the whole of
 // the delegation — nothing is fetched, nothing is stored per gateway, and
-// `terminate` is not part of it.
+// neither `terminate` nor `rotate` is part of it. Rotation is how a tenant
+// ends every delegation at once: it replaces the one token each grant is
+// recomputed from.
 //
 // A lease is named by the tenant's own `workload_id`, never by the backend id
 // this provider keys its table on: the tenant chose that id and it is the only
@@ -35,7 +37,8 @@ use crate::nostr::directory_events::eviction_event;
 use crate::nostr::lease_request::{self, ValidLeaseRequest};
 use crate::nostr::wire::{
     ErrorCode, ErrorResponse, EvictResponse, EvictionReason, ExtendRequest, ExtendResponse, Op,
-    StatusContent, StatusResponse, TakeoverStatus, TerminateResponse, WorkloadContent,
+    RotateContent, RotateResponse, StatusContent, StatusResponse, TakeoverStatus,
+    TerminateResponse, WorkloadContent,
 };
 use crate::provider_http::AppState;
 
@@ -315,6 +318,50 @@ pub async fn terminate(state: &AppState, body: &[u8]) -> Result<TerminateRespons
     })
 }
 
+/// Serve one rotation on the free `<addr>.rotate`: the lease's Continuation
+/// Token is replaced by the `next` one the request names (spec §6.8).
+///
+/// REPLACED, not supplemented: the provider keeps one token per lease and
+/// nothing beside it, so the old token is `not_tenant` from the moment this
+/// answers, and every Gateway Grant derived from it is `bad_grant` — a grant
+/// is recomputed from whatever token is stored (§6.5.1), and nothing else
+/// remembers the old one (ADR 0018). There is no grace period and nothing is
+/// published.
+///
+/// Step 4 does not branch here, exactly as on `terminate`: only the lease's
+/// own token may rotate it. `next` is weighed only once the request has
+/// proved it holds that token — so a `next` equal to it is `invalid_request`
+/// to the tenant, and never an oracle a stranger could test guesses against.
+///
+/// The lease is persisted BEFORE the answer, under the same lock that
+/// changed it: a crash straight after a rotation must not bring the old token
+/// back, and no other request can see the new token before it is on disk.
+pub async fn rotate(state: &AppState, body: &[u8]) -> Result<RotateResponse, ErrorResponse> {
+    let (request, content): (_, RotateContent) = authenticate(state, body, Op::Rotate).await?;
+    let now = state.clock.now();
+
+    let mut leases = state.leases.lock().await;
+    let id = lease_id_for(&leases, &content.workload_id).ok_or_else(unknown_workload)?;
+    let lease = leases.get_mut(&id).ok_or_else(unknown_workload)?;
+    lease_request::check_continuation(&request, &lease.continuation)?;
+    still_running(lease, now)?;
+    if content.next == lease.continuation {
+        return Err(invalid(
+            "`next` is the token this lease already holds; a rotation names a new one",
+        ));
+    }
+    lease.continuation = content.next;
+    persist_leases(&leases, &state.config.lease_state_path);
+
+    // The lease's backend id and nothing else: neither token is ever in a
+    // log line (spec §6.1.1).
+    tracing::info!("lease {} rotated its continuation token", id);
+    Ok(RotateResponse {
+        workload_id: content.workload_id,
+        rotated: true,
+    })
+}
+
 /// Evict a lease: an operator decision, not a tenant one, so it carries no
 /// Lease Request and no token — the caller is `provider_http`'s loopback
 /// operator endpoint, reached only by whoever already controls this host.
@@ -403,11 +450,12 @@ pub async fn evict(
 /// `lease_request`'s step 4 to weigh against the lease once the caller has
 /// found it — there is no lease to weigh it against until then.
 ///
-/// `C` is the op's content type and not one shape for both, because the two
+/// `C` is the op's content type and not one shape for all, because the
 /// contents are not the same: only `status`'s names `gateway_expires_at`
-/// (spec §6.5). Every field neither names is `invalid_request` here, never
-/// dropped (ADR 0004) — which is how a gateway asking to `terminate` is
-/// refused by the shape rather than by a rule.
+/// (spec §6.5), and only `rotate`'s names `next` (§6.8). Every field an op's
+/// content does not name is `invalid_request` here, never dropped (ADR 0004)
+/// — which is how a gateway asking to `terminate` or `rotate` is refused by
+/// the shape rather than by a rule.
 async fn authenticate<C: serde::de::DeserializeOwned>(
     state: &AppState,
     body: &[u8],

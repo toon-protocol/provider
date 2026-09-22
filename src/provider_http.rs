@@ -8,16 +8,16 @@
 // body, not from who paid.
 //
 // Paths are `provider::routes`'s: the connector forwards each ILP prefix to
-// one of them. Spawn, extend, standby, standby.extend, availability, status
-// and terminate are all served.
+// one of them. Spawn, extend, standby, standby.extend, availability, status,
+// terminate and rotate are all served.
 //
-// The free routes (`availability`, `status`, `terminate`) arrive with nothing
-// paid and are served exactly like the paid ones: this app never looks at what
-// a packet was worth.
+// The free routes (`availability`, `status`, `terminate`, `rotate`) arrive
+// with nothing paid and are served exactly like the paid ones: this app never
+// looks at what a packet was worth.
 //
-// `status` and `terminate` are free but not unauthenticated: each carries a
-// Lease Request presenting the lease's Continuation Token (spec §6.1). Only
-// `availability` and `.extend` carry nothing at all.
+// `status`, `terminate` and `rotate` are free but not unauthenticated: each
+// carries a Lease Request presenting the lease's Continuation Token (spec
+// §6.1). Only `availability` and `.extend` carry nothing at all.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,11 +42,11 @@ use crate::nostr::lease_request::AcceptedRequests;
 use crate::nostr::wire::{ErrorCode, ErrorResponse, EvictRequest};
 use crate::outbound_proxy::OutboundProxy;
 use crate::provider::routes::{
-    AVAILABILITY_PATH, EXTEND_PATTERN, SPAWN_PATTERN, STANDBY_EXTEND_PATTERN, STANDBY_PATTERN,
-    STATUS_PATH, TERMINATE_PATH,
+    AVAILABILITY_PATH, EXTEND_PATTERN, ROTATE_PATH, SPAWN_PATTERN, STANDBY_EXTEND_PATTERN,
+    STANDBY_PATTERN, STATUS_PATH, TERMINATE_PATH,
 };
 use crate::provider::{
-    availability, evict, extend, spawn, standby_extend, standby_spawn, status, terminate,
+    availability, evict, extend, rotate, spawn, standby_extend, standby_spawn, status, terminate,
     BlobCache, BlobFetcher, ImagePolicy, LeaseRecord, ProviderConfig,
 };
 
@@ -236,6 +236,7 @@ pub fn router(state: AppState) -> Router {
         .route(AVAILABILITY_PATH, post(availability_route))
         .route(STATUS_PATH, post(status_route))
         .route(TERMINATE_PATH, post(terminate_route))
+        .route(ROTATE_PATH, post(rotate_route))
         .with_state(state)
 }
 
@@ -391,6 +392,13 @@ async fn status_route(State(state): State<AppState>, body: Bytes) -> Response {
 
 async fn terminate_route(State(state): State<AppState>, body: Bytes) -> Response {
     match terminate(&state, &body).await {
+        Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
+        Err(e) => refuse(e),
+    }
+}
+
+async fn rotate_route(State(state): State<AppState>, body: Bytes) -> Response {
+    match rotate(&state, &body).await {
         Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
         Err(e) => refuse(e),
     }

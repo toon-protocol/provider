@@ -1,6 +1,6 @@
 //! `toon-provider routes` prints the connector route rows this provider
 //! expects: one spawn and one extend row per LIVE listing version at that
-//! version's price, plus the three free provider-wide rows.
+//! version's price, plus the four free provider-wide rows.
 //!
 //! "Live" is the version on sale plus every retired version that still has a
 //! running lease (ADR 0009), so the table is a function of the config AND the
@@ -217,8 +217,8 @@ fn a_listing_that_prices_no_standby_gets_no_standby_rows() {
         .any(|p| p.starts_with("g.acme.basic.v1.standby")));
 
     // And the count is exact: two rows for basic v1, four for each live
-    // `warm` version, then the three free rows.
-    assert_eq!(rows.len(), 2 + 4 + 4 + 3);
+    // `warm` version, then the four free rows.
+    assert_eq!(rows.len(), 2 + 4 + 4 + 4);
 }
 
 #[test]
@@ -232,12 +232,13 @@ fn a_retired_standby_version_with_no_live_lease_loses_its_standby_rows_too() {
 }
 
 #[test]
-fn the_three_free_rows_are_provider_wide_at_price_zero() {
+fn the_four_free_rows_are_provider_wide_at_price_zero() {
     let rows = rows(&render_routes(&config(), &[]));
     for (route, path) in [
         ("availability", "/availability"),
         ("status", "/status"),
         ("terminate", "/terminate"),
+        ("rotate", "/rotate"),
     ] {
         assert!(
             rows.contains(&(
@@ -252,9 +253,9 @@ fn the_three_free_rows_are_provider_wide_at_price_zero() {
 }
 
 #[test]
-fn exactly_two_rows_per_live_version_plus_three() {
+fn exactly_two_rows_per_live_version_plus_four() {
     let with_v1_lease = rows(&render_routes(&config(), &[live_lease(1000, "basic", 1)]));
-    assert_eq!(with_v1_lease.len(), 3 * 2 + 3);
+    assert_eq!(with_v1_lease.len(), 3 * 2 + 4);
     let mut prefixes: Vec<&str> = with_v1_lease.iter().map(|r| r.0.as_str()).collect();
     prefixes.sort_unstable();
     prefixes.dedup();
@@ -265,7 +266,7 @@ fn exactly_two_rows_per_live_version_plus_three() {
     );
 
     // Without the lease, basic v1's two rows are gone.
-    assert_eq!(rows(&render_routes(&config(), &[])).len(), 2 * 2 + 3);
+    assert_eq!(rows(&render_routes(&config(), &[])).len(), 2 * 2 + 4);
 }
 
 #[test]
@@ -278,5 +279,5 @@ fn a_provider_with_no_listings_still_prints_the_free_rows() {
         },
         &[],
     ));
-    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.len(), 4);
 }

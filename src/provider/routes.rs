@@ -50,6 +50,7 @@ pub fn standby_extend_path(listing: &str, version: u32) -> String {
 pub const AVAILABILITY_PATH: &str = "/availability";
 pub const STATUS_PATH: &str = "/status";
 pub const TERMINATE_PATH: &str = "/terminate";
+pub const ROTATE_PATH: &str = "/rotate";
 
 /// One connector route row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,7 +64,7 @@ pub struct RouteRow {
 /// Every route this provider serves: one spawn and one extend row per LIVE
 /// listing version at that version's price, a `.standby` and a
 /// `.standby.extend` row beside them at that version's STANDBY price when it
-/// has one, then the three free provider-wide rows.
+/// has one, then the four free provider-wide rows.
 ///
 /// A listing that prices no standbys gets neither standby row: an unpriced
 /// route is one the connector must never terminate, and a zero-priced one
@@ -87,7 +88,7 @@ pub struct RouteRow {
 pub fn route_table(config: &ProviderConfig, leases: &[LeaseRecord]) -> Vec<RouteRow> {
     let base = config.handler_base_url.trim_end_matches('/');
     let addr = &config.ilp_address;
-    let mut rows = Vec::with_capacity(config.listings.len() * 4 + 3);
+    let mut rows = Vec::with_capacity(config.listings.len() * 4 + 4);
     // Which versions are live is a question about a NAME, so it is answered
     // once per name rather than once per `[[listings]]` entry.
     let mut live: BTreeMap<&str, Vec<u32>> = BTreeMap::new();
@@ -133,6 +134,7 @@ pub fn route_table(config: &ProviderConfig, leases: &[LeaseRecord]) -> Vec<Route
         ("availability", AVAILABILITY_PATH),
         ("status", STATUS_PATH),
         ("terminate", TERMINATE_PATH),
+        ("rotate", ROTATE_PATH),
     ] {
         rows.push(RouteRow {
             prefix: format!("{}.{}", addr, route),
@@ -153,7 +155,7 @@ pub fn render_routes(config: &ProviderConfig, leases: &[LeaseRecord]) -> String 
         "# Connector routes for provider {:?} ({}). One spawn and one extend row\n\
          # per LIVE listing version at that version's price, plus a standby and a\n\
          # standby.extend row at its standby_price when it sells Warm Standbys;\n\
-         # availability, status and terminate are free. A retired version keeps its\n\
+         # availability, status, terminate and rotate are free. A retired version keeps its\n\
          # rows until its last lease ends (ADR 0009), so regenerate with\n\
          # `toon-provider routes` after every listing change AND once the old\n\
          # version's leases are over.",

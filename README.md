@@ -380,6 +380,7 @@ one HTTP path here:
 | `<addr>.availability` | `POST /availability` | 0 |
 | `<addr>.status` | `POST /status` | 0 |
 | `<addr>.terminate` | `POST /terminate` | 0 |
+| `<addr>.rotate` | `POST /rotate` | 0 |
 
 The two standby rows are printed **only for a listing that sets
 `standby_price`** (spec §7): a listing that prices no Warm Standby gets
@@ -878,6 +879,31 @@ provider kept it with the lease so tooling can show where a workload's values
 came from, and it survives a restart like the rest of the record. Nothing
 reads it: the provider never fetches a Template (see **Spawn** above).
 
+**`POST /rotate`** (free) replaces the lease's Continuation Token (spec §6.8).
+It takes `{ "request": <Lease Request> }` with `op` = `rotate`, presenting the
+lease's **current** token, and the content `{ "workload_id": "…", "next":
+"<64 lowercase hex>" }` — those two keys and no other. The provider stores
+`next` in place of the old token and persists the lease before it answers:
+
+```json
+{ "workload_id": "…", "rotated": true }
+```
+
+From then on the old token is `not_tenant`, and every Gateway Grant derived
+from it is `bad_grant`, because a grant is recomputed from whatever token the
+lease stores. There is no grace period and nothing is published. Refusals, in
+the order they are weighed: the Lease Request's own shape, window and replay
+(`invalid_request`, `stale_request`); content that is not exactly `workload_id`
+and a well-formed `next` — a `gateway_expires_at` included, so a Workload
+Gateway can never rotate a lease (`invalid_request`); `unknown_workload`;
+`not_tenant` for any token but the lease's own (a grant is not enough);
+`expired` for a lease that has ended; and `invalid_request` for a `next` equal
+to the token the lease already holds. A lease that is provisioning, running,
+stopped or reserved can be rotated. A tenant that lost the answer does not
+retry — the retry is `stale_request` or `not_tenant` — it sends `status` with
+the new token, and acceptance means the rotation took effect. Neither token
+ever reaches a log line or an error message.
+
 Terminate stops and deletes the workload immediately and answers
 `{ "workload_id": "…", "state": { "ended": "termination" } }`. Nothing is
 refunded, here or anywhere (ADR 0003). Terminating a lease that has already
@@ -1170,8 +1196,10 @@ provider (terminate, eviction), and can be run back to back with
 `tests/wire_fixtures.rs` generates golden files under `tests/fixtures/wire/`
 from the real HTTP surface and the real event builders: a signed Lease
 Request per `op` with its packet body, request and response bodies for
-spawn, extend, availability, status and terminate, one refusal per spec §5
-error code in validation order, one Profile, Listing, Liveness, Eviction
+spawn, extend, availability, status, terminate and rotate, one refusal per spec §5
+error code in validation order, every refusal a rotation can earn in the order
+the route weighs them (`error.<code>.rotate…`) and what `status` answers the
+old token, a grant of it and the new token afterwards, one Profile, Listing, Liveness, Eviction
 Notice and Takeover each, the two roles a Standby Set gives (`spawn.primary`,
 `spawn.standby` and a `status` for each), the `status` of a standby that
 won a Takeover and of one that lost (`status.won`, `status.lost` — driven

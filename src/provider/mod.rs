@@ -12,7 +12,7 @@
 //
 // The routes themselves are one module each: `spawn` starts a lease — or, on
 // `.standby`, reserves capacity for one without starting it — `lifecycle`
-// extends, reports and ends one, `availability` answers whether a spawn would
+// extends, reports, ends and re-keys one, `availability` answers whether a spawn would
 // run without starting anything, and `cleanup` is where every ending — Expiry
 // or Termination — releases the slot and, when there is a workload, destroys
 // it. `standby` is the rule the two spawn routes share: which role a
@@ -54,7 +54,7 @@ pub use config::{
 };
 pub use fetcher::BlobFetcher;
 pub use image_policy::{ImagePolicy, ResolvedImage};
-pub use lifecycle::{evict, extend, standby_extend, status, terminate};
+pub use lifecycle::{evict, extend, rotate, standby_extend, status, terminate};
 pub use persistence::persisted_leases;
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};

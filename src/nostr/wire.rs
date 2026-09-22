@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::continuation::ContinuationToken;
 
 /// The body of every authenticated route (`.spawn`, `.standby`, `status`,
-/// `terminate`): one Lease Request. Validating it is `nostr::lease_request`.
+/// `terminate`, `rotate`): one Lease Request. Validating it is `nostr::lease_request`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LeaseRequestEnvelope {
@@ -38,6 +38,7 @@ pub enum Op {
     Standby,
     Status,
     Terminate,
+    Rotate,
 }
 
 impl Op {
@@ -47,6 +48,7 @@ impl Op {
             Op::Standby => "standby",
             Op::Status => "status",
             Op::Terminate => "terminate",
+            Op::Rotate => "rotate",
         }
     }
 }
@@ -76,7 +78,7 @@ pub struct LeaseRequest {
     ///
     /// Optional in the SHAPE so that a request presenting no token is
     /// refused on its authority rather than on its spelling: `not_tenant` on
-    /// `status` and `terminate`, `invalid_request` on a spawn, which would
+    /// `status`, `terminate` and `rotate`, `invalid_request` on a spawn, which would
     /// otherwise buy a lease nobody could act on (§6.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ContinuationToken>,
@@ -278,6 +280,23 @@ pub struct WorkloadContent {
     pub workload_id: String,
 }
 
+/// Content of a Lease Request with `op = rotate` (spec §6.8): the workload
+/// it is about, and the token the lease holds from now on. Exactly these two
+/// keys.
+///
+/// `next` is a `ContinuationToken`, so it is parsed as one — 64 lowercase hex
+/// characters or `invalid_request` — and redacted, compared and serialised
+/// like one: a token that arrives here is no less a token for not being
+/// stored yet. Authority is the request's own `continuation`, which only the
+/// lease's current token satisfies: there is no `gateway_expires_at` here,
+/// so a Workload Gateway can never rotate a lease out from under its tenant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RotateContent {
+    pub workload_id: String,
+    pub next: ContinuationToken,
+}
+
 /// Body of `.extend`: no signature, any payer may extend any lease (ADR 0005).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -459,6 +478,19 @@ pub struct StatusResponse {
 pub struct TerminateResponse {
     pub workload_id: String,
     pub state: LeaseState,
+}
+
+/// The answer to a successful rotation (spec §6.8): the lease it was about,
+/// and `rotated: true`. It carries no token — not the old one, not the new
+/// one, not a hint of either — so a captured answer tells its reader nothing
+/// it could act on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RotateResponse {
+    pub workload_id: String,
+    /// Always `true`: a rotation that did not happen is a refusal, never a
+    /// `false` here.
+    pub rotated: bool,
 }
 
 /// Body of the free `<addr>.availability` route (spec §6.4, ADR 0015): the
