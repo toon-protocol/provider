@@ -80,10 +80,24 @@ printf '%s\n' "${OPERATOR_BEARER_TOKEN}" > operator-bearer.token
 # that uid rather than widening the mode. provider.toml stays root-owned: the
 # provider image runs as root and it is the one file here that must not be
 # readable by anything else.
+#
+# THE HAND-PLACED KEY FILES NEED THE SAME TREATMENT, and the fleet's runbooks
+# have always said so as a manual step (connector#492's restart loop:
+# "failed to read signer key_file at /app/data/signer.key: Permission denied").
+# A step a human has to remember is a step a human forgets, and the failure is
+# a container that restarts forever while everything around it looks fine.
+# They are chmodded here too, so `openssl rand -hex 32 > signer.key` with a
+# default umask is corrected rather than merely tolerated.
 chmod 600 connector.toml operator-bearer.token operator-write.keys
+for key in signer.key settlement.key settlement-solana.key; do
+  [ -f "$key" ] && chmod 600 "$key"
+done
 if [ "$(id -u)" = 0 ]; then
   chown "${CONNECTOR_UID:-10001}:${CONNECTOR_UID:-10001}" \
     connector.toml operator-bearer.token operator-write.keys
+  for key in signer.key settlement.key settlement-solana.key; do
+    [ -f "$key" ] && chown "${CONNECTOR_UID:-10001}:${CONNECTOR_UID:-10001}" "$key"
+  done
   chown 0:0 provider.toml
 else
   echo "note: not running as root, so the rendered files stay owned by $(id -un)." >&2
