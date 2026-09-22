@@ -15,11 +15,14 @@
 // directly, and Milestone 1's `reference` form parses into the same pair.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail, Context, Result};
 use bytes::BytesMut;
 use reqwest::header::{HeaderValue, ACCEPT, WWW_AUTHENTICATE};
 use serde_json::Value;
+
+use crate::outbound_guard::OutboundGuard;
 
 /// Every OCI/Docker media type this provider reads as a manifest: an index
 /// (OCI or the older Docker manifest list) or a single-platform manifest.
@@ -65,7 +68,8 @@ impl OciEndpoint {
 }
 
 /// An HTTP client for upstream registries. Cheap to clone: it holds only a
-/// `reqwest::Client` (itself an `Arc`) and the test override.
+/// `reqwest::Client` (itself an `Arc`), the test override and the address
+/// guard (also an `Arc`).
 #[derive(Clone)]
 pub struct OciClient {
     client: reqwest::Client,
@@ -73,13 +77,25 @@ pub struct OciClient {
     /// (`scheme://host[:port]`) instead of the registry named by the caller.
     /// Tests point it at a `wiremock` server.
     base_url_override: Option<String>,
+    /// Where a fetch may go (TOON_Network#105). The `client` already
+    /// resolves and redirects through this same guard; it is held here as
+    /// well because the two URLs a TENANT or a hostile REGISTRY chooses —
+    /// the registry a `reference` names, and the realm its 401 names — are
+    /// refused before the request is built, so a URL that is refused on its
+    /// face never becomes a connection at all.
+    guard: Arc<OutboundGuard>,
 }
 
 impl OciClient {
-    pub fn new(client: reqwest::Client, base_url_override: Option<String>) -> Self {
+    pub fn new(
+        client: reqwest::Client,
+        base_url_override: Option<String>,
+        guard: Arc<OutboundGuard>,
+    ) -> Self {
         Self {
             client,
             base_url_override,
+            guard,
         }
     }
 
@@ -127,6 +143,17 @@ impl OciClient {
             digest
         );
         let what = format!("{} {}/{}", endpoint.path_segment(), registry, repository);
+
+        // The registry host came from the tenant's `reference`, so this is
+        // the door (TOON_Network#105): an address inside the operator's own
+        // network is refused here, before anything is sent, and the failure
+        // names the SOURCE — `oci <registry>/<repository>`, which is what
+        // §8.4's chain records and what `refused_image` ends up carrying.
+        let parsed = reqwest::Url::parse(&url)
+            .with_context(|| format!("{} does not name a URL to fetch {} from", what, digest))?;
+        self.guard
+            .check_url(&parsed)
+            .with_context(|| format!("{} cannot be fetched", what))?;
 
         let send = |bearer: Option<&str>| {
             let mut req = self.client.get(&url);
@@ -212,6 +239,12 @@ impl OciClient {
 
         let mut url = reqwest::Url::parse(realm)
             .with_context(|| format!("bearer challenge realm {:?} is not a URL", realm))?;
+        // The realm is chosen by whatever answered the 401 — on a registry a
+        // tenant named, that is the tenant's own server, and this request
+        // would go wherever it says. Checked exactly like the registry was
+        // (TOON_Network#105), plus `https`, because the answer is a
+        // credential.
+        self.guard.check_realm(&url)?;
         {
             let mut query = url.query_pairs_mut();
             if let Some(service) = params.get("service") {

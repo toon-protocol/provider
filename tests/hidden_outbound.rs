@@ -308,9 +308,11 @@ async fn store_gateway_fetches_leave_through_the_socks_proxy() {
             gateway.port()
         )),
         None,
+        &[],
         None,
         BlobCache::open(dir.path(), None).unwrap(),
     )
+    .unwrap()
     .with_proxy(&proxy)
     .unwrap();
 
@@ -381,9 +383,14 @@ async fn registry_fetches_and_the_anonymous_token_exchange_leave_through_the_soc
     let fetcher = BlobFetcher::new(
         None,
         Some(format!("http://{}:{}", REGISTRY_HOST, addr.port())),
+        // The realm is a third host over plain http, which only an
+        // operator's own network is (TOON_Network#105): the operator says so
+        // here, the way the sandbox's `image_policy.exempt_registries` would.
+        &[TOKEN_HOST.to_string()],
         None,
         BlobCache::open(dir.path(), None).unwrap(),
     )
+    .unwrap()
     .with_proxy(&proxy)
     .unwrap();
 

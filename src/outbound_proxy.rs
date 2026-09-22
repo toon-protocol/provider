@@ -36,11 +36,13 @@
 // whose daemon moved has to be restarted to re-read its cookie anyway.
 
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use url::Url;
 
+use crate::outbound_guard::OutboundGuard;
 use crate::provider::is_private_ip;
 
 /// A resolved `socks5h://<host>:<port>`: the URL reqwest is handed, and the
@@ -131,15 +133,50 @@ impl OutboundProxy {
 /// Both of this crate's reqwest clients — the publish request's and the image
 /// fetcher's — are built here, so neither can acquire a proxy the other
 /// lacks: on a Hidden Provider the whole of a process's outbound is hidden or
-/// none of it is.
+/// none of it is. The image fetcher's comes through `guarded_http_client`
+/// below, which adds the address guard on top of exactly this.
 pub fn http_client(
     proxy: Option<&OutboundProxy>,
     timeout: Duration,
     what: &str,
 ) -> Result<reqwest::Client> {
+    build(proxy, timeout, what, None)
+}
+
+/// The same client, but one that will only ever CONNECT to an address an
+/// image fetch is allowed to reach (`OutboundGuard`, TOON_Network#105): the
+/// guard is the client's DNS resolver, so a name is resolved once and only
+/// the addresses that passed are dialled, and it is the client's redirect
+/// policy, so each hop is checked and the chain is capped.
+///
+/// This is what the image fetcher builds — the registry, the token realm and
+/// the TOON store gateway all ride it — because those are the URLs a TENANT
+/// can influence. The publish request's client does not: its URL comes from
+/// the operator's own config and from nowhere else.
+pub fn guarded_http_client(
+    proxy: Option<&OutboundProxy>,
+    timeout: Duration,
+    what: &str,
+    guard: &Arc<OutboundGuard>,
+) -> Result<reqwest::Client> {
+    build(proxy, timeout, what, Some(guard))
+}
+
+fn build(
+    proxy: Option<&OutboundProxy>,
+    timeout: Duration,
+    what: &str,
+    guard: Option<&Arc<OutboundGuard>>,
+) -> Result<reqwest::Client> {
     let builder = reqwest::Client::builder().timeout(timeout);
     let builder = match proxy {
         Some(proxy) => proxy.apply(builder)?,
+        None => builder,
+    };
+    let builder = match guard {
+        Some(guard) => builder
+            .dns_resolver(Arc::clone(guard))
+            .redirect(guard.redirect_policy()),
         None => builder,
     };
     builder

@@ -206,6 +206,24 @@ deny_references = []
 # the registry named in the reference. Leave unset in production.
 # registry_url_override = "http://localhost:5000"
 
+# Hosts and CIDRs this provider may fetch an image from although they are not
+# publicly routable (spec §8.4, ADR 0022, TOON_Network#105).
+#
+# A tenant's `image.reference` names the registry this provider dials, so a
+# provider never fetches an image from an address that is not publicly
+# routable: not loopback, not a private range, not link-local — which is
+# where a cloud instance's metadata service lives — in v4 or v6. Every
+# outbound host of a fetch is checked, the registry, the token realm its 401
+# names and every redirect alike, and a refused source fails that source.
+#
+# EMPTY by default, which is the strict case. An operator who runs a registry
+# inside their own network opts back in here: by host (that name, whatever it
+# resolves to), by `host:port`, or by CIDR. The URLs this file configures —
+# `registry_url_override` above and `gateway_url_pattern` — are already
+# exempt without being listed.
+exempt_registries = []
+# exempt_registries = ["registry.internal", "10.0.0.0/8"]
+
 # ── Hidden Provider (spec §10, ADR 0008) ─────────────────────────────────────
 # Everything a Hidden Provider needs from its `anon` daemon. Ignored unless
 # `hidden = true`; with it, EACH key below is a hiding condition and a missing

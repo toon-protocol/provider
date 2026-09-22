@@ -52,7 +52,8 @@ use super::oci::{OciClient, OciEndpoint};
 use crate::directory::Directory;
 use crate::nostr::image_events::{BlobPart, BlobRecord, BlobRecordContent, BlobSource, ImageEntry};
 use crate::nostr::wire::{ErrorCode, ErrorResponse};
-use crate::outbound_proxy::{http_client, OutboundProxy};
+use crate::outbound_guard::OutboundGuard;
+use crate::outbound_proxy::{guarded_http_client, OutboundProxy};
 
 /// The placeholder a `gateway_url_pattern` must contain, replaced by the
 /// transaction id of the part or record being read.
@@ -389,6 +390,9 @@ pub struct BlobFetcher {
     /// can never exceed the whole image's cap anyway, so the same number
     /// serves both without a second config key.
     max_blob_bytes: Option<u64>,
+    /// Where a fetch may go (TOON_Network#105): held so that `with_proxy`,
+    /// which rebuilds the client, cannot rebuild it without the guard.
+    guard: Arc<OutboundGuard>,
     /// Verified bytes on disk, keyed by digest. Only bytes that hashed to
     /// their digest are ever put here, so a cache hit skips every source
     /// and every check.
@@ -396,21 +400,35 @@ pub struct BlobFetcher {
 }
 
 impl BlobFetcher {
+    /// `exempt_registries` is `image_policy.exempt_registries`: the hosts
+    /// and CIDRs an operator has declared theirs, exempt from the rule that
+    /// an image is never fetched from an address that is not publicly
+    /// routable (TOON_Network#105). Empty is the default and the strict
+    /// case. The two URLs an OPERATOR configures — `registry_url_override`
+    /// and `gateway_url_pattern` — are exempt without being listed: they are
+    /// not tenant values, and a store gateway on a compose network is the
+    /// normal case.
     pub fn new(
         gateway_url_pattern: Option<String>,
         registry_url_override: Option<String>,
+        exempt_registries: &[String],
         max_blob_bytes: Option<u64>,
         cache: BlobCache,
-    ) -> Self {
-        let http = http_client(None, FETCH_TIMEOUT, "image fetches")
-            .expect("a client with a timeout and no proxy builds");
-        Self {
-            oci: OciClient::new(http.clone(), registry_url_override),
+    ) -> Result<Self> {
+        let guard = Arc::new(
+            OutboundGuard::new(exempt_registries)?
+                .exempting(registry_url_override.as_deref())
+                .exempting(gateway_url_pattern.as_deref()),
+        );
+        let http = guarded_http_client(None, FETCH_TIMEOUT, "image fetches", &guard)?;
+        Ok(Self {
+            oci: OciClient::new(http.clone(), registry_url_override, Arc::clone(&guard)),
             http,
             gateway_url_pattern,
             max_blob_bytes,
+            guard,
             cache,
-        }
+        })
     }
 
     /// `max_blob_bytes`, or the fixed ceiling when this provider configures
@@ -429,7 +447,7 @@ impl BlobFetcher {
     /// quietly goes direct. `socks5h`, so the registry's and the realm's
     /// names are resolved by the proxy.
     pub fn with_proxy(mut self, proxy: &OutboundProxy) -> Result<Self> {
-        let http = http_client(Some(proxy), FETCH_TIMEOUT, "image fetches")?;
+        let http = guarded_http_client(Some(proxy), FETCH_TIMEOUT, "image fetches", &self.guard)?;
         self.oci = self.oci.with_client(http.clone());
         self.http = http;
         Ok(self)
@@ -879,14 +897,16 @@ mod tests {
         let fetcher = BlobFetcher::new(
             Some("http://gw:3000/raw/{txid}".to_string()),
             None,
+            &[],
             None,
             cache(),
-        );
+        )
+        .unwrap();
         assert_eq!(
             fetcher.gateway_url("abc").unwrap(),
             "http://gw:3000/raw/abc"
         );
-        let none = BlobFetcher::new(None, None, None, cache());
+        let none = BlobFetcher::new(None, None, &[], None, cache()).unwrap();
         assert!(none
             .gateway_url("abc")
             .unwrap_err()
