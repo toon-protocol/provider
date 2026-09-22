@@ -455,7 +455,7 @@ fn config(
         capabilities: vec!["x-fixture".to_string()],
         listings: vec![
             listing("basic", 1, 2, None, &["x-fixture"], None),
-            listing("gpu", 1, 1, Some("rtx-4090"), &[], None),
+            listing("gpu", 1, 1, Some("nvidia-rtx-4090"), &[], None),
             // The one tier that sells Warm Standbys, so the fixtures show
             // both halves of the rule: a priced listing gets `.standby` and
             // `.standby.extend` rows and publishes `standby_price`, and the
@@ -988,7 +988,7 @@ async fn one_directory_event_per_kind() {
             &listings[1],
             "listing.gpu",
             "The `gpu` Listing: as `listing`, plus `resources.gpu` in content and an \
-             `l gpu:<model>` label, and no capabilities.",
+             `l gpu:<vendor>-<model>` label, and no capabilities (spec §4.2, §4.4).",
         ),
         (
             &listings[2],
