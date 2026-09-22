@@ -402,8 +402,14 @@ impl OutboundGuard {
             )
         };
         match host {
-            Host::Ipv4(ip) => self.allow_addr(IpAddr::V4(ip)).ok_or_else(refuse),
-            Host::Ipv6(ip) => self.allow_addr(IpAddr::V6(ip)).ok_or_else(refuse),
+            Host::Ipv4(ip) => self
+                .may_dial(IpAddr::V4(ip))
+                .then_some(())
+                .ok_or_else(refuse),
+            Host::Ipv6(ip) => self
+                .may_dial(IpAddr::V6(ip))
+                .then_some(())
+                .ok_or_else(refuse),
             Host::Domain(name) if resolve_names => {
                 let addrs = resolve_all(name).await.map_err(|e| {
                     anyhow!(
@@ -413,11 +419,7 @@ impl OutboundGuard {
                         e
                     )
                 })?;
-                if addrs.is_empty()
-                    || !addrs
-                        .iter()
-                        .all(|addr| self.allow_addr(addr.ip()).is_some())
-                {
+                if addrs.is_empty() || !addrs.iter().all(|addr| self.may_dial(addr.ip())) {
                     return Err(refuse());
                 }
                 Ok(())
@@ -426,10 +428,10 @@ impl OutboundGuard {
         }
     }
 
-    /// `Some(())` when a packet to `ip` may leave: publicly routable, or
-    /// somewhere the operator has exempted.
-    fn allow_addr(&self, ip: IpAddr) -> Option<()> {
-        (is_publicly_routable(ip) || self.exempts_addr(ip)).then_some(())
+    /// Whether a packet to `ip` may leave: publicly routable, or somewhere
+    /// the operator has exempted.
+    fn may_dial(&self, ip: IpAddr) -> bool {
+        is_publicly_routable(ip) || self.exempts_addr(ip)
     }
 
     /// The redirect policy for a client that fetches images: every hop is

@@ -18,6 +18,8 @@
 // depends on whose event is wanted. `get_image_entry` reads from the ONE
 // relay a spawn hinted at (spec §6.2), not the Relay Set: an Image Registry
 // entry is a publisher's event, and the tenant says where it can be found.
+// It is the only relay URL on this port a TENANT chooses, and so the only
+// one that is guarded — `relay_hint_guard`, spec §8.4, TOON_Network#107.
 // `find_blob_records` and `get_profile` ask the provider's OWN Relay Set,
 // because a bare digest names no relay and no signer (spec §8.4 step 3), and
 // a Warm Standby cannot learn its primary's Relay Set from anywhere but the
