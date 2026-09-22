@@ -95,15 +95,72 @@ function dnsLabelProblem(name) {
 }
 
 /**
+ * Why `rotation` is not a lease's rotation record, or `null` — also when
+ * there is none to check (spec §6.8; TOON_Network #80). A lease file keeps
+ * `{ root_secret: <new>, members: [<pubkey>…], confirmed: [<pubkey>…] }`
+ * while a rotation is unfinished; `confirmed` names the members already
+ * reading the new root, and must be a subset of `members`.
+ */
+export function rotationProblem(rotation) {
+  if (rotation === undefined) return null;
+  const { root_secret: newRoot, members, confirmed } = rotation ?? {};
+  if (
+    typeof newRoot !== 'string' ||
+    !HEX64.test(newRoot) ||
+    !Array.isArray(members) ||
+    !Array.isArray(confirmed) ||
+    !confirmed.every((c) => members.includes(c))
+  ) {
+    // Never the VALUE, for the same reason a root secret is not: it is a
+    // second root secret, and just as live.
+    return 'a rotation record must be { root_secret, members, confirmed }: 64-hex root_secret and confirmed a subset of members';
+  }
+  return null;
+}
+
+/**
+ * The root secret that reads ONE member's lease right now (spec §6.8;
+ * TOON_Network #80): `rotation.root_secret` — the NEW one — when `provider`
+ * has confirmed it, `rootSecret` — the OLD one — for every other member, and
+ * always when `rotation` is `undefined`.
+ *
+ * This is the one seam every tenant tool derives a member's token or grant
+ * through, so a Standby Set rotated at some members and not others is read
+ * correctly wherever it is addressed member by member: a handover, a
+ * withdrawal, a termination, a status check.
+ */
+export function currentRootFor(rootSecret, rotation, provider) {
+  return rotation !== undefined && rotation.confirmed.includes(provider) ? rotation.root_secret : rootSecret;
+}
+
+/**
+ * Why a tenant should see this before a tool derives anything from
+ * `rotation` — a rotation still under way — or `null` when there is none.
+ * Names how many of how many members have confirmed and how to finish it.
+ * Carries no secret: neither root secret, old or new, appears in it.
+ */
+export function rotationWarning(rotation) {
+  if (rotation === undefined) return null;
+  return (
+    `a rotation is unfinished (${rotation.confirmed.length} of ${rotation.members.length} member(s) confirmed): ` +
+    'each member is read with its OWN current token — the new one where confirmed, the old one otherwise. ' +
+    "Finish it with `seal.mjs rotate` (or the sandbox's `node scripts/rotate.mjs <lease.json>`), naming the same members."
+  );
+}
+
+/**
  * Why nothing should be derived for these inputs, or `null`: the root secret,
  * the workload id and the Standby Set, which a handover and a withdrawal both
- * take, and without which there is no grant to derive.
+ * take, and without which there is no grant to derive. `rotation`, when
+ * given, is the lease's own unfinished-rotation record (above).
  */
-function leaseProblem({ rootSecret, workloadId, standbySet }) {
+function leaseProblem({ rootSecret, rotation, workloadId, standbySet }) {
   if (typeof rootSecret !== 'string' || !HEX64.test(rootSecret)) {
     // The VALUE is never in the message: a refusal must not quote a secret back.
     return 'the root secret must be 64 lowercase hex characters, the secret the lease was spawned from (spec §6.1.1)';
   }
+  const rotationIssue = rotationProblem(rotation);
+  if (rotationIssue !== null) return rotationIssue;
   if (typeof workloadId !== 'string' || !HEX64.test(workloadId)) {
     return `the workload id ${JSON.stringify(workloadId)} must be 64 lowercase hex characters, the id the spawn named (spec §6.2)`;
   }
@@ -128,8 +185,8 @@ function leaseProblem({ rootSecret, workloadId, standbySet }) {
  * unchecked (the port, the Standby Set, the name) is checked here, in the
  * order a tenant reads the handover.
  */
-export function checkHandover({ rootSecret, workloadId, standbySet, httpPort, ports, expiresAt, name }, now) {
-  const lease = leaseProblem({ rootSecret, workloadId, standbySet });
+export function checkHandover({ rootSecret, rotation, workloadId, standbySet, httpPort, ports, expiresAt, name }, now) {
+  const lease = leaseProblem({ rootSecret, rotation, workloadId, standbySet });
   if (lease !== null) return lease;
 
   if (!Number.isInteger(httpPort) || httpPort < 1 || httpPort > 65535) {
@@ -180,11 +237,16 @@ export function checkHandover({ rootSecret, workloadId, standbySet, httpPort, po
  * One structure and not two parallel ones, because a member and the grant it
  * is asked with are one fact: there is no list to fall out of step with, and
  * a member cannot reach a gateway without the value that reads its lease.
+ *
+ * `rotation`, when given, is the lease's unfinished-rotation record: each
+ * member's OWN current root (`currentRootFor`, spec §6.8) is what its grant
+ * is derived from, so a handover sealed mid-rotation is one a member that has
+ * already confirmed still admits — and so does one that has not.
  */
-const standbySetFor = (rootSecret, providers, expiresAt) =>
+const standbySetFor = (rootSecret, rotation, providers, expiresAt) =>
   providers.map((provider) => ({
     provider,
-    grant: gatewaySub(continuationFor(rootSecret, provider), expiresAt),
+    grant: gatewaySub(continuationFor(currentRootFor(rootSecret, rotation, provider), provider), expiresAt),
   }));
 
 /**
@@ -202,10 +264,10 @@ const standbySetFor = (rootSecret, providers, expiresAt) =>
 export function handoverFor(handover, now) {
   const problem = checkHandover(handover, now);
   if (problem !== null) throw new Error(problem);
-  const { rootSecret, workloadId, standbySet, httpPort, expiresAt, name } = handover;
+  const { rootSecret, rotation, workloadId, standbySet, httpPort, expiresAt, name } = handover;
   return {
     workload_id: workloadId,
-    standby_set: standbySetFor(rootSecret, standbySet, expiresAt),
+    standby_set: standbySetFor(rootSecret, rotation, standbySet, expiresAt),
     http_port: httpPort,
     expires_at: expiresAt,
     ...(name === undefined ? {} : { name }),
@@ -345,8 +407,8 @@ export async function handOver({ handover, gateway, send, now = () => Math.floor
  * was handed, not by a provider against `now`, so it names whatever moment
  * the handover named.
  */
-export function checkWithdrawal({ rootSecret, workloadId, standbySet, expiresAt }) {
-  const lease = leaseProblem({ rootSecret, workloadId, standbySet });
+export function checkWithdrawal({ rootSecret, rotation, workloadId, standbySet, expiresAt }) {
+  const lease = leaseProblem({ rootSecret, rotation, workloadId, standbySet });
   if (lease !== null) return lease;
   if (!Number.isInteger(expiresAt) || expiresAt < 0) {
     return (
@@ -377,11 +439,11 @@ export function checkWithdrawal({ rootSecret, workloadId, standbySet, expiresAt 
 export function withdrawalFor(withdrawal) {
   const problem = checkWithdrawal(withdrawal);
   if (problem !== null) throw new Error(problem);
-  const { rootSecret, workloadId, standbySet, expiresAt } = withdrawal;
+  const { rootSecret, rotation, workloadId, standbySet, expiresAt } = withdrawal;
   return {
     workload_id: workloadId,
     expires_at: expiresAt,
-    standby_set: standbySetFor(rootSecret, standbySet, expiresAt),
+    standby_set: standbySetFor(rootSecret, rotation, standbySet, expiresAt),
   };
 }
 
@@ -450,23 +512,40 @@ export function parsePorts(text) {
  * first: a command that has no secret to derive from has nothing else worth
  * reading. There is no key and no place to put one — this tool derives, it
  * never signs (spec §6.1.1, ADR 0016).
+ *
+ * `leaseRecord`, when given — a lease `rotate.mjs`'s `readLease` read off
+ * `--lease` — supplies the workload id, the root secret and any unfinished
+ * `rotation` record instead: the file is the tenant's one true record of
+ * which root secret each member reads with right now (spec §6.8;
+ * TOON_Network #80), and `--root-secret` / `TOON_ROOT_SECRET` / `--workload`
+ * are refused alongside it by the caller before this is reached.
  */
-export function optionsFrom(subcommand, values, env, now) {
+export function optionsFrom(subcommand, values, env, now, leaseRecord) {
   if (subcommand !== 'handover' && subcommand !== 'withdrawal') {
     throw new Error(`the first argument is what to do: handover, withdrawal or rotate, not ${JSON.stringify(subcommand)}`);
   }
-  const rootSecret = values['root-secret'] ?? env.TOON_ROOT_SECRET;
-  if (rootSecret === undefined || rootSecret === '') {
-    throw new Error('a root secret is required: --root-secret <64 hex> or TOON_ROOT_SECRET');
-  }
-  if (!HEX64.test(rootSecret)) {
-    // Never quoted back: it is the secret the whole lease hangs on.
-    throw new Error('the root secret must be 64 lowercase hex characters (32 bytes); this tool takes no key and no nsec');
+  let rootSecret;
+  let workloadId;
+  let rotation;
+  if (leaseRecord !== undefined) {
+    ({ root_secret: rootSecret, rotation } = leaseRecord);
+    workloadId = leaseRecord.workload_id;
+  } else {
+    rootSecret = values['root-secret'] ?? env.TOON_ROOT_SECRET;
+    if (rootSecret === undefined || rootSecret === '') {
+      throw new Error('a root secret is required: --root-secret <64 hex> or TOON_ROOT_SECRET');
+    }
+    if (!HEX64.test(rootSecret)) {
+      // Never quoted back: it is the secret the whole lease hangs on.
+      throw new Error('the root secret must be 64 lowercase hex characters (32 bytes); this tool takes no key and no nsec');
+    }
+    workloadId = values.workload;
   }
 
   const lease = {
     rootSecret,
-    workloadId: values.workload,
+    ...(rotation === undefined ? {} : { rotation }),
+    workloadId,
     standbySet: values.standby ?? [],
   };
   const gateway = { route: values['gateway-route'], sealKey: values['gateway-seal-key'] };

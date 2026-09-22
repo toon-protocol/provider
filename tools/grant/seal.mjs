@@ -6,13 +6,13 @@
 // rotates the lease's Continuation Tokens (spec §6.8; TOON_Network #75),
 // which is what takes every grant of the old ones back.
 //
-//   node seal.mjs handover --root-secret <64 hex> --workload <64 hex> \
+//   node seal.mjs handover (--root-secret <64 hex> --workload <64 hex> | --lease <lease.json>) \
 //       --standby <pubkey> [--standby <pubkey>…] --http-port <container port> \
 //       [--ports <port,port,…>] [--name <label>] \
 //       (--expires-at <unix seconds> | --expires-in <24h | 90m | 7d | seconds>) \
 //       --gateway-route <ilp address> --gateway-seal-key <hex> [--dry-run]
 //
-//   node seal.mjs withdrawal --root-secret <64 hex> --workload <64 hex> \
+//   node seal.mjs withdrawal (--root-secret <64 hex> --workload <64 hex> | --lease <lease.json>) \
 //       --standby <pubkey> [--standby <pubkey>…] --expires-at <unix seconds> \
 //       --gateway-route <ilp address> --gateway-seal-key <hex> [--dry-run]
 //
@@ -32,8 +32,10 @@
 //                 `bad_grant` from then on. Hand over again to keep a gateway
 //
 //   --root-secret the lease's root secret, 64 hex; or TOON_ROOT_SECRET. The
-//                 only secret this tool takes: there is no Nostr key here
-//   --workload    the workload id the spawn was signed with
+//                 only secret this tool takes: there is no Nostr key here.
+//                 Refused together with --lease, which names one instead
+//   --workload    the workload id the spawn was signed with. Refused
+//                 together with --lease, which names one instead
 //   --standby     the Standby Set, primary FIRST, one flag per member; a
 //                 standalone lease's is its one provider. One grant is
 //                 derived PER MEMBER, because a grant derives from that
@@ -54,12 +56,20 @@
 //   --dry-run     derive the message, print it, and stop. Nothing is paid
 //                 for, no channel is opened and nothing is installed. Not for
 //                 `rotate`, which is nothing until the members have it
-//   --lease       rotate: the lease file — a JSON object holding the
-//                 `workload_id` and the `root_secret` (the sandbox's
-//                 spawn.mjs writes one). Read for both, and written back:
-//                 the new root secret goes in BEFORE a request leaves, and
-//                 replaces the old one only once every member has confirmed.
-//                 A file that records an unfinished rotation is resumed
+//   --lease       the lease file — a JSON object holding the `workload_id`
+//                 and the `root_secret` (the sandbox's spawn.mjs writes
+//                 one), and while a rotation is unfinished, `rotation`
+//                 (spec §6.8): `{ root_secret: <new>, members, confirmed }`.
+//                 handover and withdrawal READ it: each member's grant is
+//                 derived from ITS OWN current root — the new one where
+//                 confirmed, the old one otherwise — and --root-secret /
+//                 --workload are refused alongside it. rotate reads it AND
+//                 writes it back: the new root secret goes in BEFORE a
+//                 request leaves, and replaces the old one only once every
+//                 member has confirmed. A file that records an unfinished
+//                 rotation is resumed, by rotate, and READ AROUND, by the
+//                 other two — either way this tool prints a warning, with no
+//                 secret in it, when the file names one
 //   --member      rotate: one member of the Standby Set, primary first, as
 //                 <pubkey>,<ilp address>,<seal key> — its Profile's
 //                 `ilp_address` and pinned `connector_seal_key` (ADR 0011)
@@ -97,6 +107,7 @@ import {
   handOver,
   handoverFor,
   optionsFrom,
+  rotationWarning,
   sealedSender,
   withdraw,
   withdrawalFor,
@@ -219,18 +230,36 @@ async function main() {
     usage(`one thing is sealed at a time, not ${positionals.join(' and ')}`);
   }
   if (positionals[0] === 'rotate') return rotate(values);
-  for (const flag of ['lease', 'member']) {
-    if (values[flag] !== undefined) refuse(`--${flag} is rotate's: a ${positionals[0] ?? 'message'} takes --standby and a root secret`);
-  }
+  if (values.member !== undefined) refuse(`--member is rotate's: a ${positionals[0] ?? 'message'} takes --standby and a root secret`);
 
   const now = Math.floor(Date.now() / 1000);
+
+  // --lease is the lease file rotate.mjs also reads: a handover or a
+  // withdrawal off it reads each member's OWN current token (spec §6.8;
+  // TOON_Network #80) instead of one flat root secret, and --root-secret /
+  // TOON_ROOT_SECRET / --workload have nowhere to go alongside it.
+  let leaseRecord;
+  if (values.lease !== undefined) {
+    for (const flag of ['root-secret', 'workload']) {
+      if (values[flag] !== undefined) {
+        refuse(`--${flag} is read from --lease ${values.lease}; pass one or the other`);
+      }
+    }
+    try {
+      leaseRecord = readLease(values.lease);
+    } catch (e) {
+      refuse(e.message);
+    }
+    const warning = rotationWarning(leaseRecord.rotation);
+    if (warning !== null) log(`warning: ${warning}`);
+  }
 
   // Every refusal below happens before a channel is opened and before a
   // packet leaves: a message a gateway would act on wrongly, or a grant a
   // provider would refuse, is not worth a paid packet.
   let options;
   try {
-    options = optionsFrom(positionals[0], values, process.env, now);
+    options = optionsFrom(positionals[0], values, process.env, now, leaseRecord);
   } catch (e) {
     refuse(e.message);
   }

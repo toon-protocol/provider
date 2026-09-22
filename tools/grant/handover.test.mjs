@@ -20,12 +20,15 @@ import {
   GATEWAY_DOMAIN,
   checkHandover,
   continuationFor,
+  currentRootFor,
   gatewaySub,
   handOver,
   handoverFor,
   optionsFrom,
   parseExpiry,
   parsePorts,
+  rotationProblem,
+  rotationWarning,
   sealKeyBytes,
   sealedSender,
   withdraw,
@@ -183,6 +186,81 @@ describe('the handover a run produces', () => {
     const later = handoverFor(inputs({ expiresAt: FIXTURE_INPUTS.expiresAt + 86_400 }), NOW);
     assert.notEqual(grantAt(later, constants.provider.public_key), grantAt(first, constants.provider.public_key));
     assert.equal(later.expires_at, FIXTURE_INPUTS.expiresAt + 86_400);
+  });
+});
+
+describe('a lease with a rotation under way (spec §6.8, TOON_Network #80)', () => {
+  const primary = constants.primary_provider.public_key;
+  const standby = constants.standby_provider.public_key;
+  const newRoot = constants.rotated_tenant.root_secret;
+  const rotation = { root_secret: newRoot, members: [primary, standby], confirmed: [primary] };
+
+  it("derives each member's grant from ITS OWN current root: the new one where confirmed, the old one otherwise", () => {
+    const handover = handoverFor(inputs({ standbySet: [primary, standby], rotation }), NOW);
+    assert.equal(
+      grantAt(handover, primary),
+      gatewaySub(continuationFor(newRoot, primary), FIXTURE_INPUTS.expiresAt),
+      'the confirmed member reads with the NEW root',
+    );
+    assert.equal(
+      grantAt(handover, standby),
+      gatewaySub(continuationFor(FIXTURE_INPUTS.rootSecret, standby), FIXTURE_INPUTS.expiresAt),
+      'the member that has not confirmed still reads with the OLD root',
+    );
+  });
+
+  it('derives a withdrawal exactly the same way, over the same rotation record', () => {
+    const withdrawal = withdrawalFor({
+      rootSecret: FIXTURE_INPUTS.rootSecret,
+      rotation,
+      workloadId: FIXTURE_INPUTS.workloadId,
+      standbySet: [primary, standby],
+      expiresAt: FIXTURE_INPUTS.expiresAt,
+    });
+    assert.equal(grantAt(withdrawal, primary), gatewaySub(continuationFor(newRoot, primary), FIXTURE_INPUTS.expiresAt));
+    assert.equal(grantAt(withdrawal, standby), gatewaySub(continuationFor(FIXTURE_INPUTS.rootSecret, standby), FIXTURE_INPUTS.expiresAt));
+  });
+
+  it('changes nothing when there is no rotation record: every member reads the one root secret', () => {
+    const handover = handoverFor(inputs({ standbySet: [primary, standby] }), NOW);
+    assert.equal(grantAt(handover, primary), gatewaySub(continuationFor(FIXTURE_INPUTS.rootSecret, primary), FIXTURE_INPUTS.expiresAt));
+    assert.equal(grantAt(handover, standby), gatewaySub(continuationFor(FIXTURE_INPUTS.rootSecret, standby), FIXTURE_INPUTS.expiresAt));
+  });
+
+  it('is refused as a damaged rotation record when confirmed is not a subset of members, or root_secret is not 64 hex', () => {
+    for (const bad of [
+      { ...rotation, confirmed: [primary, 'aa'.repeat(32)] },
+      { ...rotation, root_secret: 'not-hex' },
+      { members: [primary], confirmed: [primary] }, // no root_secret at all
+    ]) {
+      assert.throws(
+        () => handoverFor(inputs({ standbySet: [primary, standby], rotation: bad }), NOW),
+        /rotation record/,
+      );
+      assert.notEqual(rotationProblem(bad), null);
+    }
+    assert.equal(rotationProblem(undefined), null);
+    assert.equal(rotationProblem(rotation), null);
+  });
+});
+
+describe('currentRootFor and rotationWarning', () => {
+  const provider = constants.provider.public_key;
+  const other = constants.primary_provider.public_key;
+  const newRoot = constants.rotated_tenant.root_secret;
+  const rotation = { root_secret: newRoot, members: [provider], confirmed: [provider] };
+
+  it('picks the new root for a confirmed member, the old one for every other, and always the old one with no rotation', () => {
+    assert.equal(currentRootFor('old', rotation, provider), newRoot);
+    assert.equal(currentRootFor('old', rotation, other), 'old');
+    assert.equal(currentRootFor('old', undefined, provider), 'old');
+  });
+
+  it('warns with a count and no secret when a rotation is unfinished, and says nothing when there is none', () => {
+    assert.equal(rotationWarning(undefined), null);
+    const warning = rotationWarning({ root_secret: newRoot, members: [provider, other], confirmed: [provider] });
+    assert.match(warning, /1 of 2 member\(s\) confirmed/);
+    assert.equal(warning.includes(newRoot), false, 'the new root secret is never in the warning');
   });
 });
 
@@ -416,6 +494,27 @@ describe('the command line', () => {
         name: 'blog',
       },
       gateway: { route: GATEWAY.route, sealKey: GATEWAY.sealKey },
+    });
+  });
+
+  it('assembles a handover from a lease record instead — its root secret, workload id and rotation, the environment unread', () => {
+    const rotation = { root_secret: constants.rotated_tenant.root_secret, members: [FLAGS.standby[0]], confirmed: [] };
+    const options = optionsFrom(
+      'handover',
+      { ...FLAGS, 'expires-in': '24h' },
+      {}, // proves TOON_ROOT_SECRET is not even looked at when a lease record is given
+      NOW,
+      { workload_id: FIXTURE_INPUTS.workloadId, root_secret: constants.tenant.root_secret, rotation },
+    );
+    assert.deepEqual(options.handover, {
+      rootSecret: constants.tenant.root_secret,
+      rotation,
+      workloadId: FIXTURE_INPUTS.workloadId,
+      standbySet: FLAGS.standby,
+      httpPort: 443,
+      ports: undefined,
+      expiresAt: NOW + 86_400,
+      name: undefined,
     });
   });
 
