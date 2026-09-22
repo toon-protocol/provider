@@ -221,6 +221,41 @@ async fn every_relay_read_on_a_hidden_provider_leaves_through_the_socks_proxy() 
     assert_relay_only_through(&socks, &relay, RELAY_HOST);
 }
 
+/// A TENANT's relay hint on a hidden provider (TOON_Network#107): a name
+/// only the proxy can resolve, hinted at by a spawn and NOT in this
+/// provider's Relay Set, is dialled through the proxy rather than refused.
+/// A hidden provider resolves no name itself, so a name is the proxy's to
+/// judge — while an address literal inside the operator's network is refused
+/// here as anywhere.
+#[tokio::test]
+async fn a_relay_hint_on_a_hidden_provider_rides_the_proxy_and_is_not_resolved_here() {
+    let relay = StubRelay::start().await;
+    let socks = SocksStub::start(&[(RELAY_HOST, relay.socket_addr())]).await;
+    let proxy = OutboundProxy::resolve(&socks.url()).unwrap();
+    let hint = relay.url_as(RELAY_HOST);
+    let address = format!("30434:{}:web:1.0", Keys::generate().public_key().to_hex());
+
+    // No Relay Set at all: nothing here is exempt, and the hint is still
+    // dialled — the read reaches the relay and answers "no such entry".
+    let directory = NullDirectory::new(vec![]).with_proxy(&proxy);
+    assert!(directory
+        .get_image_entry(&address, &hint)
+        .await
+        .unwrap()
+        .is_none());
+    assert_relay_only_through(&socks, &relay, RELAY_HOST);
+
+    let refusal = directory
+        .get_image_entry(&address, "ws://127.0.0.1:9944")
+        .await
+        .expect_err("loopback is refused on a hidden provider too");
+    assert!(
+        refusal.to_string().contains("ws://127.0.0.1:9944"),
+        "{}",
+        refusal
+    );
+}
+
 /// The other half of the claim: a provider that is not hidden opens every
 /// connection itself, and the proxy — running, and reachable — is never
 /// asked for anything.
