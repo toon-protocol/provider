@@ -50,7 +50,7 @@ use tracing::warn;
 use super::blob_cache::{BlobCache, CacheError};
 use super::oci::{OciClient, OciEndpoint};
 use crate::directory::Directory;
-use crate::nostr::image_events::{BlobRecord, BlobRecordContent, BlobSource, ImageEntry};
+use crate::nostr::image_events::{BlobPart, BlobRecord, BlobRecordContent, BlobSource, ImageEntry};
 use crate::nostr::wire::{ErrorCode, ErrorResponse};
 use crate::outbound_proxy::{http_client, OutboundProxy};
 
@@ -101,9 +101,11 @@ impl Candidate {
             Self::ToonStoreRecord { blob_record_txid } => {
                 format!("toon-store Blob Record {}", blob_record_txid)
             }
-            Self::BlobRecord(record) => {
-                format!("Blob Record with {} part(s)", record.parts.len())
-            }
+            Self::BlobRecord(record) => match (&record.parts, &record.pages) {
+                (Some(parts), _) => format!("Blob Record with {} part(s)", parts.len()),
+                (None, Some(pages)) => format!("Blob Record with {} page(s)", pages.len()),
+                (None, None) => "Blob Record with neither parts nor pages".to_string(),
+            },
             Self::Oci {
                 registry,
                 repository,
@@ -531,7 +533,10 @@ impl BlobFetcher {
 
     /// The whole blob from a Blob Record's parts: each read from the
     /// gateway, checked against its recorded size and sha256, and
-    /// concatenated in the record's order.
+    /// concatenated in the record's order. The parts themselves come either
+    /// straight from the record (`parts`) or through its `pages` (§8.2, §11
+    /// item 2) — `resolve_parts` tells them apart, and everything after it
+    /// is unchanged either way.
     async fn assemble(&self, digest: &str, record: &BlobRecordContent) -> Result<Bytes> {
         if record.digest != digest {
             bail!(
@@ -540,8 +545,9 @@ impl BlobFetcher {
                 digest
             );
         }
+        let parts = self.resolve_parts(record).await?;
         let mut blob = BytesMut::with_capacity(usize::try_from(record.size).unwrap_or(0));
-        for (index, part) in record.parts.iter().enumerate() {
+        for (index, part) in parts.iter().enumerate() {
             let bytes = self.gateway_read(&part.txid).await?;
             if bytes.len() as u64 != part.size {
                 bail!(
@@ -572,6 +578,57 @@ impl BlobFetcher {
             );
         }
         Ok(blob.freeze())
+    }
+
+    /// The record's ordered parts, however they are carried (§8.2, §11 item
+    /// 2). Inline `parts` is returned as is; `pages` is fetched page by
+    /// page, each page's OWN bytes verified against its `sha256` — and its
+    /// part count against `parts` — BEFORE any part inside it is trusted,
+    /// then concatenated in page order. A page that cannot be fetched or
+    /// fails its digest fails the whole record here, which is what sends
+    /// the caller's source (§8.4's chain) on to the next one.
+    async fn resolve_parts(&self, record: &BlobRecordContent) -> Result<Vec<BlobPart>> {
+        record.check_one_of()?;
+        match (&record.parts, &record.pages) {
+            (Some(parts), None) => Ok(parts.clone()),
+            (None, Some(pages)) => {
+                let mut all = Vec::new();
+                for (index, page) in pages.iter().enumerate() {
+                    let bytes = self.gateway_read(&page.txid).await.with_context(|| {
+                        format!("page {} ({}) could not be read", index, page.txid)
+                    })?;
+                    let got = hex_sha256(&bytes);
+                    if !got.eq_ignore_ascii_case(&page.sha256) {
+                        bail!(
+                            "page {} ({}) hashes to {}, not the {} recorded",
+                            index,
+                            page.txid,
+                            got,
+                            page.sha256
+                        );
+                    }
+                    let page_parts: Vec<BlobPart> =
+                        serde_json::from_slice(&bytes).with_context(|| {
+                            format!(
+                                "page {} ({}) is not a JSON array of parts",
+                                index, page.txid
+                            )
+                        })?;
+                    if page_parts.len() as u64 != page.parts {
+                        bail!(
+                            "page {} ({}) lists {} part(s), not the {} recorded",
+                            index,
+                            page.txid,
+                            page_parts.len(),
+                            page.parts
+                        );
+                    }
+                    all.extend(page_parts);
+                }
+                Ok(all)
+            }
+            _ => unreachable!("check_one_of already refused both or neither"),
+        }
     }
 
     /// `GET` one upload from the gateway, by txid.

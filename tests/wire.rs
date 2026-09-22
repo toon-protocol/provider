@@ -822,17 +822,19 @@ fn an_image_registry_entry_round_trips_both_source_types_byte_identically() {
 fn a_blob_record_round_trips_its_ordered_parts_byte_identically() {
     let content: BlobRecordContent = serde_json::from_str(BLOB_RECORD_CONTENT).unwrap();
     assert_eq!(content.part_size, 102_400);
+    assert!(
+        content.pages.is_none(),
+        "this shape carries parts, not pages"
+    );
+    content.check_one_of().unwrap();
+    let parts = content.parts.as_ref().unwrap();
     assert_eq!(
-        content.parts.iter().map(|p| p.size).sum::<u64>(),
+        parts.iter().map(|p| p.size).sum::<u64>(),
         content.size,
         "the parts cover the blob"
     );
     assert_eq!(
-        content
-            .parts
-            .iter()
-            .map(|p| p.txid.as_str())
-            .collect::<Vec<_>>(),
+        parts.iter().map(|p| p.txid.as_str()).collect::<Vec<_>>(),
         ["cGFydC1vbmU", "cGFydC10d28", "cGFydC10aHJlZQ"],
         "parts keep their order"
     );
@@ -840,6 +842,66 @@ fn a_blob_record_round_trips_its_ordered_parts_byte_identically() {
         serde_json::to_string(&content).unwrap(),
         BLOB_RECORD_CONTENT
     );
+}
+
+/// A Blob Record's content (spec §8.2, §11 item 2) carrying `pages` instead
+/// of `parts`: the large-blob shape a Blob Record over one store data item
+/// (~700 parts) uses.
+const BLOB_RECORD_PAGED_CONTENT: &str = concat!(
+    r#"{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","#,
+    r#""size":235520,"part_size":102400,"#,
+    r#""pages":[{"txid":"cGFnZS1vbmU","sha256":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","parts":2},"#,
+    r#"{"txid":"cGFnZS10d28","sha256":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","parts":1}]}"#,
+);
+
+#[test]
+fn a_blob_record_carries_pages_instead_of_parts_byte_identically() {
+    let content: BlobRecordContent = serde_json::from_str(BLOB_RECORD_PAGED_CONTENT).unwrap();
+    assert!(
+        content.parts.is_none(),
+        "this shape carries pages, not parts"
+    );
+    content.check_one_of().unwrap();
+    let pages = content.pages.as_ref().unwrap();
+    assert_eq!(
+        pages.iter().map(|p| p.txid.as_str()).collect::<Vec<_>>(),
+        ["cGFnZS1vbmU", "cGFnZS10d28"],
+        "pages keep their order"
+    );
+    assert_eq!(pages[0].parts, 2);
+    assert_eq!(pages[1].parts, 1);
+    assert_eq!(
+        serde_json::to_string(&content).unwrap(),
+        BLOB_RECORD_PAGED_CONTENT
+    );
+}
+
+#[test]
+fn a_blob_record_with_both_parts_and_pages_is_refused_as_a_one_of_violation() {
+    let mut value: serde_json::Value = serde_json::from_str(BLOB_RECORD_CONTENT).unwrap();
+    value["pages"] = json!([{"txid": "cGFnZS1vbmU", "sha256": "f".repeat(64), "parts": 3}]);
+    let content: BlobRecordContent = serde_json::from_value(value).unwrap();
+    assert!(content.parts.is_some() && content.pages.is_some());
+    assert!(
+        content.check_one_of().is_err(),
+        "both forms is exactly the shape §8.2's one-of rule refuses"
+    );
+    // A signed event carrying it is refused when it is READ, the same way
+    // any other malformed Blob Record is (§8.4: that source fails and the
+    // chain moves on).
+    let event = blob_record_event(&content, &publisher(), 1_700_000_000).unwrap();
+    assert!(BlobRecord::from_event(&event).is_err());
+}
+
+#[test]
+fn a_blob_record_with_neither_parts_nor_pages_is_refused_as_a_one_of_violation() {
+    let mut value: serde_json::Value = serde_json::from_str(BLOB_RECORD_CONTENT).unwrap();
+    value.as_object_mut().unwrap().remove("parts");
+    let content: BlobRecordContent = serde_json::from_value(value).unwrap();
+    assert!(content.parts.is_none() && content.pages.is_none());
+    assert!(content.check_one_of().is_err());
+    let event = blob_record_event(&content, &publisher(), 1_700_000_000).unwrap();
+    assert!(BlobRecord::from_event(&event).is_err());
 }
 
 #[test]

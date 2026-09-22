@@ -1,0 +1,70 @@
+{
+  "content": {
+    "digest": "sha256:7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4",
+    "pages": [
+      {
+        "parts": 2,
+        "sha256": "f4d51a6501269e7650e30e4dd4feb12f573e2d36977d2a7c4cdf887b09b3ade8",
+        "txid": "dG9vbi1zdG9yZS1wYWdlZC1sYXllci1wYWdlLW9uZQ"
+      },
+      {
+        "parts": 1,
+        "sha256": "3cb020f2acfb024e6400551fb8e1cee3af72f2bfbada067b2636b94865d09f74",
+        "txid": "dG9vbi1zdG9yZS1wYWdlZC1sYXllci1wYWdlLXR3bw"
+      }
+    ],
+    "part_size": 102400,
+    "parts": [
+      {
+        "sha256": "da1945f2d7ae1d6b9d81a3eb37562cd78283907d1652b9bd65ebcbf1a72acd96",
+        "size": 102400,
+        "txid": "dG9vbi1zdG9yZS1wYXJ0LW9uZQ"
+      },
+      {
+        "sha256": "7017a31652c759ea8d1e230d88868de23bf61518cb69d949e3940a396d549aee",
+        "size": 102400,
+        "txid": "dG9vbi1zdG9yZS1wYXJ0LXR3bw"
+      },
+      {
+        "sha256": "f7c86514f7aee207d26205be8486f9e4455529861feaab9d4f61118c62e011d2",
+        "size": 30208,
+        "txid": "dG9vbi1zdG9yZS1wYXJ0LXRocmVl"
+      }
+    ],
+    "size": 235008
+  },
+  "event": {
+    "content": "{\"digest\":\"sha256:7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4\",\"size\":235008,\"part_size\":102400,\"parts\":[{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LW9uZQ\",\"sha256\":\"da1945f2d7ae1d6b9d81a3eb37562cd78283907d1652b9bd65ebcbf1a72acd96\",\"size\":102400},{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LXR3bw\",\"sha256\":\"7017a31652c759ea8d1e230d88868de23bf61518cb69d949e3940a396d549aee\",\"size\":102400},{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LXRocmVl\",\"sha256\":\"f7c86514f7aee207d26205be8486f9e4455529861feaab9d4f61118c62e011d2\",\"size\":30208}],\"pages\":[{\"txid\":\"dG9vbi1zdG9yZS1wYWdlZC1sYXllci1wYWdlLW9uZQ\",\"sha256\":\"f4d51a6501269e7650e30e4dd4feb12f573e2d36977d2a7c4cdf887b09b3ade8\",\"parts\":2},{\"txid\":\"dG9vbi1zdG9yZS1wYWdlZC1sYXllci1wYWdlLXR3bw\",\"sha256\":\"3cb020f2acfb024e6400551fb8e1cee3af72f2bfbada067b2636b94865d09f74\",\"parts\":1}]}",
+    "created_at": 1700000000,
+    "id": "efa24b207202f5a09fe0baf7139245a21277d6e7ecae2dc4962a8a03a90e5d2d",
+    "kind": 30435,
+    "pubkey": "2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991",
+    "sig": "038dac6b28668563d27bff8818dd7bc3f01c62e8534244dc106f5d1bc52381ba3a9d88a095aabce39583126ec8dc2a1ba9ce119c9f5983cb97a3f5348bbcc292",
+    "tags": [
+      [
+        "d",
+        "sha256:7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4"
+      ],
+      [
+        "x",
+        "7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4"
+      ],
+      [
+        "L",
+        "toon.network"
+      ]
+    ]
+  },
+  "fixture": {
+    "case": "blob_record.both_forms",
+    "description": "INVALID: a Blob Record for the application layer carrying BOTH `parts` (as `registry.blob_record` shows) and `pages` (as `registry.blob_record.paged` shows) for the SAME blob (spec §8.2, §11 item 2). Exactly one of the two may be present; this provider's own reader refuses a record shaped like this one outright, and §8.4's chain treats it exactly like a record whose parts fail their own checks — that source fails and the next is tried.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "registry"
+  },
+  "kind_name": "K_BLOB",
+  "nip01_serialization": "[0,\"2c0b7cf95324a07d05398b240174dc0c2be444d96b159aa6c7f7b1e668680991\",1700000000,30435,[[\"d\",\"sha256:7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4\"],[\"x\",\"7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4\"],[\"L\",\"toon.network\"]],\"{\\\"digest\\\":\\\"sha256:7d1d14c42d352aa1e0f37512f1bda50bcfa89ed114f27c0051e1f09651c5e2f4\\\",\\\"size\\\":235008,\\\"part_size\\\":102400,\\\"parts\\\":[{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYXJ0LW9uZQ\\\",\\\"sha256\\\":\\\"da1945f2d7ae1d6b9d81a3eb37562cd78283907d1652b9bd65ebcbf1a72acd96\\\",\\\"size\\\":102400},{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYXJ0LXR3bw\\\",\\\"sha256\\\":\\\"7017a31652c759ea8d1e230d88868de23bf61518cb69d949e3940a396d549aee\\\",\\\"size\\\":102400},{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYXJ0LXRocmVl\\\",\\\"sha256\\\":\\\"f7c86514f7aee207d26205be8486f9e4455529861feaab9d4f61118c62e011d2\\\",\\\"size\\\":30208}],\\\"pages\\\":[{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYWdlZC1sYXllci1wYWdlLW9uZQ\\\",\\\"sha256\\\":\\\"f4d51a6501269e7650e30e4dd4feb12f573e2d36977d2a7c4cdf887b09b3ade8\\\",\\\"parts\\\":2},{\\\"txid\\\":\\\"dG9vbi1zdG9yZS1wYWdlZC1sYXllci1wYWdlLXR3bw\\\",\\\"sha256\\\":\\\"3cb020f2acfb024e6400551fb8e1cee3af72f2bfbada067b2636b94865d09f74\\\",\\\"parts\\\":1}]}\"]",
+  "page_bytes": {
+    "dG9vbi1zdG9yZS1wYWdlZC1sYXllci1wYWdlLW9uZQ": "[{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LW9uZQ\",\"sha256\":\"da1945f2d7ae1d6b9d81a3eb37562cd78283907d1652b9bd65ebcbf1a72acd96\",\"size\":102400},{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LXR3bw\",\"sha256\":\"7017a31652c759ea8d1e230d88868de23bf61518cb69d949e3940a396d549aee\",\"size\":102400}]",
+    "dG9vbi1zdG9yZS1wYWdlZC1sYXllci1wYWdlLXR3bw": "[{\"txid\":\"dG9vbi1zdG9yZS1wYXJ0LXRocmVl\",\"sha256\":\"f7c86514f7aee207d26205be8486f9e4455529861feaab9d4f61118c62e011d2\",\"size\":30208}]"
+  }
+}

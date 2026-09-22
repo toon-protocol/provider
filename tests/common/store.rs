@@ -22,8 +22,8 @@ use super::{sha256_hex, FakeBackend, FakeClock, FakeDirectory};
 use toon_provider::compute::ComputeBackend;
 use toon_provider::nostr::continuation::ContinuationToken;
 use toon_provider::nostr::image_events::{
-    blob_record_event, image_entry_event, BlobPart, BlobRecordContent, BlobSource, EntryBlob,
-    ImageEntryContent,
+    blob_record_event, image_entry_event, BlobPage, BlobPart, BlobRecordContent, BlobSource,
+    EntryBlob, ImageEntryContent,
 };
 use toon_provider::nostr::kinds::K_IMAGE;
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, SpawnContent};
@@ -51,6 +51,13 @@ pub enum Tamper {
     /// The gateway answers 5xx for part `n`. The record is honest and the
     /// bytes exist; the store is simply not serving them right now.
     GatewayError(usize),
+    /// A PAGED record only (§8.2, §11 item 2): the bytes served for page `n`
+    /// are not the ones its `sha256` records — the mirror of `CorruptPart`,
+    /// one level up.
+    CorruptPage(usize),
+    /// A PAGED record only: the gateway answers 5xx for page `n`. Its parts
+    /// are never reached, because the page itself could not be read.
+    PageGatewayError(usize),
 }
 
 pub struct World {
@@ -62,6 +69,10 @@ pub struct World {
     /// How many parts each upload was split into, by the txid prefix its
     /// parts were mounted under.
     parts: HashMap<String, usize>,
+    /// How many PAGES each paged upload was split into, by the same label
+    /// (§8.2, §11 item 2). Absent for an upload that stored its parts
+    /// inline.
+    pages: HashMap<String, usize>,
     /// The signed Blob Record of each stored blob, by digest — what an
     /// entry's `toon-store` source cites AND what a Relay Set would answer
     /// a `#x` lookup with. Seed it into a `FakeDirectory` to put the blob
@@ -77,6 +88,7 @@ impl World {
             publisher: Keys::generate(),
             blobs: Vec::new(),
             parts: HashMap::new(),
+            pages: HashMap::new(),
             records: HashMap::new(),
         }
     }
@@ -145,36 +157,142 @@ impl World {
         part_size: usize,
         tamper: Tamper,
     ) -> (Event, String) {
-        let mut parts = Vec::new();
-        for (i, chunk) in bytes.chunks(part_size).enumerate() {
-            let txid = format!("{}-part{}", label, i);
-            let served: Vec<u8> = match tamper {
-                Tamper::CorruptPart(n) if n == i => chunk.iter().map(|b| b ^ 0xff).collect(),
-                _ => chunk.to_vec(),
-            };
-            let size = match tamper {
-                Tamper::WrongPartSize(n) if n == i => chunk.len() as u64 + 1,
-                _ => chunk.len() as u64,
-            };
-            match tamper {
-                Tamper::GatewayError(n) if n == i => {
-                    mount_raw_status(&self.gateway, &txid, 503).await
-                }
-                _ => mount_raw(&self.gateway, &txid, served).await,
-            }
-            parts.push(BlobPart {
-                txid,
-                sha256: sha256_hex(chunk),
-                size,
-            });
-        }
+        let parts = mount_parts(&self.gateway, label, bytes, part_size, tamper).await;
+        self.parts.insert(label.to_string(), parts.len());
         let record = BlobRecordContent {
             digest: claimed.to_string(),
             size: bytes.len() as u64,
             part_size: part_size as u64,
-            parts,
+            parts: Some(parts),
+            pages: None,
         };
-        self.parts.insert(label.to_string(), record.parts.len());
+        let event = blob_record_event(&record, &self.publisher, NOW).unwrap();
+        let record_txid = format!("{}-record", label);
+        mount_raw(
+            &self.gateway,
+            &record_txid,
+            serde_json::to_vec(&event).unwrap(),
+        )
+        .await;
+        (event, record_txid)
+    }
+
+    /// Like `store`, but PAGED (§8.2, §11 item 2): the parts are grouped
+    /// `parts_per_page` at a time, each group uploaded as one page whose
+    /// bytes are the JSON array of that group's part objects. Answers the
+    /// blob's digest.
+    pub async fn store_paged(
+        &mut self,
+        bytes: &[u8],
+        media_type: &str,
+        part_size: usize,
+        parts_per_page: usize,
+    ) -> String {
+        let digest = digest_of(bytes);
+        self.store_paged_as(
+            &digest,
+            bytes,
+            media_type,
+            part_size,
+            parts_per_page,
+            Tamper::None,
+        )
+        .await;
+        digest
+    }
+
+    /// Like `store_as`, but PAGED.
+    pub async fn store_paged_as(
+        &mut self,
+        claimed: &str,
+        bytes: &[u8],
+        media_type: &str,
+        part_size: usize,
+        parts_per_page: usize,
+        tamper: Tamper,
+    ) {
+        let hex = claimed.strip_prefix("sha256:").unwrap();
+        let (event, record_txid) = self
+            .upload_paged(
+                &hex[..12],
+                claimed,
+                bytes,
+                part_size,
+                parts_per_page,
+                tamper,
+            )
+            .await;
+        self.records.insert(claimed.to_string(), event);
+        self.blobs.push(EntryBlob {
+            digest: claimed.to_string(),
+            size: bytes.len() as u64,
+            media_type: media_type.to_string(),
+            source: BlobSource::ToonStore {
+                blob_record_txid: record_txid,
+            },
+        });
+    }
+
+    /// Like `another_record`, but PAGED.
+    pub async fn another_paged_record(
+        &mut self,
+        label: &str,
+        claimed: &str,
+        bytes: &[u8],
+        part_size: usize,
+        parts_per_page: usize,
+        tamper: Tamper,
+    ) -> Event {
+        self.upload_paged(label, claimed, bytes, part_size, parts_per_page, tamper)
+            .await
+            .0
+    }
+
+    /// Upload `bytes` as parts, grouped `parts_per_page` at a time into
+    /// pages under `<label>-page<n>`, and the signed Blob Record describing
+    /// the pages as `<label>-record` (§8.2, §11 item 2). A part-level
+    /// `tamper` reaches the parts exactly as `upload` applies it; a
+    /// page-level one reaches the page a part's group landed in.
+    async fn upload_paged(
+        &mut self,
+        label: &str,
+        claimed: &str,
+        bytes: &[u8],
+        part_size: usize,
+        parts_per_page: usize,
+        tamper: Tamper,
+    ) -> (Event, String) {
+        let parts = mount_parts(&self.gateway, label, bytes, part_size, tamper).await;
+        self.parts.insert(label.to_string(), parts.len());
+        let mut pages = Vec::new();
+        for (i, group) in parts.chunks(parts_per_page).enumerate() {
+            let page_parts = group.to_vec();
+            let page_bytes = serde_json::to_vec(&page_parts).unwrap();
+            let served: Vec<u8> = match tamper {
+                Tamper::CorruptPage(n) if n == i => page_bytes.iter().map(|b| b ^ 0xff).collect(),
+                _ => page_bytes.clone(),
+            };
+            let txid = format!("{}-page{}", label, i);
+            match tamper {
+                Tamper::PageGatewayError(n) if n == i => {
+                    mount_raw_status(&self.gateway, &txid, 503).await
+                }
+                _ => mount_raw(&self.gateway, &txid, served).await,
+            }
+            pages.push(BlobPage {
+                txid,
+                sha256: sha256_hex(&page_bytes),
+                parts: page_parts.len() as u64,
+            });
+        }
+        self.pages.insert(label.to_string(), pages.len());
+        let record = BlobRecordContent {
+            digest: claimed.to_string(),
+            size: bytes.len() as u64,
+            part_size: part_size as u64,
+            parts: None,
+            pages: Some(pages),
+        };
         let event = blob_record_event(&record, &self.publisher, NOW).unwrap();
         let record_txid = format!("{}-record", label);
         mount_raw(
@@ -307,6 +425,21 @@ impl World {
         self.part_paths_of(&digest.strip_prefix("sha256:").unwrap()[..12])
     }
 
+    /// The `/raw/` paths of one PAGED upload's PAGES (§8.2, §11 item 2),
+    /// without its record or the parts inside them — the mirror of
+    /// `part_paths_of`, one level up.
+    pub fn page_paths_of(&self, label: &str) -> Vec<String> {
+        (0..self.pages.get(label).copied().unwrap_or(0))
+            .map(|i| format!("/raw/{}-page{}", label, i))
+            .collect()
+    }
+
+    /// The `/raw/` paths of a stored blob's pages, without its record or
+    /// the parts inside them.
+    pub fn page_paths(&self, digest: &str) -> Vec<String> {
+        self.page_paths_of(&digest.strip_prefix("sha256:").unwrap()[..12])
+    }
+
     /// The `/raw/` path of one part of a stored blob — so a test names a
     /// part the way this world does rather than re-deriving the txid rule.
     pub fn part_path(&self, digest: &str, index: usize) -> String {
@@ -378,6 +511,42 @@ impl World {
                 .iter()
                 .any(|p| p.contains(digest))
     }
+}
+
+/// Mount `bytes` as parts of `part_size` under `<label>-part<n>`, honouring a
+/// part-level `Tamper`, and answer the ordered `BlobPart` list — the shared
+/// core of both `upload` (inline `parts`) and `upload_paged` (`pages`, §8.2,
+/// §11 item 2): the parts themselves are split, mounted and recorded exactly
+/// the same way whichever shape lists them.
+async fn mount_parts(
+    gateway: &MockServer,
+    label: &str,
+    bytes: &[u8],
+    part_size: usize,
+    tamper: Tamper,
+) -> Vec<BlobPart> {
+    let mut parts = Vec::new();
+    for (i, chunk) in bytes.chunks(part_size).enumerate() {
+        let txid = format!("{}-part{}", label, i);
+        let served: Vec<u8> = match tamper {
+            Tamper::CorruptPart(n) if n == i => chunk.iter().map(|b| b ^ 0xff).collect(),
+            _ => chunk.to_vec(),
+        };
+        let size = match tamper {
+            Tamper::WrongPartSize(n) if n == i => chunk.len() as u64 + 1,
+            _ => chunk.len() as u64,
+        };
+        match tamper {
+            Tamper::GatewayError(n) if n == i => mount_raw_status(gateway, &txid, 503).await,
+            _ => mount_raw(gateway, &txid, served).await,
+        }
+        parts.push(BlobPart {
+            txid,
+            sha256: sha256_hex(chunk),
+            size,
+        });
+    }
+    parts
 }
 
 /// The gateway answers `status` for this upload and serves no bytes: a

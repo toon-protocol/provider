@@ -161,13 +161,34 @@ pub struct BlobPart {
     pub size: u64,
 }
 
+/// One page of a paged Blob Record (spec §8.2, §11 item 2): one TOON store
+/// upload whose bytes are a JSON array of part objects, in exactly the shape
+/// of a `parts` entry. A Blob Record over roughly 700 parts (~70 MB) does not
+/// fit `parts` in one store data item, so it lists `pages` instead — the
+/// bytes of each page are themselves a slice of the ordered part list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlobPage {
+    /// The TOON store transaction id this page was uploaded as.
+    pub txid: String,
+    /// The bare hex SHA-256 of the PAGE'S OWN bytes — the JSON array the
+    /// upload holds, not any part it lists. A reader checks this before
+    /// using a single part from the page (§8.4).
+    pub sha256: String,
+    /// How many part objects the page's JSON array holds, checked against
+    /// what parsing the page actually finds.
+    pub parts: u64,
+}
+
 /// The content of a Blob Record (`K_BLOB`, addressable), spec §8.2: how one
-/// blob's bytes are split into ordered parts in the TOON store.
+/// blob's bytes are split into ordered parts in the TOON store, either
+/// listed inline (`parts`) or paged (`pages`, §11 item 2) — EXACTLY one of
+/// the two, never both and never neither (`check_one_of`).
 ///
-/// `parts` is ORDERED: a reader concatenates them as they appear and checks
-/// the result against `digest`. `part_size` is the size every part but the
-/// last has, kept so a reader can tell a truncated list from a complete one
-/// without fetching anything.
+/// Whichever form is present, the ordered part list it yields is
+/// concatenated as it appears and checked against `digest`. `part_size` is
+/// the size every part but the last has, kept so a reader can tell a
+/// truncated list from a complete one without fetching anything.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BlobRecordContent {
@@ -175,7 +196,31 @@ pub struct BlobRecordContent {
     pub digest: String,
     pub size: u64,
     pub part_size: u64,
-    pub parts: Vec<BlobPart>,
+    /// Today's shape: every part listed inline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<Vec<BlobPart>>,
+    /// The large-blob shape (§11 item 2): ordered pages, each fetched and
+    /// digest-checked before any part inside it is trusted, then
+    /// concatenated in page order into the same ordered part list `parts`
+    /// would have been.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<Vec<BlobPage>>,
+}
+
+impl BlobRecordContent {
+    /// §8.2's one-of rule: a record carrying both `parts` and `pages`, or
+    /// neither, is invalid. A reader that finds this — from any source —
+    /// treats the record as unusable and lets §8.4's chain move on to the
+    /// next one, exactly as it does for a record whose parts fail to verify.
+    pub fn check_one_of(&self) -> Result<()> {
+        match (&self.parts, &self.pages) {
+            (Some(_), None) | (None, Some(_)) => Ok(()),
+            (Some(_), Some(_)) => {
+                bail!("a Blob Record must carry exactly one of `parts` or `pages`, not both")
+            }
+            (None, None) => bail!("a Blob Record must carry exactly one of `parts` or `pages`"),
+        }
+    }
 }
 
 /// A Blob Record as it arrives from a relay. Its `d` is its content's
@@ -191,8 +236,9 @@ pub struct BlobRecord {
 }
 
 impl BlobRecord {
-    /// Read a Blob Record from a signed event, checking its kind and that
-    /// its `d` and `x` tags both name the digest its content describes.
+    /// Read a Blob Record from a signed event, checking its kind, that its
+    /// `d` and `x` tags both name the digest its content describes, and that
+    /// its content carries exactly one of `parts` or `pages` (§8.2).
     pub fn from_event(event: &Event) -> Result<Self> {
         let content: BlobRecordContent = parse_content(event, K_BLOB, "a Blob Record")?;
         check_x_tag(event, &content.digest)?;
@@ -204,6 +250,7 @@ impl BlobRecord {
                 content.digest
             );
         }
+        content.check_one_of()?;
         Ok(Self {
             publisher: event.pubkey,
             content,
