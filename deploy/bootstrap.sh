@@ -78,13 +78,12 @@ echo "==> [5/9] The connector, and the sealing key it alone knows"
 # routes whose handler is not up yet, which is a 502 to anyone who pays one,
 # not a refusal to boot.
 if [ -z "${CONNECTOR_SEAL_KEY:-}" ]; then
-  # A first render needs a value for envsubst even though the connector is
-  # what will supply it; render only what the connector itself needs.
-  envsubst '${DOMAIN}' < connector.toml.template > connector.toml
-  printf '%s\n' "${OPERATOR_BEARER_TOKEN}" > operator-bearer.token
-  printf '%s\n' "${OPERATOR_WRITE_KEY}" > operator-write.keys
-  chmod 600 connector.toml operator-bearer.token operator-write.keys
-  chown 10001:10001 connector.toml operator-bearer.token operator-write.keys
+  # Everything the connector needs and nothing that needs the connector. One
+  # renderer, so the key files get their ownership fixed here too -- a
+  # hand-rolled copy of this in an earlier draft did not, and the connector
+  # restart-looped on "failed to read signer key_file: Permission denied"
+  # while this step sat waiting for an answer it could never get.
+  ./render.sh --connector-only
   # --no-deps, and it is load-bearing. The connector `depends_on` the app, so
   # without it compose starts the app too -- and the app's bind mount names a
   # provider.toml that this step has not rendered yet, which docker answers by
