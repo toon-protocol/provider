@@ -130,7 +130,11 @@ shape the record gets, the ordered parts either way, and the exact bytes
 every upload (a part, or a page) would carry. Like `publish.mjs`, it holds no
 identity and touches no network: signing the record and uploading these
 bytes to a real store is the caller's job (the sandbox's
-`infra/sandbox/scripts/publisher`, or any other deployment).
+`infra/sandbox/scripts/publisher`, which imports `planBlobRecord` from here
+for the decision and keeps only the signing and the paying — `make
+smoke-m7` publishes a paged image through it — or any other deployment).
+The threshold is measured on the WHOLE signed event, escaped content and
+tags included: at the 100 KiB part size, 689 parts stay inline and 690 page.
 
 ```js
 import { planBlobRecord } from './blob.mjs';

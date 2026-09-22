@@ -12,7 +12,8 @@
 // every upload (a part, or a page) would carry. It holds no identity and
 // touches no network: signing the record and uploading these bytes to a
 // real store is the caller's job (the sandbox's
-// `infra/sandbox/scripts/publisher`, or any other deployment), exactly as
+// `infra/sandbox/scripts/publisher`, which IMPORTS this module for the
+// decision rather than restating it, or any other deployment), exactly as
 // `publish.mjs` in this same directory holds the money for a relay write
 // and never the provider's signing key. `blob-cli.mjs` in this directory is
 // a thin driver over it, so the choice this module makes can be watched
@@ -24,8 +25,8 @@ export const sha256Hex = (bytes) => createHash('sha256').update(bytes).digest('h
 export const digestOf = (bytes) => `sha256:${sha256Hex(bytes)}`;
 
 // The store's free-tier data item ceiling and the sandbox's part size
-// (matches `infra/sandbox/scripts/publisher/blob.mjs`, which is what
-// actually uploads in the sandbox — this module only plans). The store
+// (the same as `infra/sandbox/scripts/publisher/blob.mjs`'s, which is what
+// actually uploads in the sandbox, planned here — this module only plans). The store
 // measures the ceiling on the signed item it receives: for a part or a page
 // that is the bytes themselves, wrapped in the store's own ~256-byte
 // envelope; for the record it is the SIGNED event, which is what
