@@ -113,7 +113,7 @@ A grant has no rotation of its own. The same root secret, Standby Set and
 
 ```
 node seal.mjs rotate --lease <lease.json> \
-    --member <pubkey>,<ilp address>,<seal key> [--member …]
+    --member <pubkey>,<ilp address>,<seal key>[,<connector>] [--member …]
 ```
 
 One command rotates the **whole Standby Set** (spec §6.8):
@@ -162,6 +162,42 @@ hex, with or without `0x`. There is no `--dry-run`: a new root secret is
 nothing until the members hold it. The report names each member and whether
 it rotated, and carries no secret:
 
+### A hidden member (spec §10, §12.8; TOON_Network #81)
+
+`--member` takes an optional **fourth** field: `<pubkey>,<ilp address>,<seal
+key>,<connector>`. A member with no fourth field is reached exactly as
+before, through the one client this process opens for `TOON_CONNECTOR_URL`.
+A member that names one is dialled **directly** at that URL instead — the one
+path a Hidden Provider's own connector allows, since its `.anyone` address is
+not a route a hub peers with (spec §10, Appendix A). A URL naming an `.anyone`
+host is reached over anon, and `TOON_SOCKS_PROXY` is then required; the tool
+refuses before anything is sent if it names one and finds no proxy configured.
+
+Rotation and its recovery both go through this same dispatch: `rotateMember`'s
+`status` probe after a lost answer (spec §6.8) presents the same member it
+just asked `rotate`, so recovering from a hidden member's lost answer takes
+the identical direct path — nothing about it is special-cased.
+
+`<addr>.rotate` and `<addr>.status` are **free** routes (spec §5, §6.8), so a
+client opened for a hidden member's connector never opens a channel: no
+deposit, no mnemonic spent, nothing paid for. `TOON_MNEMONIC` is still
+required — it derives this process's identity, which a Lease Request needs
+regardless of whether anything is paid for.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TOON_SOCKS_PROXY` | — | `socks5h://<host>:<port>` to a running anon daemon. **Required** when any `--member` names a connector. |
+| `TOON_HIDDEN_CHAIN` | `evm` | Settlement chain identity is derived on for a hidden member's client. |
+| `TOON_HIDDEN_RPC_PORT` | `8545` | That chain's RPC, on the member's own connector **host** (the sandbox's hidden path runs its chain RPC on the same `.anyone` address). |
+| `TOON_HIDDEN_ACCOUNT_INDEX` | `TOON_ACCOUNT_INDEX` | Which account of `TOON_MNEMONIC`'s phrase. |
+| `TOON_HIDDEN_CHANNEL_STORE` | `.toon-client/hidden-channels.json` | Unused unless something one day prices a hidden member's rotate; kept for shape, not because anything is written to it today. |
+
+```
+node seal.mjs rotate --lease <lease.json> \
+    --member <primary pubkey>,g.toon.provider,<seal key> \
+    --member <hidden pubkey>,g.toon.provider-hs,<seal key>,http://<address>.anyone
+```
+
 ```json
 { "workload_id": "…", "rotated": true,
   "members": [ { "provider": "…", "rotated": true },
@@ -209,7 +245,7 @@ node seal.mjs withdrawal (--workload <64 hex> [--root-secret <64 hex>] | --lease
     --gateway-route <ilp address> --gateway-seal-key <hex> [--dry-run]
 
 node seal.mjs rotate --lease <lease.json> \
-    --member <pubkey>,<ilp address>,<seal key> [--member …]
+    --member <pubkey>,<ilp address>,<seal key>[,<connector>] [--member …]
 ```
 
 `rotate`'s two flags are its own and are described [above](#rotating-the-token);
@@ -295,7 +331,10 @@ does, and reads the same environment name for name.
 | `TOON_ENDPOINT_REWRITE` | `{}` | JSON map of advertised connector URL prefix → the address this process can reach it at (see the publisher's README). |
 
 There is no `RELAY_WRITE_ROUTES`: this tool writes to no relay. `TOON_SOCKS_PROXY`
-and `TOON_HIDDEN` are deliberately absent — a tenant is not what spec §10 hides.
+and the `TOON_HIDDEN_*` variables are `rotate`'s alone — reaching a Hidden
+Provider **member**, not hiding the tenant (spec §10 hides a provider, never a
+tenant) — and are documented [above](#a-hidden-member-spec-10-128-toon_network-81),
+beside the one command that reads them.
 
 Deriving needs none of it:
 
@@ -326,7 +365,13 @@ Against a running sandbox stack (`make up` in `infra/sandbox`), drop
   per member naming only itself, the lease file keeping both roots until
   every member confirmed, a lost answer recovered through `status`, and a
   partly rotated set resumed. The request's bytes are checked against the
-  provider's `lease_request.rotate.json`.
+  provider's `lease_request.rotate.json`. A `describe('a hidden member', …)`
+  block exercises the fourth `--member` field and `directedAsk` with a second,
+  independent in-memory simulator standing in for a Hidden Provider's own
+  connector — a mixed Standby Set rotating over two paths at once, and a lost
+  answer from the hidden one recovered through `status` there too — with no
+  docker, no anon and no chain: `directedAsk` and `rotateLease` never know
+  there IS a network underneath either `ask`.
 - **`seal.test.mjs`** — the command as a process: the flags, the environment,
   the report, and the exit codes. Each run gets a **bare** environment — no
   mnemonic, no connector, no chain — so a `--dry-run` that works there is one

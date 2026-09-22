@@ -17,7 +17,7 @@
 //       --gateway-route <ilp address> --gateway-seal-key <hex> [--dry-run]
 //
 //   node seal.mjs rotate --lease <lease.json> \
-//       --member <pubkey>,<ilp address>,<seal key> [--member …]
+//       --member <pubkey>,<ilp address>,<seal key>[,<connector>] [--member …]
 //
 //   handover      choose this gateway: the workload id, the Standby Set, the
 //                 HTTP container port, the grant's moment, the grant itself
@@ -72,7 +72,15 @@
 //                 secret in it, when the file names one
 //   --member      rotate: one member of the Standby Set, primary first, as
 //                 <pubkey>,<ilp address>,<seal key> — its Profile's
-//                 `ilp_address` and pinned `connector_seal_key` (ADR 0011)
+//                 `ilp_address` and pinned `connector_seal_key` (ADR 0011) —
+//                 plus, ONLY for a member reached directly rather than
+//                 through the connector TOON_CONNECTOR_URL names, a fourth
+//                 field: the URL to dial it at. A Hidden Provider's is such a
+//                 member (spec §10, §12.8; TOON_Network #81): its connector is
+//                 an `.anyone` address a hub does not peer with, so it is
+//                 dialled over anon — TOON_SOCKS_PROXY is then required — on
+//                 its own chain and RPC port (TOON_HIDDEN_*, below). Free
+//                 routes need no channel, so nothing is paid for there
 //
 // Prints one JSON report on stdout and progress on stderr. Exit 0 when the
 // gateway took the message (or on a dry run) or every member rotated, 1 when
@@ -112,12 +120,11 @@ import {
   withdraw,
   withdrawalFor,
 } from './handover.mjs';
-import { membersProblem, parseMember, readLease, resumeProblem, rotateLease, sealedAsker } from './rotate.mjs';
+import { directedAsk, membersProblem, parseMember, readLease, resumeProblem, rotateLease, sealedAsker } from './rotate.mjs';
 
 // The payer's configuration, name for name what tools/publisher reads, so a
 // tenant beside a sandbox provider sets one environment for both. There is no
-// RELAY_WRITE_ROUTES: this tool writes to no relay. TOON_SOCKS_PROXY and
-// TOON_HIDDEN are absent on purpose — a tenant is not what spec §10 hides.
+// RELAY_WRITE_ROUTES: this tool writes to no relay.
 const CONNECTOR = process.env.TOON_CONNECTOR_URL ?? 'http://localhost:3200';
 const CHAIN = process.env.TOON_CHAIN ?? 'solana';
 const RPC_URL = process.env.TOON_RPC_URL ?? 'http://127.0.0.1:8899';
@@ -129,6 +136,21 @@ const TIMEOUT_MS = Number(process.env.TOON_TIMEOUT_MS ?? 60_000);
 // Advertised connector endpoint prefix -> where this process can reach it
 // (tools/publisher/README.md, TOON_ENDPOINT_REWRITE).
 const ENDPOINT_REWRITE = Object.entries(JSON.parse(process.env.TOON_ENDPOINT_REWRITE ?? '{}'));
+
+// `rotate` ONLY (spec §10, §12.8; TOON_Network #81): a Hidden Provider's
+// connector is an `.anyone` address a hub does not peer with, so a `--member`
+// naming one (its optional fourth field, `parseMember`) is dialled DIRECTLY,
+// over anon, rather than through the client above. TOON_SOCKS_PROXY is
+// required whenever a member does; the rest default to what the sandbox's
+// hidden path already uses (`infra/sandbox/scripts/smoke-milestone4.mjs`) —
+// its own chain, its own RPC port on the member's own connector host, and no
+// deposit, because `<addr>.rotate` and `<addr>.status` are free routes (spec
+// §5, §6.8): a hidden member's client never opens a channel at all.
+const SOCKS_PROXY = process.env.TOON_SOCKS_PROXY;
+const HIDDEN_CHAIN = process.env.TOON_HIDDEN_CHAIN ?? 'evm';
+const HIDDEN_RPC_PORT = process.env.TOON_HIDDEN_RPC_PORT ?? '8545';
+const HIDDEN_ACCOUNT_INDEX = Number(process.env.TOON_HIDDEN_ACCOUNT_INDEX ?? ACCOUNT_INDEX);
+const HIDDEN_CHANNEL_STORE = process.env.TOON_HIDDEN_CHANNEL_STORE ?? '.toon-client/hidden-channels.json';
 
 const log = (m) => console.error(`[handover] ${m}`);
 
@@ -195,6 +217,38 @@ async function openClient() {
   log(
     `paying ${CONNECTOR} from ${client.identity?.solanaPublicKey ?? '(unknown)'} ` +
       `on channel ${opened.channelId ?? '(id unreported)'}`,
+  );
+  return client;
+}
+
+/**
+ * `rotate` only: a client that dials `connector` DIRECTLY, over anon when it
+ * names an `.anyone` host, instead of through the shared client above — the
+ * one path a Hidden Provider's own connector allows (spec §10, Appendix A;
+ * TOON_Network #81). No channel is opened: `<addr>.rotate` and `<addr>.status`
+ * are free routes (spec §5, §6.8), so nothing here is paid for. The RPC port
+ * is the member's own connector host on `HIDDEN_RPC_PORT` — the same address
+ * the sandbox's hidden path already reaches its chain at
+ * (`infra/sandbox/scripts/smoke-milestone4.mjs`).
+ */
+async function openHiddenClient(connector) {
+  const { ToonClient } = await import('@toon-protocol/client');
+  const rpcUrl = `${new URL(connector).origin.replace(/:\d+$/, '')}:${HIDDEN_RPC_PORT}`;
+  mkdirSync(dirname(HIDDEN_CHANNEL_STORE), { recursive: true });
+  const client = await ToonClient.create({
+    connector,
+    socksProxy: SOCKS_PROXY,
+    mnemonic: MNEMONIC,
+    accountIndex: HIDDEN_ACCOUNT_INDEX,
+    chain: HIDDEN_CHAIN,
+    rpcUrl,
+    channelStore: HIDDEN_CHANNEL_STORE,
+    deposit: 0n,
+    timeoutMs: TIMEOUT_MS,
+  });
+  log(
+    `reaching ${connector} directly${SOCKS_PROXY ? ` over anon (${SOCKS_PROXY})` : ''} as ` +
+      `${client.identity?.evmAddress ?? client.identity?.senderId ?? '(unknown)'} — rotate and status are free, so nothing is paid for`,
   );
   return client;
 }
@@ -351,19 +405,63 @@ async function rotate(values) {
   }
   const problem = membersProblem(members) ?? resumeProblem(values.lease, lease, members);
   if (problem !== null) refuse(`refused before sending: ${problem}`);
+
+  // A member naming its own connector (`parseMember`'s optional fourth field)
+  // is a Hidden Provider, dialled DIRECTLY over anon rather than through the
+  // shared client (spec §10, §12.8; TOON_Network #81) — split them apart
+  // before anything is opened, so only the clients this run actually needs
+  // get opened at all.
+  const hidden = members.filter((m) => m.connector !== undefined);
+  const clearnet = members.filter((m) => m.connector === undefined);
+  if (hidden.length > 0 && !SOCKS_PROXY) {
+    refuse(
+      `TOON_SOCKS_PROXY is required to reach ${hidden.map((m) => m.provider.slice(0, 12)).join(', ')} at its connector: ` +
+        'an .anyone address is never resolved or dialled directly (spec §10, §12.8) — socks5h://<host>:<port> to a running anon daemon',
+    );
+  }
   if (!MNEMONIC) {
-    refuse('TOON_MNEMONIC is required: a packet to a provider\'s connector is paid for, even on a free route, and this is what pays for it');
+    refuse(
+      'TOON_MNEMONIC is required: it derives this process\'s identity' +
+        (clearnet.length > 0 ? ', and pays the hub fee on a clearnet member\'s free route' : ''),
+    );
   }
 
-  log(`rotate ${members.length === 1 ? 'the one member' : `all ${members.length} members of the Standby Set`}, one request each`);
-  const client = await openClient();
+  log(
+    `rotate ${members.length === 1 ? 'the one member' : `all ${members.length} members of the Standby Set`}, one request each` +
+      (hidden.length > 0 ? ` (${hidden.length} of them dialled directly, over anon: ${hidden.map((m) => m.provider.slice(0, 12)).join(', ')})` : ''),
+  );
+
+  const clients = [];
+  const unopened = (kind) => () => { throw new Error(`no ${kind} member named, yet one was asked that way`); };
   try {
-    const report = await rotateLease({ leaseFile: values.lease, members, ask: sealedAsker(client), log });
+    let clearnetAsk = unopened('clearnet');
+    if (clearnet.length > 0) {
+      const client = await openClient();
+      clients.push(client);
+      clearnetAsk = sealedAsker(client);
+    }
+    let hiddenAsk = unopened('hidden');
+    if (hidden.length > 0) {
+      // Every hidden member dialled here shares ONE connector in the sandbox
+      // today; a distinct client is still opened per distinct connector, so a
+      // Standby Set naming two different hidden providers works the same way.
+      const askByConnector = new Map();
+      for (const member of hidden) {
+        if (!askByConnector.has(member.connector)) {
+          const client = await openHiddenClient(member.connector);
+          clients.push(client);
+          askByConnector.set(member.connector, sealedAsker(client));
+        }
+      }
+      hiddenAsk = (destination, body, member) => askByConnector.get(member.connector)(destination, body, member);
+    }
+
+    const report = await rotateLease({ leaseFile: values.lease, members, ask: directedAsk(clearnetAsk, hiddenAsk), log });
     console.log(JSON.stringify(report, null, 2));
     if (report.rotated) log('every grant derived from the old root secret is refused now: hand over again (`handover`) to keep a gateway');
     return report.rotated ? 0 : 1;
   } finally {
-    await client.close?.();
+    for (const client of clients) await client.close?.();
   }
 }
 
