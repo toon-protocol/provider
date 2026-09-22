@@ -439,9 +439,11 @@ fn parse_version(segment: &str) -> Option<u32> {
     segment.strip_prefix('v')?.parse().ok().filter(|v| *v > 0)
 }
 
-/// Every refusal is the spec's JSON error shape with a 4xx status. The
-/// connector bills a paid route regardless of status (ADR 0003); the status
-/// is for tooling that reads HTTP before it reads the body.
+/// Every refusal is the spec's JSON error shape with a 4xx status — except
+/// `Unavailable`, which is not a mistaken request and gets a 5xx (spec §5,
+/// TOON_Network#78). The connector bills a paid route regardless of status
+/// (ADR 0003); the status is for tooling that reads HTTP before it reads the
+/// body.
 pub fn refuse(error: ErrorResponse) -> Response {
     let status = match error.error {
         ErrorCode::NotTenant | ErrorCode::BadGrant => StatusCode::FORBIDDEN,
@@ -453,6 +455,7 @@ pub fn refuse(error: ErrorResponse) -> Response {
         | ErrorCode::NotStandby
         | ErrorCode::NotRunning => StatusCode::CONFLICT,
         ErrorCode::RefusedImage | ErrorCode::NoMatchingArch => StatusCode::UNPROCESSABLE_ENTITY,
+        ErrorCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
     };
     (status, Json(error)).into_response()
 }

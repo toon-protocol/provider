@@ -74,6 +74,16 @@ fn not_running() -> ErrorResponse {
     )
 }
 
+/// The lease state could not be saved (spec §5, general; TOON_Network#78).
+/// Nothing changed — the caller restores whatever it changed in memory
+/// before returning this — and the tenant should retry.
+fn unavailable() -> ErrorResponse {
+    ErrorResponse::new(
+        ErrorCode::Unavailable,
+        "this provider could not save that right now; nothing changed, try again",
+    )
+}
+
 /// The backend id of the lease a tenant's `workload_id` names: the live one
 /// if there is one, otherwise the most recently ended record still retained.
 ///
@@ -337,6 +347,13 @@ pub async fn terminate(state: &AppState, body: &[u8]) -> Result<TerminateRespons
 /// The lease is persisted BEFORE the answer, under the same lock that
 /// changed it: a crash straight after a rotation must not bring the old token
 /// back, and no other request can see the new token before it is on disk.
+///
+/// A rotation is a revocation, so it may say `rotated: true` only once the
+/// new token IS on disk. If the save fails, the old token is put back in
+/// memory before the lock is released, so memory and disk never disagree,
+/// and the route answers `unavailable` instead — nothing changed, and the
+/// tenant retries with the same `next` once saving works again (spec §5,
+/// ADR 0018, TOON_Network#78).
 pub async fn rotate(state: &AppState, body: &[u8]) -> Result<RotateResponse, ErrorResponse> {
     let (request, content): (_, RotateContent) = authenticate(state, body, Op::Rotate).await?;
     let now = state.clock.now();
@@ -351,8 +368,17 @@ pub async fn rotate(state: &AppState, body: &[u8]) -> Result<RotateResponse, Err
             "`next` is the token this lease already holds; a rotation names a new one",
         ));
     }
+    let previous = lease.continuation.clone();
     lease.continuation = content.next;
-    persist_leases(&leases, &state.config.lease_state_path);
+    if !persist_leases(&leases, &state.config.lease_state_path) {
+        // Restore what memory held before this request touched it. The
+        // lock is still ours, so no other request has seen the new token in
+        // between.
+        if let Some(lease) = leases.get_mut(&id) {
+            lease.continuation = previous;
+        }
+        return Err(unavailable());
+    }
 
     // The lease's backend id and nothing else: neither token is ever in a
     // log line (spec §6.1.1).

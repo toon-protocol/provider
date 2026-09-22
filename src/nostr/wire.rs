@@ -648,6 +648,19 @@ pub enum ErrorCode {
     /// defect, and one code covers every defect — so a gateway learns that
     /// its delegation does not apply and nothing about the lease.
     BadGrant,
+    /// The provider could not do this right now; nothing changed; retry
+    /// (spec §5, general; TOON_Network#78). Unlike every other code, this is
+    /// never about the request — it is refused rather than reflecting a
+    /// mistake the tenant made, so it carries no `4xx` on the wire (§5) and
+    /// is not weighed in a route's validation order: it can only follow
+    /// every other check passing.
+    ///
+    /// `rotate` is the first route to answer it: a rotation is a
+    /// revocation, so it may say `rotated: true` only once the new token is
+    /// on disk (ADR 0018). A save that fails leaves the old token in force,
+    /// in memory and on disk, and a retry with the same `next` succeeds
+    /// once saving works again.
+    Unavailable,
 }
 
 /// Every error answer, on free and paid routes alike. On a paid route it is

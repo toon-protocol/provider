@@ -303,6 +303,7 @@ fn every_error_code_serialises_as_the_spec_writes_it() {
         (ErrorCode::NotRunning, "not_running"),
         (ErrorCode::StaleRequest, "stale_request"),
         (ErrorCode::BadGrant, "bad_grant"),
+        (ErrorCode::Unavailable, "unavailable"),
     ];
     for (code, text) in expected {
         let value = serde_json::to_value(ErrorResponse::new(code, "why")).unwrap();

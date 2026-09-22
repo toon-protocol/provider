@@ -276,6 +276,89 @@ async fn a_rotation_survives_a_restart() {
     assert_eq!(error_of(&body), "not_tenant");
 }
 
+/// A rotation is a revocation: the provider may say `rotated: true` only
+/// once the new token is on disk. With the state directory unwritable, the
+/// save fails, and the route refuses `unavailable` rather than confirm a
+/// rotation nobody can be sure survives a restart. The old token still
+/// works and `next` is a stranger's, both before and after a restart — and
+/// once the directory is writable again, a retry with the same `next`
+/// succeeds (TOON_Network#78).
+#[tokio::test]
+async fn a_rotation_the_provider_cannot_persist_is_refused_unavailable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let h = harness().await;
+    let lease = spawn_lease(&h, 0xaa).await;
+    let next = fresh_token(&h);
+
+    let state_dir = std::path::Path::new(&h.state_path)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let writable = std::fs::metadata(&state_dir).unwrap().permissions();
+    std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let (status, body) = rotate(&h, &lease.token, &lease.workload_id, &next).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{}", body);
+    assert_eq!(error_of(&body), "unavailable");
+    let next_hex = serde_json::to_value(&next).unwrap();
+    let next_hex = next_hex.as_str().unwrap();
+    assert!(
+        !body.to_string().contains(next_hex),
+        "no token appears in the refusal: {}",
+        body
+    );
+
+    // Before a restart: memory was put back the way it was found.
+    still_holds(&h, &lease).await;
+    let (status, body) = status_with(&h, &next, &lease.workload_id, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{}", body);
+    assert_eq!(error_of(&body), "not_tenant");
+
+    // And after one: the save never reached disk, so a restart over the
+    // same (still unwritable) directory agrees with what memory just showed.
+    let backend = FakeBackend::new();
+    backend.seed_running(1000);
+    let h2 = restart(
+        vec![listing("basic", 1, 2)],
+        h.provider_key.clone(),
+        h.state_path.clone(),
+        backend,
+        FakeClock::at(NOW),
+        FakeDirectory::new(),
+        common::stub_registry().await,
+        ImagePolicyConfig::default(),
+    )
+    .await;
+    h2.service.restore_leases().await;
+
+    let (status, body) = status_with(&h2, &lease.token, &lease.workload_id, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the old token still works: {}",
+        body
+    );
+    assert_eq!(body["state"], "running");
+    let (status, body) = status_with(&h2, &next, &lease.workload_id, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{}", body);
+    assert_eq!(error_of(&body), "not_tenant");
+
+    // Once saving works again, a retry with the SAME next succeeds.
+    std::fs::set_permissions(&state_dir, writable).unwrap();
+    let (status, body) = rotate(&h2, &lease.token, &lease.workload_id, &next).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(
+        body,
+        json!({ "workload_id": lease.workload_id, "rotated": true })
+    );
+    let (status, body) = status_with(&h2, &next, &lease.workload_id, None).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    let (status, body) = status_with(&h2, &lease.token, &lease.workload_id, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{}", body);
+    assert_eq!(error_of(&body), "not_tenant");
+}
+
 // ── the refusals, in validation order ────────────────────────────────────
 
 /// A Workload Gateway cannot rotate a lease out from under its tenant: the

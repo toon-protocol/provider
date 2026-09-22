@@ -502,6 +502,10 @@ struct Fixture {
     /// The TOON store as the provider reads it (`/raw/<txid>`), holding the
     /// Milestone 2 image's records and parts.
     _gateway: MockServer,
+    /// The directory `lease_state_path` lives in. Only read by the
+    /// `unavailable` story (TOON_Network#78), which makes it unwritable to
+    /// produce a real save failure rather than one it merely asserts.
+    state_dir: PathBuf,
 }
 
 impl Fixture {
@@ -571,11 +575,8 @@ async fn fixture_provider_configured(
     adjust: impl FnOnce(ProviderConfig) -> ProviderConfig,
 ) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
-    let state_path = dir
-        .keep()
-        .join("leases.json")
-        .to_string_lossy()
-        .into_owned();
+    let state_dir = dir.keep();
+    let state_path = state_dir.join("leases.json").to_string_lossy().into_owned();
     // The relay holds the Milestone 2 entry, and the gateway and registry
     // serve its bytes, whether or not a fixture goes on to ask for them.
     let directory = FakeDirectory::new();
@@ -613,6 +614,7 @@ async fn fixture_provider_configured(
         other_tenant: root(OTHER_TENANT_ROOT_SECRET),
         _registry: registry,
         _gateway: gateway,
+        state_dir,
     }
 }
 
@@ -1909,6 +1911,97 @@ async fn a_rotation_and_its_refusals_in_validation_order() {
         "error.expired.rotate.json",
         with_validation_step(doc, "§6.8 step 5: the lease has not ended"),
     );
+}
+
+/// A save the provider cannot make (spec §5, general; §6.8's Effect;
+/// TOON_Network#78). The fixture provider's own state directory is made
+/// unwritable so the persist a rotation makes before it answers really
+/// fails, and the route answers `unavailable` rather than confirm a
+/// rotation nobody could be sure reached disk. A fresh fixture provider of
+/// its own: the directory this leaves unwritable for a moment must not
+/// touch any other fixture's lease table.
+#[tokio::test]
+async fn a_rotation_that_cannot_be_saved_is_unavailable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = fixture_provider(ImagePolicyConfig::default(), stub_registry().await).await;
+    let aa = 0xaa;
+    let provider = f.provider_pubkey();
+    let next = root(ROTATED_ROOT_SECRET).continuation_for(&provider);
+
+    let (status, response) = post(
+        &f.app,
+        "/listings/basic/v1/spawn",
+        envelope(&f.spawn_request(aa, "rotate.unavailable.spawn")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+
+    let writable = std::fs::metadata(&f.state_dir).unwrap().permissions();
+    std::fs::set_permissions(&f.state_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let (status, response, doc) = exchange(
+        &f,
+        (
+            "error",
+            "unavailable.rotate",
+            "A rotate the provider cannot persist: its state directory has no write \
+             permission, so the save §6.8's Effect requires before answering fails. \
+             Nothing changed — the old token still reads the lease, before and after a \
+             restart — and the tenant retries the SAME `next` once saving works again \
+             (spec §5, general; ADR 0018; TOON_Network#78).",
+        ),
+        &route("rotate"),
+        "/rotate",
+        envelope(&lease_request(
+            &f.tenant,
+            &provider,
+            "rotate",
+            &rotate_content(aa, &next),
+            NOW + TTL,
+            "error.unavailable.rotate",
+        )),
+    )
+    .await;
+
+    // Restored before asserting, so a failed assertion still leaves the
+    // fixture provider's temp directory in a state the test runner can
+    // clean up.
+    std::fs::set_permissions(&f.state_dir, writable).unwrap();
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{}", response);
+    assert_eq!(error_of(&response), "unavailable");
+    golden(
+        "error.unavailable.rotate.json",
+        with_validation_step(
+            doc,
+            "§6.8 Effect: the lease MUST be persisted before the answer",
+        ),
+    );
+
+    // Nothing changed: the old token still reads the lease, and `next` is a
+    // stranger's — the failed save left memory exactly where it found it.
+    let (status, response) = post(
+        &f.app,
+        "/status",
+        envelope(&f.about_request(&f.tenant, "status", aa, "rotate.unavailable.status_old")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    assert_eq!(response["state"], "running");
+    let (status, response) = post(
+        &f.app,
+        "/status",
+        envelope(&f.about_request(
+            &root(ROTATED_ROOT_SECRET),
+            "status",
+            aa,
+            "rotate.unavailable.status_next",
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{}", response);
+    assert_eq!(error_of(&response), "not_tenant");
 }
 
 #[tokio::test]
@@ -3328,11 +3421,8 @@ async fn one_spawn_per_image_form() {
 /// resolution went through `pages` and nothing else.
 async fn fixture_provider_with_paged_layer(registry: MockServer) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
-    let state_path = dir
-        .keep()
-        .join("leases.json")
-        .to_string_lossy()
-        .into_owned();
+    let state_dir = dir.keep();
+    let state_path = state_dir.join("leases.json").to_string_lossy().into_owned();
     let directory = FakeDirectory::new();
     let gateway = MockServer::start().await;
 
@@ -3402,6 +3492,7 @@ async fn fixture_provider_with_paged_layer(registry: MockServer) -> Fixture {
         other_tenant: root(OTHER_TENANT_ROOT_SECRET),
         _registry: registry,
         _gateway: gateway,
+        state_dir,
     }
 }
 
