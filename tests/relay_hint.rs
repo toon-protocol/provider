@@ -21,10 +21,6 @@
 
 mod common;
 
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::http::{Request as HttpRequest, StatusCode};
 use nostr_sdk::{Keys, PublicKey};
@@ -34,6 +30,7 @@ use tower::ServiceExt;
 
 use common::harness::RequestSpec;
 use common::relay::StubRelay;
+use common::trap::Trap;
 use common::{valid_digest, FakeBackend};
 use toon_provider::nostr::wire::{ImageRef, PortRequest, Protocol, Resources, SpawnContent};
 use toon_provider::{router, Listing, ProviderConfig, ProviderService};
@@ -42,44 +39,6 @@ use toon_provider::{router, Listing, ProviderConfig, ProviderService};
 /// pubkey nobody in these tests holds, `d = web:1.0`.
 const ENTRY_ADDRESS: &str =
     "30434:4444444444444444444444444444444444444444444444444444444444444444:web:1.0";
-
-/// A listener on loopback that accepts and counts. Nothing is served: the
-/// point is the count, and a provider that got this far has already lost —
-/// the operator's real service on such a port would have answered.
-struct Trap {
-    addr: SocketAddr,
-    connections: Arc<AtomicUsize>,
-}
-
-impl Trap {
-    async fn set() -> Self {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let connections = Arc::new(AtomicUsize::new(0));
-        let counted = connections.clone();
-        tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                counted.fetch_add(1, Ordering::SeqCst);
-                drop(stream);
-            }
-        });
-        Self { addr, connections }
-    }
-
-    /// The relay URL a tenant would write to reach this trap.
-    fn relay_url(&self) -> String {
-        format!("ws://127.0.0.1:{}", self.addr.port())
-    }
-
-    /// The same by NAME, so the check has to be on what it resolves to.
-    fn relay_url_as(&self, host: &str) -> String {
-        format!("ws://{}:{}", host, self.addr.port())
-    }
-
-    fn reached(&self) -> usize {
-        self.connections.load(Ordering::SeqCst)
-    }
-}
 
 /// A provider with a REAL Directory — `NullDirectory` over `relay_set` —
 /// rather than the faked port the other suites drive, because the dial

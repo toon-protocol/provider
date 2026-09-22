@@ -18,15 +18,24 @@
 // depends on whose event is wanted. `get_image_entry` reads from the ONE
 // relay a spawn hinted at (spec §6.2), not the Relay Set: an Image Registry
 // entry is a publisher's event, and the tenant says where it can be found.
-// It is the only relay URL on this port a TENANT chooses, and so the only
-// one that is guarded — `relay_hint_guard`, spec §8.4, TOON_Network#107.
+// It is the only relay URL on this port a TENANT chooses.
 // `find_blob_records` and `get_profile` ask the provider's OWN Relay Set,
 // because a bare digest names no relay and no signer (spec §8.4 step 3), and
 // a Warm Standby cannot learn its primary's Relay Set from anywhere but the
-// primary's Profile — which is what it is reading. `liveness_state` and
-// `find_takeovers` take the relays to ask, because both are about the
-// PRIMARY's Relay Set (spec §7.1): a primary's Liveness is on the relays it
-// publishes to, and every Takeover is published there too.
+// primary's Profile — which is what it is reading. `liveness_state`,
+// `find_takeovers` and `publish_takeover` take the relays to ask, because
+// all three are about the PRIMARY's Relay Set (spec §7.1): a primary's
+// Liveness is on the relays it publishes to, and every Takeover is published
+// there too.
+//
+// So two of this port's relay URLs come from outside — the tenant's hint,
+// and the relays a PEER's Profile lists — and both are guarded by the same
+// rule before anything is dialled (`relay_guard`, `dialable`, spec §8.4, ADR
+// 0022, TOON_Network#107 and #113). A Profile is a published event that
+// anybody can sign, so a peer naming `ws://127.0.0.1:9944` is a tenant
+// naming it with an extra step; the difference is only that a peer's relays
+// are read on a SCHEDULE, for as long as a reservation lasts, rather than
+// when a tenant asks.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -247,7 +256,8 @@ pub struct NullDirectory {
     /// The `anon` SOCKS port every relay read leaves through on a Hidden
     /// Provider (spec §10). `None` — direct — on every other provider.
     proxy: Option<OutboundProxy>,
-    /// Where a TENANT's relay hint may point (TOON_Network#107).
+    /// Where a relay URL a TENANT or a PEER chose may point
+    /// (TOON_Network#107, TOON_Network#113).
     relay_guard: OutboundGuard,
 }
 
@@ -256,7 +266,7 @@ impl NullDirectory {
     /// Records.
     pub fn new(relay_set: Vec<String>) -> Self {
         Self {
-            relay_guard: relay_hint_guard(&relay_set),
+            relay_guard: relay_guard(&relay_set),
             relay_set,
             proxy: None,
         }
@@ -309,7 +319,14 @@ impl Directory for NullDirectory {
         relays: &[String],
         now: u64,
     ) -> Result<RelayLiveness> {
-        fetch_liveness_state(provider, relays, now, self.proxy.as_ref()).await
+        fetch_liveness_state(
+            provider,
+            relays,
+            now,
+            self.proxy.as_ref(),
+            &self.relay_guard,
+        )
+        .await
     }
 
     /// Not published, like everything else: a Takeover is a paid write, and
@@ -332,7 +349,14 @@ impl Directory for NullDirectory {
         claimants: &[PublicKey],
         relays: &[String],
     ) -> Result<Vec<Event>> {
-        fetch_takeovers(workload_id, claimants, relays, self.proxy.as_ref()).await
+        fetch_takeovers(
+            workload_id,
+            claimants,
+            relays,
+            self.proxy.as_ref(),
+            &self.relay_guard,
+        )
+        .await
     }
 }
 
@@ -456,14 +480,28 @@ async fn fetch_liveness_state(
     relays: &[String],
     now: u64,
     proxy: Option<&OutboundProxy>,
+    guard: &OutboundGuard,
 ) -> Result<RelayLiveness> {
     let mut states = RelayLiveness::new();
     if relays.is_empty() {
         return Ok(states);
     }
 
+    // A relay the primary named that this provider must not dial is `Absent`
+    // — silent, and counted in the majority of spec §7.1 step 1 like any
+    // other relay it cannot see a Liveness on (TOON_Network#113). It is
+    // seeded here, before anything is connected, so that a peer can neither
+    // be dialled at it nor hide behind it.
+    let (relays, refused) = dialable(relays, guard, proxy).await;
+    for relay in refused.into_keys() {
+        states.insert(relay, LivenessState::Absent);
+    }
+    if relays.is_empty() {
+        return Ok(states);
+    }
+
     let client = relay_client(proxy);
-    for relay in relays {
+    for relay in &relays {
         if let Err(e) = client.add_relay(relay).await {
             warn!("relay {} is not a usable relay URL: {}", relay, e);
             states.insert(relay.clone(), LivenessState::Absent);
@@ -473,7 +511,7 @@ async fn fetch_liveness_state(
     // that refuses the connection is answered `Absent` now, instead of a
     // REQ that nobody ever answers running out the query timeout.
     let connected = client.try_connect(CONNECT_TIMEOUT).await;
-    for relay in relays {
+    for relay in &relays {
         if states.contains_key(relay) {
             continue;
         }
@@ -535,15 +573,23 @@ async fn fetch_takeovers(
     claimants: &[PublicKey],
     relays: &[String],
     proxy: Option<&OutboundProxy>,
+    guard: &OutboundGuard,
 ) -> Result<Vec<Event>> {
     if relays.is_empty() || claimants.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The primary named these relays too (TOON_Network#113): a claim this
+    // provider may not dial for is one it did not read, exactly as a relay
+    // that refuses the connection gives it none.
+    let (relays, _refused) = dialable(relays, guard, proxy).await;
+    if relays.is_empty() {
         return Ok(Vec::new());
     }
     let filter = Filter::new()
         .kind(Kind::Custom(K_TAKEOVER))
         .authors(claimants.iter().copied())
         .identifier(workload_id);
-    let mut events = Connected::to(relays, proxy)
+    let mut events = Connected::to(&relays, proxy)
         .await
         .fetch(filter, &format!("Takeovers on {}", workload_id))
         .await?;
@@ -583,22 +629,63 @@ async fn fetch_blob_records(
     Ok(events)
 }
 
-/// Where a TENANT's relay hint may point: nowhere inside the operator's own
-/// network, unless it is a relay the operator themselves configured
-/// (spec §8.4, ADR 0022, TOON_Network#107).
+/// Where a relay URL SOMEBODY ELSE chose may point: nowhere inside the
+/// operator's own network, unless it is a relay the operator themselves
+/// configured (spec §8.4, ADR 0022, TOON_Network#107, TOON_Network#113).
+///
+/// Somebody else is a TENANT, for the `relay` hint of a spawn's
+/// `registry_entry`, and a PEER, for the relays another provider's Provider
+/// Profile lists — one rule for both, because a Profile is a published event
+/// and "another provider said so" is worth no more than "a tenant said so".
 ///
 /// The Relay Set is exempt by AUTHORITY — host AND port — the way
 /// TOON_Network#105 exempts `gateway_url_pattern`: a provider that already
 /// publishes to `ws://relay:7100` on its own compose network dials it every
-/// cadence, so a tenant naming it asks for nothing new. It is the ONLY
-/// exemption, and it needs no config key: an operator whose relay is
-/// internal has already written it down, in `relay_set`.
-fn relay_hint_guard(relay_set: &[String]) -> OutboundGuard {
+/// cadence, so a tenant or a peer naming it asks for nothing new — and a
+/// Standby Set whose members share one relay, which is the normal case and
+/// the sandbox's, keeps working. It is the ONLY exemption, and it needs no
+/// config key: an operator whose relay is internal has already written it
+/// down, in `relay_set`.
+fn relay_guard(relay_set: &[String]) -> OutboundGuard {
     relay_set
         .iter()
         .fold(OutboundGuard::default(), |guard, relay| {
             guard.exempting(Some(relay))
         })
+}
+
+/// The relays of `relays` this provider may dial, and why it refuses the
+/// rest — the guard applied to a list of relays a PEER chose (spec §7.1,
+/// §8.4, TOON_Network#113).
+///
+/// Per relay, never per Profile: a refused relay is dropped and the peer's
+/// others are still asked. The alternative — one bad relay makes the whole
+/// Profile unusable — is a gift to any peer that wants to stop being
+/// watched, because a primary nobody watches is a primary nobody takes over.
+/// What the refused relay then counts AS is each caller's to say, and for
+/// the read that decides silence it is `Absent`: a relay this provider must
+/// not dial holds nothing it can see, which is the same thing
+/// `LivenessState::Absent` already means for a relay it cannot reach.
+async fn dialable(
+    relays: &[String],
+    guard: &OutboundGuard,
+    proxy: Option<&OutboundProxy>,
+) -> (Vec<String>, BTreeMap<String, String>) {
+    let mut allowed = Vec::with_capacity(relays.len());
+    let mut refused = BTreeMap::new();
+    for relay in relays {
+        // On a Hidden Provider the SOCKS proxy resolves every name and this
+        // process resolves none (spec §10, ADR 0008), exactly as a tenant's
+        // hint is treated: an address literal is still checked.
+        match guard.check_peer_relay(relay, proxy.is_none()).await {
+            Ok(()) => allowed.push(relay.clone()),
+            Err(why) => {
+                warn!("{:#}", why);
+                refused.insert(relay.clone(), format!("{:#}", why));
+            }
+        }
+    }
+    (allowed, refused)
 }
 
 /// One free NIP-01 REQ to `relay` for the addressable event at `address`,
@@ -700,7 +787,8 @@ pub struct ConnectorDirectory {
     /// hop to the connector. `None` — direct, and named to nobody — on every
     /// other provider.
     proxy: Option<OutboundProxy>,
-    /// Where a TENANT's relay hint may point (TOON_Network#107).
+    /// Where a relay URL a TENANT or a PEER chose may point
+    /// (TOON_Network#107, TOON_Network#113).
     relay_guard: OutboundGuard,
 }
 
@@ -719,7 +807,7 @@ impl ConnectorDirectory {
     pub fn new(publish_url: impl Into<String>, relay_set: Vec<String>) -> Result<Self> {
         Ok(Self {
             publish_url: publish_url.into(),
-            relay_guard: relay_hint_guard(&relay_set),
+            relay_guard: relay_guard(&relay_set),
             relay_set,
             http: http_client(None, PUBLISH_TIMEOUT, "the directory publisher")?,
             proxy: None,
@@ -826,11 +914,34 @@ impl Directory for ConnectorDirectory {
         relays: &[String],
         now: u64,
     ) -> Result<RelayLiveness> {
-        fetch_liveness_state(provider, relays, now, self.proxy.as_ref()).await
+        fetch_liveness_state(
+            provider,
+            relays,
+            now,
+            self.proxy.as_ref(),
+            &self.relay_guard,
+        )
+        .await
     }
 
+    /// The one WRITE addressed to relays somebody else chose, so the one
+    /// that is guarded on the way out (TOON_Network#113). The dial is the
+    /// publisher's rather than this process's, which changes nothing: a
+    /// relay this provider may not reach is not one it pays a sidecar to
+    /// reach on its behalf. A refused relay comes back on the report as a
+    /// relay that did not take the event — which is what it is — and one
+    /// whose every relay is refused never reaches the publisher at all.
     async fn publish_takeover(&self, event: Event, relays: &[String]) -> Result<PublishReport> {
-        self.publish_to(event, relays).await
+        let (relays, refused) = dialable(relays, &self.relay_guard, self.proxy.as_ref()).await;
+        if relays.is_empty() {
+            return Ok(PublishReport {
+                accepted: Vec::new(),
+                failed: refused,
+            });
+        }
+        let mut report = self.publish_to(event, &relays).await?;
+        report.failed.extend(refused);
+        Ok(report)
     }
 
     async fn find_takeovers(
@@ -839,6 +950,13 @@ impl Directory for ConnectorDirectory {
         claimants: &[PublicKey],
         relays: &[String],
     ) -> Result<Vec<Event>> {
-        fetch_takeovers(workload_id, claimants, relays, self.proxy.as_ref()).await
+        fetch_takeovers(
+            workload_id,
+            claimants,
+            relays,
+            self.proxy.as_ref(),
+            &self.relay_guard,
+        )
+        .await
     }
 }

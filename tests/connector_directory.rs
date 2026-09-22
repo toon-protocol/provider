@@ -179,7 +179,10 @@ async fn get_profile_on_no_relay_set_finds_nothing() {
 /// Each relay of the PRIMARY's Relay Set is asked on its own and answers
 /// for itself: live where an unexpired Liveness is, expired where only an
 /// old one is, absent where none is or the relay cannot be reached. The
-/// Directory's own Relay Set is not consulted at all.
+/// Directory's own Relay Set is not consulted for the answer — `home` holds
+/// one and is never asked — although it is what makes these loopback stubs
+/// dialable at all: a relay a PEER names is refused unless the operator
+/// configured it (#113).
 #[tokio::test]
 async fn liveness_state_answers_relay_by_relay_on_the_relays_given() {
     let home = StubRelay::start().await; // the standby's own relay
@@ -206,9 +209,10 @@ async fn liveness_state_answers_relay_by_relay_on_the_relays_given() {
         empty.url(),
         UNREACHABLE.to_string(),
     ];
+    let own = [&home, &live, &expired, &empty];
     for directory in [
-        Box::new(directory_over(&[&home])) as Box<dyn Directory>,
-        Box::new(NullDirectory::new(vec![home.url()])),
+        Box::new(directory_over(&own)) as Box<dyn Directory>,
+        Box::new(NullDirectory::new(own.iter().map(|r| r.url()).collect())),
     ] {
         let states = directory
             .liveness_state(primary.public_key(), &relays, asked_at)
@@ -245,7 +249,7 @@ async fn liveness_state_expires_on_the_instant_given() {
     let primary = Keys::generate();
     let now = wall_now();
     relay.hold(liveness(&primary, now)); // expires at now + 5 × CADENCE
-    let directory = directory_over(&[]);
+    let directory = directory_over(&[&relay]);
     let relays = vec![relay.url()];
 
     let primary = primary.public_key();
@@ -270,7 +274,11 @@ async fn liveness_state_expires_on_the_instant_given() {
 #[tokio::test]
 async fn publish_takeover_pays_the_publisher_for_the_primarys_relays() {
     let publisher = MockServer::start().await;
-    let primary_relays = ["ws://primary-one:7100", "ws://primary-two:7100"];
+    // Address literals, publicly routable and nothing listening on them: a
+    // Takeover goes to relays the PRIMARY named, and those are guarded like
+    // any other relay a peer chooses (#113) — the publisher is mocked, so
+    // nothing is dialled either way.
+    let primary_relays = ["ws://203.0.113.7:7100", "ws://198.51.100.9:7100"];
     Mock::given(method("POST"))
         .and(path("/publish"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -332,7 +340,7 @@ async fn a_takeover_nobody_can_pay_for_is_not_announced() {
         &Keys::generate(),
         NOW,
     );
-    let relays = strings(&["ws://primary-one:7100"]);
+    let relays = strings(&["ws://203.0.113.7:7100"]);
 
     let paid = ConnectorDirectory::new(format!("{}/publish", publisher.uri()), vec![]).unwrap();
     let refused = paid.publish_takeover(event.clone(), &relays).await;
@@ -370,8 +378,8 @@ async fn find_takeovers_returns_the_sets_claims_on_the_workload_earliest_first()
     let claimants = [first.public_key(), second.public_key()];
     let relays = vec![one.url(), two.url()];
     for directory in [
-        Box::new(directory_over(&[])) as Box<dyn Directory>,
-        Box::new(NullDirectory::new(vec![])),
+        Box::new(directory_over(&[&one, &two])) as Box<dyn Directory>,
+        Box::new(NullDirectory::new(vec![one.url(), two.url()])),
     ] {
         let found = directory
             .find_takeovers(&workload_id, &claimants, &relays)

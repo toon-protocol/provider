@@ -6,6 +6,7 @@ pub mod harness;
 pub mod relay;
 pub mod socks;
 pub mod store;
+pub mod trap;
 
 use std::collections::HashMap;
 use std::path::Path;
