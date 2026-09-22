@@ -9,8 +9,9 @@
 //! 9944` would be a free port scan of the operator's host, answered by the
 //! difference between "refused" and "nothing there".
 //!
-//! What makes these tests proof rather than decoration is the trap: a real
-//! listener on a loopback port that counts every connection it accepts. The
+//! What makes these tests proof rather than decoration is the trap
+//! (`common::trap`, shared with `peer_relay.rs`): a real listener on a
+//! loopback port that counts every connection it accepts. The
 //! websocket goes through nostr-sdk, which resolves and dials the name
 //! itself, so the only proof that the guard runs BEFORE the dial is a count
 //! of zero.
