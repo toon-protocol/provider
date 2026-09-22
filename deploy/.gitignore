@@ -1,0 +1,15 @@
+# Secrets and rendered output. Only the templates are committed.
+#
+# provider.toml is in this list twice over: it is rendered, AND it carries this
+# provider's Nostr private key inline. The repository root's .gitignore already
+# refuses `/provider.toml`; this one refuses the rendered copy here.
+.env
+.env.*
+!.env.example
+provider.toml
+connector.toml
+operator-bearer.token
+operator-write.keys
+nginx/conf.d/
+*.key
+*.secret

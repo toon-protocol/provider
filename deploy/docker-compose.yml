@@ -1,0 +1,213 @@
+# =============================================================================
+# The TOON devnet provider box — one host, five containers, plus the workloads
+# =============================================================================
+#   nginx                the public TLS edge (the only service on a public port)
+#   provider-connector   the payment proxy: meters, settles, unseals, forwards
+#   provider             toon-provider, built from the checkout this box follows
+#   directory-publisher  the payer for relay writes (Profile, Listings, Liveness)
+#   certbot              renews the certificate
+#
+#   tenant ──seal──▶ nginx :443 ──▶ provider-connector :4000 ──▶ provider :8080
+#                                                                    │
+#                                                 docker.sock ───────┘
+#                                                       │
+#                            toon-<id> + toon-<id>-dind on THIS host's daemon,
+#                            their SSH forwards and ports published on its own
+#                            public address — never through nginx.
+#
+# Bring it up:  ./bootstrap.sh
+# See ./README.md — nothing here works without the key files and .env it lists.
+#
+# ── Why there is no Watchtower here ──────────────────────────────────────────
+# The store and relay boxes run Watchtower because their app is a published
+# image on a moving `:release` tag. This repository publishes no image yet, so
+# `provider` and `directory-publisher` are BUILT FROM THE CHECKOUT — and the
+# checkout is what `auto-apply.sh` fast-forwards every five minutes. The update
+# path is therefore the git one, for the app and its config together, and a
+# Watchtower here would have nothing to follow. The connector is an immutable
+# pin, as on every other box, so it would have nothing to follow either.
+# =============================================================================
+
+name: provider
+
+services:
+  # ── The payment proxy ──────────────────────────────────────────────────────
+  # Published on the LOOPBACK only. nginx is what faces the internet; binding
+  # this to 0.0.0.0 would put the paid edge on the public internet past ufw
+  # (docker's iptables rules run ahead of ufw — README § "ports: bypasses ufw").
+  provider-connector:
+    # An IMMUTABLE pin. Nothing moves the fleet's old promotion pointer any
+    # more (connector ADR 0068 — a node repository pins the connector it runs),
+    # so the connector moves by a reviewed commit here: this tag and the
+    # matching literal in tests/deploy_bundle.rs, together.
+    # README § "Bumping the connector pin".
+    image: ghcr.io/toon-protocol/connector:rust-2026.09.11.1
+    command: ['/app/config/connector.toml']
+    volumes:
+      - ./connector.toml:/app/config/connector.toml:ro
+      # The sealing identity. provider.toml's `connector_seal_key` is a copy of
+      # its public half, and a tenant refuses to spawn unless the two agree.
+      - ./signer.key:/app/data/signer.key:ro
+      # Settlement. Both must exist and be readable by uid 10001 before the
+      # first `up -d`, and the Solana one must hold SOL: this node submits a
+      # transaction at boot and an unfunded key is a restart loop.
+      - ./settlement.key:/app/data/settlement.key:ro
+      - ./settlement-solana.key:/app/data/settlement-solana.key:ro
+      - ./operator-bearer.token:/app/data/operator-bearer.token:ro
+      - ./operator-write.keys:/app/data/operator-write.keys:ro
+      # The claim watermark. A NAMED volume, never a bind: the image ships
+      # /app/state owned by uid 10001, which a fresh named volume inherits on
+      # first mount and a bind mount does not. Back it up; losing it hands
+      # every payer their already-spent claims back as free service.
+      - connector_state:/app/state
+    ports:
+      - '127.0.0.1:4000:4000'
+    healthcheck:
+      # The connector has no /health route. GET /ilp/identity is
+      # unauthenticated and answers 200 only once the process is serving AND
+      # has read its signer key file — `docker ps` showing "Up" proves neither.
+      # 127.0.0.1, never localhost: the listener is IPv4-only, but "localhost"
+      # in a container can resolve to ::1, where nothing is listening.
+      test: ['CMD-SHELL', 'wget -q --spider http://127.0.0.1:4000/ilp/identity || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    depends_on:
+      provider:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── The provider app ───────────────────────────────────────────────────────
+  # No `ports:` at all. Its one listener carries /health AND every spawn,
+  # extend, standby, status, terminate and rotate handler; the connector is the
+  # only thing that may reach it, because the connector is what charged for the
+  # packet. nginx proxies exactly one path of it — GET /health, by exact match
+  # — and 404s everything else on that hostname.
+  provider:
+    build:
+      # The repository this bundle lives in. `auto-apply.sh` rebuilds it when
+      # the tracked branch moves; a build with nothing changed is a cache hit.
+      context: ..
+    volumes:
+      - ./provider.toml:/etc/toon-provider/provider.toml:ro
+      # THE DOCKER SOCKET, and that is the whole deployment shape: the provider
+      # shells out to the docker CLI, so its workloads run as SIBLINGS on this
+      # host's daemon (named `toon-<id>`), and their SSH forwards and published
+      # ports land on this host's own address — which is why provider.toml's
+      # `public_ip` is this box's public address and not a container one.
+      #
+      # It is also, plainly, root on this host. A provider sells the ability to
+      # run code here; the socket is how it does that, and nothing smaller
+      # would do. Everything else in this file is arranged so that the only way
+      # to reach the process holding it is through a paid packet.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The lease table and the verified-blob cache. The lease table is the
+      # ONLY record that a lease exists, so a restart without it strands every
+      # paid workload; a named volume means `docker compose restart provider`
+      # strands nothing.
+      - provider_state:/var/lib/toon-provider
+    expose: ['8080']
+    healthcheck:
+      # Free and unauthenticated; it says the process is up and nothing more.
+      test: ['CMD-SHELL', 'curl -fsS http://127.0.0.1:8080/health || exit 1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  # ── The payer for relay writes ─────────────────────────────────────────────
+  # The provider's Profile, Listings and Liveness are PAID packets on
+  # `g.toon.relay` (ADR 0007 — never the free ephemeral lane, whose rate limit
+  # is keyed by remote address and so shared by everyone behind one connector).
+  # Paying one means holding a payment channel, signing a balance proof per
+  # packet and sealing to the terminating connector; @toon-protocol/client is
+  # the proven implementation of that and is not a Rust crate. So
+  # `toon-provider` states WHAT to publish and this sidecar decides HOW it is
+  # paid for.
+  #
+  # THE PROVIDER'S NOSTR KEY NEVER REACHES IT. It holds money, not identity: it
+  # cannot forge a directory event, only decline to pay for one.
+  directory-publisher:
+    build:
+      context: ..
+      dockerfile: tools/publisher/Dockerfile
+    environment:
+      # The devnet relay's own client edge. This process pays it directly, as a
+      # client with a channel — there is no hub on this devnet and no peering.
+      TOON_CONNECTOR_URL: ${RELAY_EDGE_URL:?set RELAY_EDGE_URL in .env}
+      # Solana, not EVM, for one practical reason: devnet SOL and mock USDC are
+      # both a faucet away, and Base Sepolia ETH is not.
+      TOON_CHAIN: solana
+      TOON_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
+      # The wallet that pays. Its own phrase, not the provider's identity and
+      # not anything else's: two payers sharing one channel share one nonce
+      # watermark, and the loser of that race has every later claim refused.
+      TOON_MNEMONIC: ${PUBLISHER_MNEMONIC:?set PUBLISHER_MNEMONIC in .env}
+      TOON_ACCOUNT_INDEX: '0'
+      # 10 USDC at 6dp. A relay write costs 1 µUSDC, and this provider buys one
+      # per Liveness (60s) plus one per Profile and Listing at startup — about
+      # 1,500 a day. The deposit is three orders of magnitude more than a year
+      # of that, because topping a channel up is the fiddly part, not funding
+      # it once.
+      TOON_DEPOSIT: '10000000'
+      TOON_CHANNEL_STORE: /var/lib/toon-publisher/channels.json
+      # Relay READ url (what provider.toml publishes) -> the PAID ILP
+      # destination that writes to it.
+      RELAY_WRITE_ROUTES: ${RELAY_WRITE_ROUTES:?set RELAY_WRITE_ROUTES in .env}
+      # The devnet relay PINS `g.toon.relay` to BTP, and an HTTP one-shot there
+      # comes back refused with `extra.requiredTransport` — no directory event
+      # would ever be written. `auto` reads the pin out of the relay's own
+      # self-description and dials what it asks for.
+      #
+      # It is safe here and refused where it would not be: the carriage is a
+      # websocket, so it passes through neither a SOCKS5h proxy nor
+      # TOON_ENDPOINT_REWRITE, and this publisher sets neither.
+      # tools/publisher/README.md § "Which carriage the packets ride".
+      TOON_TRANSPORT: auto
+    volumes:
+      # The channel watermark. A named volume so a restart keeps it: a claim
+      # nonce that goes backwards is refused for the life of the channel.
+      - publisher_state:/var/lib/toon-publisher
+    expose: ['8081'] # PRIVATE — only the provider dials this
+    healthcheck:
+      test: ['CMD-SHELL', 'node -e "fetch(''http://127.0.0.1:8081/health'').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  # ── The TLS edge ───────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_conf:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
+    command: >
+      sh -c "while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g 'daemon off;'"
+    restart: unless-stopped
+
+  # Holds the renewal timer.
+  certbot:
+    image: certbot/certbot
+    volumes:
+      - certbot_conf:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+    restart: unless-stopped
+
+volumes:
+  connector_state:
+  # The lease table and the blob cache. The lease table is the only record that
+  # a lease exists.
+  provider_state:
+  publisher_state:
+  certbot_conf:
+  certbot_www:
