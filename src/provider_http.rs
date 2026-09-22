@@ -106,6 +106,7 @@ impl AppState {
         let fetcher = BlobFetcher::new(
             config.gateway_url_pattern.clone(),
             config.image_policy.registry_url_override.clone(),
+            config.image_policy.max_image_bytes,
             cache,
         );
         let fetcher = Arc::new(match &proxy {

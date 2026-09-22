@@ -697,3 +697,334 @@ async fn a_relay_record_with_neither_parts_nor_pages_fails_that_source_and_the_c
 
     assert_eq!(status, StatusCode::OK, "{}", body);
 }
+
+// ── bounded fetches: a malicious Blob Record cannot crash a provider or
+// exhaust its memory (§8.4, TOON_Network#79) ────────────────────────────────
+
+#[tokio::test]
+async fn a_records_size_that_disagrees_with_its_parts_total_fails_before_any_part_is_fetched() {
+    // The record's own `size` is honest; a single part's recorded size
+    // lies by one byte, so the two no longer agree. `availability` fetches
+    // CONFIG for free (spec §6.4), the same reachability
+    // `tests/registry_image.rs`'s part-size tests use.
+    let mut w = World::new().await;
+    let bad_config = config_bytes();
+    let bad_config_digest = digest_of(&bad_config);
+    w.store_as(
+        &bad_config_digest,
+        &bad_config,
+        CONFIG,
+        64,
+        Tamper::WrongPartSize(0),
+    )
+    .await;
+    let layer = layer_bytes(3);
+    let layer_digest = w.store(&layer, LAYER, 1024).await;
+    let manifest = manifest_bytes(
+        (&bad_config_digest, bad_config.len()),
+        &[(layer_digest, layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    seed_blob_records(&w, &h.directory);
+
+    let body = availability(&h, bare_image(&manifest_digest)).await;
+
+    assert_refused(&body, "declares size");
+    let requested = w.gateway_paths().await;
+    for part_path in w.part_paths(&bad_config_digest) {
+        assert!(
+            !requested.contains(&part_path),
+            "a part was fetched despite the record's own size disagreeing with its parts: {:?}",
+            requested
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_records_absurd_size_is_refused_without_a_large_allocation_and_the_provider_keeps_serving(
+) {
+    // The record's `size` alone is a lie — far beyond any real image and
+    // beyond this provider's (unconfigured, so default) limit. The parts
+    // it lists are entirely honest and never need to be fetched to catch
+    // this. Its own bytes are distinct from `store_whole_image`'s fixed
+    // config, so the honest record that call stores later cannot collide
+    // with — and silently overwrite — this one's digest.
+    let mut w = World::new().await;
+    let bad_config = layer_bytes(201);
+    let bad_config_digest = digest_of(&bad_config);
+    w.store_as(
+        &bad_config_digest,
+        &bad_config,
+        CONFIG,
+        64,
+        Tamper::AbsurdSize,
+    )
+    .await;
+    let bad_layer = layer_bytes(3);
+    let bad_layer_digest = w.store(&bad_layer, LAYER, 1024).await;
+    let bad_manifest = manifest_bytes(
+        (&bad_config_digest, bad_config.len()),
+        &[(bad_layer_digest, bad_layer.len())],
+    );
+    let bad_manifest_digest = w.store(&bad_manifest, MANIFEST, 100).await;
+    // An honest image, stored on the same world, so a request for it right
+    // after the malicious one proves the provider is still answering.
+    let (good_index, ..) = store_whole_image(&mut w).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    seed_blob_records(&w, &h.directory);
+
+    let body = availability(&h, bare_image(&bad_manifest_digest)).await;
+
+    assert_refused(&body, "exceeds this provider's limit");
+    assert_eq!(
+        availability(&h, bare_image(&good_index)).await,
+        json!({ "would_run": true }),
+        "an absurd `size` cost the provider nothing it cannot recover from"
+    );
+    let (status, body, _) = spawn(&h, 0xc1, ImageRef::by_digest(good_index)).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+}
+
+#[tokio::test]
+async fn an_oversize_part_body_is_cut_off_and_the_provider_keeps_serving() {
+    // The store (or something in front of it) serves far more than the
+    // CONFIG part's own recorded size. A fetch MUST stop reading at that
+    // size rather than buffer all of it. Distinct bytes from
+    // `store_whole_image`'s fixed config, for the same reason as above.
+    let mut w = World::new().await;
+    let bad_config = layer_bytes(202);
+    let bad_config_digest = digest_of(&bad_config);
+    w.store_as(
+        &bad_config_digest,
+        &bad_config,
+        CONFIG,
+        64,
+        Tamper::OversizePart(0),
+    )
+    .await;
+    let bad_layer = layer_bytes(3);
+    let bad_layer_digest = w.store(&bad_layer, LAYER, 1024).await;
+    let bad_manifest = manifest_bytes(
+        (&bad_config_digest, bad_config.len()),
+        &[(bad_layer_digest, bad_layer.len())],
+    );
+    let bad_manifest_digest = w.store(&bad_manifest, MANIFEST, 100).await;
+    let (good_index, ..) = store_whole_image(&mut w).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    seed_blob_records(&w, &h.directory);
+
+    let body = availability(&h, bare_image(&bad_manifest_digest)).await;
+
+    assert_refused(&body, "longer than");
+    assert_eq!(
+        availability(&h, bare_image(&good_index)).await,
+        json!({ "would_run": true }),
+        "an oversize body cost the provider nothing it cannot recover from"
+    );
+}
+
+#[tokio::test]
+async fn a_paged_page_body_over_the_ceiling_is_cut_off_and_the_source_fails() {
+    // A layer's bytes are not fetched for `availability` (only checked for
+    // a candidate, spec §6.4), so — like a bad page's hash
+    // (`a_page_that_does_not_hash_to_its_record_is_refused_image` above) —
+    // this is only caught once something actually asks to run it.
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let layer = layer_bytes(5);
+    let layer_digest = digest_of(&layer);
+    w.store_paged_as(
+        &layer_digest,
+        &layer,
+        LAYER,
+        1024,
+        2,
+        Tamper::OversizePage(0),
+    )
+    .await;
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest.clone(), layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    seed_blob_records(&w, &h.directory);
+
+    let (status, body, _) = spawn(&h, 0xc2, ImageRef::by_digest(manifest_digest)).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
+    assert_eq!(body["error"], "refused_image", "{}", body);
+    assert!(
+        body["message"].as_str().unwrap().contains("longer than"),
+        "{}",
+        body
+    );
+    assert!(h.backend.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_paged_records_page_count_beyond_what_size_and_part_size_imply_is_refused_before_any_page_is_fetched(
+) {
+    // 5000 bytes at part_size 1024 is 5 real parts (§8.2: `part_size` is
+    // every part's size but the last's). A record claiming SIX pages,
+    // however small each looks, cannot be honest — and that is knowable
+    // from the record's own numbers, with no page fetched (TOON_Network
+    // #79).
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let layer = layer_bytes(11);
+    let layer_digest = digest_of(&layer);
+    let lying = BlobRecordContent {
+        digest: layer_digest.clone(),
+        size: layer.len() as u64,
+        part_size: 1024,
+        parts: None,
+        pages: Some(
+            (0..6)
+                .map(|i| BlobPage {
+                    txid: format!("unused-page{}", i),
+                    sha256: "0".repeat(64),
+                    parts: 1,
+                })
+                .collect(),
+        ),
+    };
+    let lying_event = blob_record_event(&lying, &w.publisher, NOW).unwrap();
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest.clone(), layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory.seed_blob_record(w.record(&manifest_digest));
+    h.directory.seed_blob_record(w.record(&config_digest));
+    h.directory.seed_blob_record(lying_event);
+
+    let (status, body, _) = spawn(&h, 0xc3, ImageRef::by_digest(manifest_digest)).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
+    assert_eq!(body["error"], "refused_image", "{}", body);
+    assert!(
+        body["message"].as_str().unwrap().contains("more than"),
+        "{}",
+        body
+    );
+    assert!(
+        !w.gateway_paths()
+            .await
+            .iter()
+            .any(|p| p.contains("unused-page")),
+        "no page of the lying record was ever fetched: {:?}",
+        w.gateway_paths().await
+    );
+    assert!(h.backend.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_page_declaring_zero_parts_is_refused_before_any_page_is_fetched() {
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let layer = layer_bytes(13);
+    let layer_digest = digest_of(&layer);
+    let lying = BlobRecordContent {
+        digest: layer_digest.clone(),
+        size: layer.len() as u64,
+        part_size: 1024,
+        parts: None,
+        pages: Some(vec![BlobPage {
+            txid: "unused-page0".to_string(),
+            sha256: "0".repeat(64),
+            parts: 0,
+        }]),
+    };
+    let lying_event = blob_record_event(&lying, &w.publisher, NOW).unwrap();
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest.clone(), layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory.seed_blob_record(w.record(&manifest_digest));
+    h.directory.seed_blob_record(w.record(&config_digest));
+    h.directory.seed_blob_record(lying_event);
+
+    let (status, body, _) = spawn(&h, 0xc4, ImageRef::by_digest(manifest_digest)).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
+    assert_eq!(body["error"], "refused_image", "{}", body);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("declares 0 parts"),
+        "{}",
+        body
+    );
+    assert!(
+        !w.gateway_paths()
+            .await
+            .iter()
+            .any(|p| p.contains("unused-page")),
+        "no page of the lying record was ever fetched: {:?}",
+        w.gateway_paths().await
+    );
+    assert!(h.backend.calls().is_empty());
+}
+
+#[tokio::test]
+async fn an_inline_records_part_count_disagreeing_with_size_and_part_size_is_refused_before_any_part_is_fetched(
+) {
+    // The record's `size` and `part_size` imply 5 parts (5000 bytes at
+    // 1024); an extra, entirely honest-looking part is appended anyway —
+    // caught by count alone, before any part (including the honest ones)
+    // is fetched.
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let layer = layer_bytes(17);
+    let layer_digest = digest_of(&layer);
+    let lying = BlobRecordContent {
+        digest: layer_digest.clone(),
+        size: layer.len() as u64,
+        part_size: 1024,
+        parts: Some(vec![BlobPart {
+            txid: "unused-part-extra".to_string(),
+            sha256: "0".repeat(64),
+            size: 0,
+        }]),
+        pages: None,
+    };
+    let lying_event = blob_record_event(&lying, &w.publisher, NOW).unwrap();
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest.clone(), layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory.seed_blob_record(w.record(&manifest_digest));
+    h.directory.seed_blob_record(w.record(&config_digest));
+    h.directory.seed_blob_record(lying_event);
+
+    let (status, body, _) = spawn(&h, 0xc5, ImageRef::by_digest(manifest_digest)).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
+    assert_eq!(body["error"], "refused_image", "{}", body);
+    assert!(
+        body["message"].as_str().unwrap().contains("imply"),
+        "{}",
+        body
+    );
+    assert!(
+        !w.gateway_paths()
+            .await
+            .iter()
+            .any(|p| p.contains("unused-part")),
+        "no part of the lying record was ever fetched: {:?}",
+        w.gateway_paths().await
+    );
+    assert!(h.backend.calls().is_empty());
+}

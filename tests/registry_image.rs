@@ -111,6 +111,81 @@ async fn an_oci_sourced_manifest_is_fetched_by_digest_from_the_upstream_registry
 }
 
 #[tokio::test]
+async fn an_oversize_oci_blob_body_is_cut_off_and_the_provider_keeps_serving() {
+    // The registry serves far more than the entry's own declared size for
+    // the config blob (TOON_Network#79) — a fetch MUST stop reading at
+    // that size rather than buffer all of it.
+    let mut w = World::new().await;
+    let config = layer_bytes(210);
+    let config_digest = w.upstream_oversize(&config, CONFIG, 8 * 1024 * 1024).await;
+    let layer = layer_bytes(3);
+    let layer_digest = w.store(&layer, LAYER, 1024).await;
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest, layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory
+        .seed_image_entry(w.entry(&manifest_digest, MANIFEST));
+
+    let body = availability(&h, registry_image(&w, &manifest_digest)).await;
+
+    assert_refused(&body, "longer than");
+
+    // The provider survived reading a body far larger than the descriptor
+    // it was told to expect, and keeps answering: an honest image resolves
+    // normally right after, on the very same process.
+    let (good_index, ..) = store_whole_image(&mut w).await;
+    seed_blob_records(&w, &h.directory);
+    assert_eq!(
+        availability(&h, bare_image(&good_index)).await,
+        json!({ "would_run": true }),
+        "an oversize registry body cost the provider nothing it cannot recover from"
+    );
+}
+
+#[tokio::test]
+async fn an_oversize_oci_manifest_body_is_cut_off_and_the_provider_keeps_serving() {
+    // Nothing describes a size for a manifest or an index ahead of
+    // fetching it, so this is bounded by a fixed JSON ceiling rather than
+    // a declared size (TOON_Network#79) — the registry here serves a body
+    // far longer than that ceiling.
+    let mut w = World::new().await;
+    let config = layer_bytes(211);
+    let config_digest = digest_of(&config);
+    let layer = layer_bytes(4);
+    let layer_digest = digest_of(&layer);
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest, layer.len())],
+    );
+    let manifest_digest = w
+        .upstream_oversize(&manifest, MANIFEST, 17 * 1024 * 1024)
+        .await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory
+        .seed_image_entry(w.entry(&manifest_digest, MANIFEST));
+
+    let body = availability(&h, registry_image(&w, &manifest_digest)).await;
+
+    assert_refused(&body, "longer than");
+    assert!(
+        w.gateway_paths().await.is_empty(),
+        "the manifest fetch failed before any blob it names was ever reached: {:?}",
+        w.gateway_paths().await
+    );
+
+    let (good_index, ..) = store_whole_image(&mut w).await;
+    seed_blob_records(&w, &h.directory);
+    assert_eq!(
+        availability(&h, bare_image(&good_index)).await,
+        json!({ "would_run": true }),
+        "an oversize registry body cost the provider nothing it cannot recover from"
+    );
+}
+
+#[tokio::test]
 async fn a_part_that_does_not_hash_to_its_record_is_refused_image() {
     let mut w = World::new().await;
     let config = config_bytes();
@@ -160,7 +235,11 @@ async fn a_part_whose_size_differs_from_its_record_is_refused_image() {
 
     let body = availability(&h, registry_image(&w, &manifest_digest)).await;
 
-    assert_refused(&body, "bytes, not the");
+    // A part's declared size one byte off throws the record's own declared
+    // `size` and its parts' total out of agreement — caught by that upfront
+    // check (TOON_Network#79) before any part is fetched, rather than by
+    // comparing a fetched part's length afterwards.
+    assert_refused(&body, "declares size");
 }
 
 #[tokio::test]
