@@ -392,6 +392,44 @@ impl World {
         digest
     }
 
+    /// Like `upstream`, but the registry serves `bytes` padded with
+    /// `extra_bytes` of filler beyond what the entry declares (TOON_Network
+    /// #79) — a hostile or merely broken registry sending more than its own
+    /// descriptor `size` promised. The path is still keyed by
+    /// `digest_of(bytes)` and the entry still declares `bytes.len()` as
+    /// `size`: only the body actually served lies. Answers the blob's
+    /// digest.
+    pub async fn upstream_oversize(
+        &mut self,
+        bytes: &[u8],
+        media_type: &str,
+        extra_bytes: usize,
+    ) -> String {
+        let digest = digest_of(bytes);
+        let endpoint = if media_type == MANIFEST || media_type == INDEX {
+            "manifests"
+        } else {
+            "blobs"
+        };
+        let mut served = bytes.to_vec();
+        served.resize(bytes.len() + extra_bytes, 0xaa);
+        Mock::given(method("GET"))
+            .and(path(format!("/v2/{}/{}/{}", REPOSITORY, endpoint, digest)))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(served))
+            .mount(&self.registry)
+            .await;
+        self.blobs.push(EntryBlob {
+            digest: digest.clone(),
+            size: bytes.len() as u64,
+            media_type: media_type.to_string(),
+            source: BlobSource::Oci {
+                registry: "docker.io".to_string(),
+                repository: REPOSITORY.to_string(),
+            },
+        });
+        digest
+    }
+
     /// The entry `web:1.0` for `digest`, listing every blob added so far.
     pub fn entry(&self, digest: &str, media_type: &str) -> Event {
         self.entry_named("web", "1.0", digest, media_type)

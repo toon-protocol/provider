@@ -92,13 +92,22 @@ pub enum Candidate {
         registry: String,
         repository: String,
         endpoint: OciEndpoint,
+        /// The blob's own declared size, when one is known (an entry's
+        /// `EntryBlob.size`, §8.1) — bounds a `Blobs` read at that size
+        /// rather than this provider's whole-blob fallback, the same way a
+        /// Blob Record part's own `size` bounds its read (TOON_Network#79).
+        /// `None` for the top-level digest Milestone 1's `reference` form
+        /// pulls, which nothing describes a size for; unused for
+        /// `Manifests`, which is always bounded by a fixed JSON ceiling
+        /// instead.
+        size_hint: Option<u64>,
     },
 }
 
 impl Candidate {
     /// The candidate an Image Registry entry's source becomes, for a blob
-    /// of `media_type`.
-    pub fn from_entry_source(source: &BlobSource, media_type: &str) -> Self {
+    /// of `media_type` and declared `size`.
+    pub fn from_entry_source(source: &BlobSource, media_type: &str, size: u64) -> Self {
         match source {
             BlobSource::ToonStore { blob_record_txid } => Self::ToonStoreRecord {
                 blob_record_txid: blob_record_txid.clone(),
@@ -110,6 +119,7 @@ impl Candidate {
                 registry: registry.clone(),
                 repository: repository.clone(),
                 endpoint: OciEndpoint::for_media_type(media_type),
+                size_hint: Some(size),
             },
         }
     }
@@ -250,13 +260,23 @@ impl BlobSources {
                 registry: registry.clone(),
                 repository: repository.clone(),
                 endpoint: OciEndpoint::Manifests,
+                // Nothing describes a size for the top-level digest this
+                // form pulls — and `Manifests` bounds by a fixed JSON
+                // ceiling regardless, so this is never consulted anyway.
+                size_hint: None,
             }],
             Description::Entry(entry) => entry
                 .content
                 .blobs
                 .iter()
                 .find(|blob| blob.digest == digest)
-                .map(|blob| vec![Candidate::from_entry_source(&blob.source, &blob.media_type)])
+                .map(|blob| {
+                    vec![Candidate::from_entry_source(
+                        &blob.source,
+                        &blob.media_type,
+                        blob.size,
+                    )]
+                })
                 .unwrap_or_default(),
             Description::Nothing => Vec::new(),
         }
@@ -538,9 +558,17 @@ impl BlobFetcher {
                 registry,
                 repository,
                 endpoint,
+                size_hint,
             } => {
                 self.oci
-                    .fetch(registry, repository, *endpoint, digest)
+                    .fetch(
+                        registry,
+                        repository,
+                        *endpoint,
+                        digest,
+                        *size_hint,
+                        self.blob_byte_limit(),
+                    )
                     .await?
             }
         };
@@ -637,17 +665,61 @@ impl BlobFetcher {
     }
 
     /// The record's ordered parts, however they are carried (§8.2, §11 item
-    /// 2). Inline `parts` is returned as is; `pages` is fetched page by
-    /// page, each page's OWN bytes verified against its `sha256` — and its
-    /// part count against `parts` — BEFORE any part inside it is trusted,
-    /// then concatenated in page order. A page that cannot be fetched or
-    /// fails its digest fails the whole record here, which is what sends
-    /// the caller's source (§8.4's chain) on to the next one.
+    /// 2). Inline `parts` is returned as is, once its length is checked
+    /// against what `size`/`part_size` imply; `pages` is bounded by those
+    /// same numbers BEFORE a single page is fetched — TOON_Network#79, so a
+    /// record cannot make a provider read an unbounded number of pages by
+    /// simply listing more of them — and then fetched page by page, each
+    /// page's OWN bytes verified against its `sha256` — and its part count
+    /// against `parts` — BEFORE any part inside it is trusted, then
+    /// concatenated in page order. A page that cannot be fetched or fails
+    /// its digest fails the whole record here, which is what sends the
+    /// caller's source (§8.4's chain) on to the next one.
     async fn resolve_parts(&self, record: &BlobRecordContent) -> Result<Vec<BlobPart>> {
         record.check_one_of()?;
+        let expected_parts = expected_part_count(record.size, record.part_size)?;
         match (&record.parts, &record.pages) {
-            (Some(parts), None) => Ok(parts.clone()),
+            (Some(parts), None) => {
+                if parts.len() as u64 != expected_parts {
+                    bail!(
+                        "the Blob Record's size {} and part_size {} imply {} part(s), but it \
+                         lists {}",
+                        record.size,
+                        record.part_size,
+                        expected_parts,
+                        parts.len()
+                    );
+                }
+                Ok(parts.clone())
+            }
             (None, Some(pages)) => {
+                if pages.len() as u64 > expected_parts {
+                    bail!(
+                        "the Blob Record lists {} page(s), more than the {} part(s) its size {} \
+                         and part_size {} imply",
+                        pages.len(),
+                        expected_parts,
+                        record.size,
+                        record.part_size
+                    );
+                }
+                let mut declared_parts_total: u64 = 0;
+                for (index, page) in pages.iter().enumerate() {
+                    if page.parts == 0 {
+                        bail!("page {} ({}) declares 0 parts", index, page.txid);
+                    }
+                    declared_parts_total = declared_parts_total.saturating_add(page.parts);
+                }
+                if declared_parts_total != expected_parts {
+                    bail!(
+                        "the Blob Record's pages declare {} part(s) total, not the {} its size \
+                         {} and part_size {} imply",
+                        declared_parts_total,
+                        expected_parts,
+                        record.size,
+                        record.part_size
+                    );
+                }
                 let mut all = Vec::new();
                 for (index, page) in pages.iter().enumerate() {
                     let bytes = self
@@ -740,6 +812,25 @@ impl BlobFetcher {
     }
 }
 
+/// The number of parts a Blob Record's own `size` and `part_size` imply
+/// (§8.2: `part_size` "is the size every part but the last has... the
+/// parts' sizes MUST sum to `size`") — `ceil(size / part_size)`. Computed
+/// from numbers the record already carries, so this costs no network call:
+/// used to bound a paged record's page count and per-page `parts`, and an
+/// inline record's `parts` length, before a single page or part is fetched
+/// (TOON_Network#79).
+fn expected_part_count(size: u64, part_size: u64) -> Result<u64> {
+    if part_size == 0 {
+        bail!("the Blob Record's part_size is 0, which cannot split its size into parts");
+    }
+    let whole = size / part_size;
+    Ok(if size.is_multiple_of(part_size) {
+        whole
+    } else {
+        whole + 1
+    })
+}
+
 /// The bytes hash to `digest`, or why not.
 pub fn verify_digest(bytes: &[u8], digest: &str) -> Result<()> {
     let want = digest
@@ -809,7 +900,7 @@ mod tests {
             blob_record_txid: "tx".to_string(),
         };
         assert_eq!(
-            Candidate::from_entry_source(&toon, "application/vnd.oci.image.layer.v1.tar+gzip"),
+            Candidate::from_entry_source(&toon, "application/vnd.oci.image.layer.v1.tar+gzip", 5),
             Candidate::ToonStoreRecord {
                 blob_record_txid: "tx".to_string()
             }
@@ -819,19 +910,21 @@ mod tests {
             repository: "library/alpine".to_string(),
         };
         assert_eq!(
-            Candidate::from_entry_source(&oci, "application/vnd.oci.image.manifest.v1+json"),
+            Candidate::from_entry_source(&oci, "application/vnd.oci.image.manifest.v1+json", 5),
             Candidate::Oci {
                 registry: "docker.io".to_string(),
                 repository: "library/alpine".to_string(),
                 endpoint: OciEndpoint::Manifests,
+                size_hint: Some(5),
             }
         );
         assert_eq!(
-            Candidate::from_entry_source(&oci, "application/vnd.oci.image.config.v1+json"),
+            Candidate::from_entry_source(&oci, "application/vnd.oci.image.config.v1+json", 5),
             Candidate::Oci {
                 registry: "docker.io".to_string(),
                 repository: "library/alpine".to_string(),
                 endpoint: OciEndpoint::Blobs,
+                size_hint: Some(5),
             }
         );
     }

@@ -863,3 +863,168 @@ async fn a_paged_page_body_over_the_ceiling_is_cut_off_and_the_source_fails() {
     );
     assert!(h.backend.calls().is_empty());
 }
+
+#[tokio::test]
+async fn a_paged_records_page_count_beyond_what_size_and_part_size_imply_is_refused_before_any_page_is_fetched(
+) {
+    // 5000 bytes at part_size 1024 is 5 real parts (§8.2: `part_size` is
+    // every part's size but the last's). A record claiming SIX pages,
+    // however small each looks, cannot be honest — and that is knowable
+    // from the record's own numbers, with no page fetched (TOON_Network
+    // #79).
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let layer = layer_bytes(11);
+    let layer_digest = digest_of(&layer);
+    let lying = BlobRecordContent {
+        digest: layer_digest.clone(),
+        size: layer.len() as u64,
+        part_size: 1024,
+        parts: None,
+        pages: Some(
+            (0..6)
+                .map(|i| BlobPage {
+                    txid: format!("unused-page{}", i),
+                    sha256: "0".repeat(64),
+                    parts: 1,
+                })
+                .collect(),
+        ),
+    };
+    let lying_event = blob_record_event(&lying, &w.publisher, NOW).unwrap();
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest.clone(), layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory.seed_blob_record(w.record(&manifest_digest));
+    h.directory.seed_blob_record(w.record(&config_digest));
+    h.directory.seed_blob_record(lying_event);
+
+    let (status, body, _) = spawn(&h, 0xc3, ImageRef::by_digest(manifest_digest)).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
+    assert_eq!(body["error"], "refused_image", "{}", body);
+    assert!(
+        body["message"].as_str().unwrap().contains("more than"),
+        "{}",
+        body
+    );
+    assert!(
+        !w.gateway_paths()
+            .await
+            .iter()
+            .any(|p| p.contains("unused-page")),
+        "no page of the lying record was ever fetched: {:?}",
+        w.gateway_paths().await
+    );
+    assert!(h.backend.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_page_declaring_zero_parts_is_refused_before_any_page_is_fetched() {
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let layer = layer_bytes(13);
+    let layer_digest = digest_of(&layer);
+    let lying = BlobRecordContent {
+        digest: layer_digest.clone(),
+        size: layer.len() as u64,
+        part_size: 1024,
+        parts: None,
+        pages: Some(vec![BlobPage {
+            txid: "unused-page0".to_string(),
+            sha256: "0".repeat(64),
+            parts: 0,
+        }]),
+    };
+    let lying_event = blob_record_event(&lying, &w.publisher, NOW).unwrap();
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest.clone(), layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory.seed_blob_record(w.record(&manifest_digest));
+    h.directory.seed_blob_record(w.record(&config_digest));
+    h.directory.seed_blob_record(lying_event);
+
+    let (status, body, _) = spawn(&h, 0xc4, ImageRef::by_digest(manifest_digest)).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
+    assert_eq!(body["error"], "refused_image", "{}", body);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("declares 0 parts"),
+        "{}",
+        body
+    );
+    assert!(
+        !w.gateway_paths()
+            .await
+            .iter()
+            .any(|p| p.contains("unused-page")),
+        "no page of the lying record was ever fetched: {:?}",
+        w.gateway_paths().await
+    );
+    assert!(h.backend.calls().is_empty());
+}
+
+#[tokio::test]
+async fn an_inline_records_part_count_disagreeing_with_size_and_part_size_is_refused_before_any_part_is_fetched(
+) {
+    // The record's `size` and `part_size` imply 5 parts (5000 bytes at
+    // 1024); an extra, entirely honest-looking part is appended anyway —
+    // caught by count alone, before any part (including the honest ones)
+    // is fetched.
+    let mut w = World::new().await;
+    let config = config_bytes();
+    let config_digest = w.store(&config, CONFIG, 64).await;
+    let layer = layer_bytes(17);
+    let layer_digest = digest_of(&layer);
+    let lying = BlobRecordContent {
+        digest: layer_digest.clone(),
+        size: layer.len() as u64,
+        part_size: 1024,
+        parts: Some(vec![BlobPart {
+            txid: "unused-part-extra".to_string(),
+            sha256: "0".repeat(64),
+            size: 0,
+        }]),
+        pages: None,
+    };
+    let lying_event = blob_record_event(&lying, &w.publisher, NOW).unwrap();
+    let manifest = manifest_bytes(
+        (&config_digest, config.len()),
+        &[(layer_digest.clone(), layer.len())],
+    );
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    h.directory.seed_blob_record(w.record(&manifest_digest));
+    h.directory.seed_blob_record(w.record(&config_digest));
+    h.directory.seed_blob_record(lying_event);
+
+    let (status, body, _) = spawn(&h, 0xc5, ImageRef::by_digest(manifest_digest)).await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
+    assert_eq!(body["error"], "refused_image", "{}", body);
+    assert!(
+        body["message"].as_str().unwrap().contains("imply"),
+        "{}",
+        body
+    );
+    assert!(
+        !w.gateway_paths()
+            .await
+            .iter()
+            .any(|p| p.contains("unused-part")),
+        "no part of the lying record was ever fetched: {:?}",
+        w.gateway_paths().await
+    );
+    assert!(h.backend.calls().is_empty());
+}
