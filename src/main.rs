@@ -21,7 +21,7 @@ struct Cli {
 enum Command {
     /// Print the connector `[[routes]]` rows this provider expects: one spawn
     /// and one extend row per LIVE listing version at that version's price,
-    /// plus the free availability, status and terminate rows.
+    /// plus the free availability, status, terminate and rotate rows.
     ///
     /// A retired listing version keeps its rows until its last lease ends
     /// (ADR 0009), so this reads the persisted lease table at

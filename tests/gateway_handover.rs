@@ -349,7 +349,7 @@ async fn each_member_of_a_standby_set_takes_its_own_grant_and_refuses_the_others
 /// The tool derives rather than stores, and this provider is the judge of
 /// that: a second run of the same command produces a grant that reads the
 /// same lease, and a run for a later moment produces a different grant that
-/// reads it too — which is the whole of rotation (spec §6.5.1).
+/// reads it too — which is the whole of a grant's rotation (spec §6.5.1).
 #[tokio::test]
 async fn a_second_run_derives_the_same_grant_and_a_later_moment_another_that_also_reads() {
     let h = harness_now().await;

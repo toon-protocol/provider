@@ -1,0 +1,29 @@
+{
+  "fixture": {
+    "case": "stale_request.rotate_replay",
+    "description": "`rotate.ok`'s request body sent again, byte for byte. A captured rotation cannot be applied a second time: the replay set refuses its `request_id` before its token is weighed. A tenant that lost the answer to a rotation does not retry it — it asks `status` with the NEW token, and acceptance means the rotation took effect (§6.8).",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/rotate",
+  "request_body": {
+    "request": {
+      "content": {
+        "next": "50298d09923211780db604d4ccb6d3b1d42e3e02b847f56cc98299829466361e",
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "rotate",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "9632458c69e425c5acd35ec8da10c8e17d41d3c5d577620f9c40caa7d00f5904"
+    }
+  },
+  "response_body": {
+    "error": "stale_request",
+    "message": "this Lease Request was already accepted; send a new one"
+  },
+  "response_status": 400,
+  "route": "g.fixture.rotate",
+  "validation_step": "§6.8 step 1 (§6.1.2 step 3): request_id is unseen"
+}

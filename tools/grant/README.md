@@ -4,7 +4,9 @@ The tenant's side of a Workload Gateway: one command that **derives** a
 [Gateway Grant](https://github.com/toon-protocol/TOON_Network/blob/main/CONTEXT.md)
 from a lease's **Root Secret** and **seals** it to the gateway's own
 connector. It holds no Nostr key, signs nothing, publishes nothing and reads
-no relay.
+no relay. Its third command, [`rotate`](#rotating-the-token), replaces the
+lease's Continuation Token at every member of its Standby Set — the one act
+that also takes a grant back.
 
 A Gateway Grant is a value, not an event (spec §6.5.1):
 
@@ -82,51 +84,178 @@ without the value that reads its lease (spec §12.1).
 **A withdrawal is not a revocation, and must not be read as one.** The
 withdrawn gateway keeps the grant it was handed, and that grant reads the
 lease's `status` until its `expires_at` whether or not a withdrawal was ever
-sent. A withdrawal asks a gateway to stop *serving* a workload; nothing in
-this protocol takes a derived value back. **There is no revocation before
-expiry** (spec §6.5.1), exactly as there is none for a Continuation Token.
+sent. A withdrawal asks a gateway to stop *serving* a workload; it takes no
+derived value back.
 
-So a tenant that needs a gateway unable to read sooner has two things and no
-third: derive grants for the **shortest `expires_at` it can live with**, and
-respawn under a new workload id when that is not short enough.
+**Rotating the lease's token is the revocation** (spec §6.5.1, §6.8,
+ADR 0018). `rotate` replaces the Continuation Token every member holds, and
+a provider recomputes a grant from the one token it stores — so every grant
+derived from the old token is `bad_grant` at once, at every member, and the
+gateway that held one stops *reading* too. A tenant that wants to keep its
+gateway runs `handover` again afterwards: the lease file now holds the new
+root secret, the grants derive from the new tokens, and the gateway's
+ordinary admission round replaces what it held.
 
-## Rotation is re-derivation at a later moment
+## A grant rotates by re-derivation; a token rotates by `rotate`
 
-There is no `rotate` and no `renew` command because there is nothing else to
-do. The same root secret, Standby Set and `expires_at` produce the same grant
-byte for byte on any machine, so:
+A grant has no rotation of its own. The same root secret, Standby Set and
+`expires_at` produce the same grant byte for byte on any machine, so:
 
 - run `handover` again with a **later `--expires-at`** and the gateway holds a
   grant that outlives the one it had — the old one keeps working until its own
   moment passes, which is what makes handing out a later grant an ordinary
   second derivation rather than a migration;
 - run `handover` against a **different gateway** and that gateway can read the
-  lease too; withdraw from the first one to stop it serving (above).
+  lease too; withdraw from the first one to stop it serving (above), and
+  `rotate` to stop it reading.
 
-Nothing moves, nothing is published and the provider is not told. A tenant
-holds **one secret per lease** rather than a list of grants, and a lost grant
-is re-derived rather than looked up.
+## Rotating the token
+
+```
+node seal.mjs rotate --lease <lease.json> \
+    --member <pubkey>,<ilp address>,<seal key>[,<connector>] [--member …]
+```
+
+One command rotates the **whole Standby Set** (spec §6.8):
+
+1. It mints a **fresh root secret** — never re-used, never derived from the
+   old one — so if the old root secret is what leaked, it derives nothing that
+   works afterwards.
+2. It writes the new root secret into the lease file, as
+   `rotation.root_secret`, **before any request leaves**. A crash straight
+   after a member accepted cannot lose the only secret that now reads it there.
+3. It sends **one rotate request per member**, each naming only that member,
+   presenting the token the old root derives for it and naming as `next` the
+   token the new root derives for it. Every member ends with a different
+   token, exactly as at spawn.
+4. As each member confirms it is recorded (`rotation.confirmed`). Once
+   **every** member has, `root_secret` becomes the new one and the old one is
+   dropped. Until then the file keeps **both**, because a member that has not
+   rotated is still read with the old root.
+
+**A lost answer is recovered by reading, not by retrying.** The same rotate
+again is `stale_request`, and a new one with the old token after the first
+took effect is `not_tenant`. So when no answer comes back — or the answer is
+`not_tenant`, which is what an earlier run's lost answer looks like — the
+tool asks `status` presenting the **new** token: accepted means the rotation
+took effect (`"recovered": true` in the report), and `not_tenant` means it did
+not and the old token still holds.
+
+**A partly rotated set is a valid state.** A member that cannot be reached
+does not block the others. The tool exits `1`, the file records which members
+confirmed, and running the same command again **resumes** the rotation with
+the same new root secret, leaving the confirmed members alone. It refuses to
+resume naming other members than it started with, because a member left out
+would be read with a root secret the file no longer holds.
+
+The lease file is any JSON object holding `workload_id` and `root_secret` —
+the sandbox's `scripts/spawn.mjs` writes one — and every other key in it is
+kept as it was. It is replaced atomically, mode `0600`. The root secret is
+read from it and **only** from it: `--root-secret` and `TOON_ROOT_SECRET` are
+refused on `rotate`, because a rotation writes a root secret back and one
+from the command line would have nowhere to go.
+
+Each `--member` is a member's public key, the `ilp_address` its Provider
+Profile names (the tool sends to `<ilp address>.rotate`, and `.status` to
+recover) and its connector's **pinned** `connector_seal_key` (ADR 0011), as
+hex, with or without `0x`. There is no `--dry-run`: a new root secret is
+nothing until the members hold it. The report names each member and whether
+it rotated, and carries no secret:
+
+### A hidden member (spec §10, §12.8; TOON_Network #81)
+
+`--member` takes an optional **fourth** field: `<pubkey>,<ilp address>,<seal
+key>,<connector>`. A member with no fourth field is reached exactly as
+before, through the one client this process opens for `TOON_CONNECTOR_URL`.
+A member that names one is dialled **directly** at that URL instead — the one
+path a Hidden Provider's own connector allows, since its `.anyone` address is
+not a route a hub peers with (spec §10, Appendix A). A URL naming an `.anyone`
+host is reached over anon, and `TOON_SOCKS_PROXY` is then required; the tool
+refuses before anything is sent if it names one and finds no proxy configured.
+
+Rotation and its recovery both go through this same dispatch: `rotateMember`'s
+`status` probe after a lost answer (spec §6.8) presents the same member it
+just asked `rotate`, so recovering from a hidden member's lost answer takes
+the identical direct path — nothing about it is special-cased.
+
+`<addr>.rotate` and `<addr>.status` are **free** routes (spec §5, §6.8), so a
+client opened for a hidden member's connector never opens a channel: no
+deposit, no mnemonic spent, nothing paid for. `TOON_MNEMONIC` is still
+required — it derives this process's identity, which a Lease Request needs
+regardless of whether anything is paid for.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TOON_SOCKS_PROXY` | — | `socks5h://<host>:<port>` to a running anon daemon. **Required** when any `--member` names a connector. |
+| `TOON_HIDDEN_CHAIN` | `evm` | Settlement chain identity is derived on for a hidden member's client. |
+| `TOON_HIDDEN_RPC_PORT` | `8545` | That chain's RPC, on the member's own connector **host** (the sandbox's hidden path runs its chain RPC on the same `.anyone` address). |
+| `TOON_HIDDEN_ACCOUNT_INDEX` | `TOON_ACCOUNT_INDEX` | Which account of `TOON_MNEMONIC`'s phrase. |
+| `TOON_HIDDEN_CHANNEL_STORE` | `.toon-client/hidden-channels.json` | Unused unless something one day prices a hidden member's rotate; kept for shape, not because anything is written to it today. |
+
+```
+node seal.mjs rotate --lease <lease.json> \
+    --member <primary pubkey>,g.toon.provider,<seal key> \
+    --member <hidden pubkey>,g.toon.provider-hs,<seal key>,http://<address>.anyone
+```
+
+```json
+{ "workload_id": "…", "rotated": true,
+  "members": [ { "provider": "…", "rotated": true },
+               { "provider": "…", "rotated": true, "recovered": true } ] }
+```
+
+## Reading a lease mid-rotation
+
+`handover` and `withdrawal` take `--lease <lease.json>` too, in place of
+`--root-secret` / `TOON_ROOT_SECRET` and `--workload` (refused alongside it —
+the file names both). A lease file interrupted mid-rotation carries both root
+secrets: `root_secret`, the OLD one, and `rotation.root_secret`, the NEW one,
+with `rotation.confirmed` naming the members already reading it (TOON_Network
+#80). Before this, `handover` derived every member's grant from ONE root
+secret — the confirmed member then refused it `bad_grant`, because its own
+current token no longer matched.
+
+Given a lease file, every member's grant is now derived from **its own
+current root**: the new one where `rotation.confirmed` names it, the old one
+for the rest. A handover sealed this way is admitted at every member,
+whichever root each one currently holds — and the tool prints a warning, with
+neither root secret in it, saying the rotation is unfinished and how to
+finish it (`rotate`, naming the same members). `--standby` is still given as
+flags: the file's own `standby_set`, when the sandbox wrote one, is compose
+names, not the pubkeys this tool takes, and resolving those stays the
+caller's job (`scripts/handover.mjs`'s `memberPubkey`).
+
+The one seam this reads through is `currentRootFor(rootSecret, rotation,
+provider)`, exported from `handover.mjs` — the same function
+`infra/sandbox/scripts/spawn.mjs --terminate` calls to pick each member's
+current root for a termination, so a rotation left unfinished is read the
+same way everywhere a Standby Set is addressed member by member.
 
 ## Usage
 
 ```
-node seal.mjs handover --workload <64 hex> \
+node seal.mjs handover (--workload <64 hex> [--root-secret <64 hex>] | --lease <lease.json>) \
     --standby <pubkey> [--standby <pubkey>…] --http-port <container port> \
     [--ports <port,port,…>] [--name <label>] \
     (--expires-at <unix seconds> | --expires-in <24h | 90m | 7d | seconds>) \
-    --gateway-route <ilp address> --gateway-seal-key <hex> \
-    [--root-secret <64 hex>] [--dry-run]
+    --gateway-route <ilp address> --gateway-seal-key <hex> [--dry-run]
 
-node seal.mjs withdrawal --workload <64 hex> \
+node seal.mjs withdrawal (--workload <64 hex> [--root-secret <64 hex>] | --lease <lease.json>) \
     --standby <pubkey> [--standby <pubkey>…] --expires-at <unix seconds> \
-    --gateway-route <ilp address> --gateway-seal-key <hex> \
-    [--root-secret <64 hex>] [--dry-run]
+    --gateway-route <ilp address> --gateway-seal-key <hex> [--dry-run]
+
+node seal.mjs rotate --lease <lease.json> \
+    --member <pubkey>,<ilp address>,<seal key>[,<connector>] [--member …]
 ```
+
+`rotate`'s two flags are its own and are described [above](#rotating-the-token);
+the table below is `handover`'s and `withdrawal`'s.
 
 | Flag | Meaning |
 |---|---|
-| `--root-secret` | The lease's root secret, 64 hex. Or `TOON_ROOT_SECRET`, which is where it belongs: argv is readable by every process on the host. The **only** secret this tool takes. |
-| `--workload` | The workload id the spawn was signed with. |
+| `--root-secret` | The lease's root secret, 64 hex. Or `TOON_ROOT_SECRET`, which is where it belongs: argv is readable by every process on the host. The **only** secret this tool takes. Refused alongside `--lease`. |
+| `--workload` | The workload id the spawn was signed with. Refused alongside `--lease`. |
+| `--lease` | The lease file — `workload_id`, `root_secret`, and while a rotation is unfinished, `rotation` (spec §6.8) — in place of `--root-secret` / `TOON_ROOT_SECRET` and `--workload`. Read for each member's [current root](#reading-a-lease-mid-rotation); never written back (that is `rotate`'s). |
 | `--standby` | The Standby Set, **primary first**, one flag per member. A standalone lease's is its one provider. One grant is derived for each. |
 | `--http-port` | Which of the spawn's `ports` carries HTTP, as the **container** port. The gateway forwards to the host port the provider's `access` maps it to. |
 | `--ports` | Every `container_port` the spawn asked for, comma-separated, so `--http-port` can be checked against them before anything is sealed. |
@@ -147,8 +276,9 @@ Stdout is one JSON report; progress goes to stderr:
 }
 ```
 
-Exit `0` when the gateway took the message (and on a `--dry-run`), `1` when it
-did not, and `2` for a refusal before anything was derived or paid for. A
+Exit `0` when the gateway took the message (and on a `--dry-run`) or every
+member rotated, `1` when it did not, and `2` for a refusal before anything was
+derived or paid for. A
 gateway that refused is reported in `failed` beside the message, never raised:
 a tenant must be able to see what it derived and send it again.
 
@@ -201,7 +331,10 @@ does, and reads the same environment name for name.
 | `TOON_ENDPOINT_REWRITE` | `{}` | JSON map of advertised connector URL prefix → the address this process can reach it at (see the publisher's README). |
 
 There is no `RELAY_WRITE_ROUTES`: this tool writes to no relay. `TOON_SOCKS_PROXY`
-and `TOON_HIDDEN` are deliberately absent — a tenant is not what spec §10 hides.
+and the `TOON_HIDDEN_*` variables are `rotate`'s alone — reaching a Hidden
+Provider **member**, not hiding the tenant (spec §10 hides a provider, never a
+tenant) — and are documented [above](#a-hidden-member-spec-10-128-toon_network-81),
+beside the one command that reads them.
 
 Deriving needs none of it:
 
@@ -227,6 +360,18 @@ Against a running sandbox stack (`make up` in `infra/sandbox`), drop
   `gateway_sub.vector.json` for the vectors, and `status.delegated.json` —
   a request the provider's HTTP surface answered `200` — for the grant. A
   sender that must never be reached proves each refusal fired before sealing.
+- **`rotate.test.mjs`** — rotation against in-memory members that apply
+  spec §6.8 to the one token each stores: the fresh root secret, one request
+  per member naming only itself, the lease file keeping both roots until
+  every member confirmed, a lost answer recovered through `status`, and a
+  partly rotated set resumed. The request's bytes are checked against the
+  provider's `lease_request.rotate.json`. A `describe('a hidden member', …)`
+  block exercises the fourth `--member` field and `directedAsk` with a second,
+  independent in-memory simulator standing in for a Hidden Provider's own
+  connector — a mixed Standby Set rotating over two paths at once, and a lost
+  answer from the hidden one recovered through `status` there too — with no
+  docker, no anon and no chain: `directedAsk` and `rotateLease` never know
+  there IS a network underneath either `ask`.
 - **`seal.test.mjs`** — the command as a process: the flags, the environment,
   the report, and the exit codes. Each run gets a **bare** environment — no
   mnemonic, no connector, no chain — so a `--dry-run` that works there is one
@@ -239,8 +384,18 @@ Against a running sandbox stack (`make up` in `infra/sandbox`), drop
 provider: the grant the run derived is presented as a delegated `status` and
 answered `200`, byte for byte what the lease's own tenant is answered. The
 two-member case there proves each member takes its own grant and refuses the
-other's as `bad_grant`, and a third run proves that re-deriving is rotation.
-Nothing in that file is a mock of anything.
+other's as `bad_grant`, and a third run proves that re-deriving is how a
+grant rotates. `../../tests/rotate_tool.rs` runs this tool's `rotateLease`
+against two providers served on real TCP ports: every member of a two-member
+set rotated and the lease file updated, a partly rotated set answering each
+member with its own current token, and a lost answer recovered through
+`status`. `../../tests/rotation_tenant_tools.rs` rotates ONE real member for
+real, then runs `handover --lease` and a `currentRootFor`-derived terminate
+against the resulting partly rotated set: the confirmed member's grant reads
+from the new root and the other's from the old, both admit it, and the
+terminate ends the lease at both — proving TOON_Network #80's fix, and that a
+lease file with no `rotation` record still derives exactly what it always
+did. Nothing in any of these files is a mock of anything.
 
 The one seam a message crosses is the sender it is handed
 (`send(route, body) → null | why`, the directory publisher's own shape); the

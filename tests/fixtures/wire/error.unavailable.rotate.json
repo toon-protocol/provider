@@ -1,0 +1,29 @@
+{
+  "fixture": {
+    "case": "unavailable.rotate",
+    "description": "A rotate the provider cannot persist: its state directory has no write permission, so the save §6.8's Effect requires before answering fails. Nothing changed — the old token still reads the lease, before and after a restart — and the tenant retries the SAME `next` once saving works again (spec §5, general; ADR 0018; TOON_Network#78).",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/rotate",
+  "request_body": {
+    "request": {
+      "content": {
+        "next": "50298d09923211780db604d4ccb6d3b1d42e3e02b847f56cc98299829466361e",
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "rotate",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "ee3c2df1ea166da12c8a7f9cdaa193f0a38e278b1eabbbbc7e78693b2903a6f0"
+    }
+  },
+  "response_body": {
+    "error": "unavailable",
+    "message": "this provider could not save that right now; nothing changed, try again"
+  },
+  "response_status": 503,
+  "route": "g.fixture.rotate",
+  "validation_step": "§6.8 Effect: the lease MUST be persisted before the answer"
+}

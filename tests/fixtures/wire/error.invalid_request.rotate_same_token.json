@@ -1,0 +1,29 @@
+{
+  "fixture": {
+    "case": "invalid_request.rotate_same_token",
+    "description": "A rotate presenting the lease's current token and naming that same token as `next`: a no-op dressed as a rotation, refused rather than answered `rotated: true`. It is weighed only after the request has proved it holds the token, so it is no oracle for anyone guessing one.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/rotate",
+  "request_body": {
+    "request": {
+      "content": {
+        "next": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "13aaa05ae89d8fb81acd101b9daabd5b037135291deac980842ee8b7c282fb6d",
+      "expiration": 1700000060,
+      "op": "rotate",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "7ab1d9843ccf1600df3ab3c8d9f0717de379decbd3f8aff666bed9b652788c28"
+    }
+  },
+  "response_body": {
+    "error": "invalid_request",
+    "message": "`next` is the token this lease already holds; a rotation names a new one"
+  },
+  "response_status": 400,
+  "route": "g.fixture.rotate",
+  "validation_step": "§6.8 step 6: next is not the token the lease holds"
+}

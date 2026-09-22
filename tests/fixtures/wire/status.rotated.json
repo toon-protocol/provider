@@ -1,0 +1,39 @@
+{
+  "fixture": {
+    "case": "rotated",
+    "description": "Status of the rotated lease presenting the NEW token (`next` in `rotate.ok`). The answer is what `status.running` answered before the rotation, byte for byte: rotation replaces the token and changes nothing else about the lease.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "status"
+  },
+  "http_path": "/status",
+  "request_body": {
+    "request": {
+      "content": {
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "50298d09923211780db604d4ccb6d3b1d42e3e02b847f56cc98299829466361e",
+      "expiration": 1700000060,
+      "op": "status",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "e2de53e06f1f4bb46e6aaf2620bcc85c3d4028904dca4e4da1cb5a711a0efcd3"
+    }
+  },
+  "response_body": {
+    "access": {
+      "host": "203.0.113.7",
+      "ports": [
+        {
+          "container_port": 443,
+          "host_port": 41000
+        }
+      ],
+      "ssh_port": 40000
+    },
+    "expires_at": 1700003600,
+    "role": "standalone",
+    "state": "running",
+    "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "response_status": 200,
+  "route": "g.fixture.status"
+}

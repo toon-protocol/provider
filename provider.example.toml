@@ -7,7 +7,7 @@ provider_name = "Example Provider"
 
 # The provider's ILP address. Every route is a suffix of it:
 # <ilp_address>.<listing>.v<n>.spawn / .extend, and the free
-# <ilp_address>.availability / .status / .terminate.
+# <ilp_address>.availability / .status / .terminate / .rotate.
 ilp_address = "g.acme"
 
 # Where tenants reach workloads. Ports are exposed as public_ip:host_port;

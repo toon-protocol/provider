@@ -192,31 +192,38 @@ impl LeaseRecord {
     }
 }
 
-/// Mirror the lease table to disk.
+/// Mirror the lease table to disk. Returns whether it reached disk.
 ///
 /// Written to a sibling temp file and renamed, because a truncated state file
 /// is worse than a stale one: the loader would treat every lease past the
 /// truncation point as never having existed. `rename` is atomic on POSIX.
 ///
-/// Failures are logged, never propagated — refusing a paid-for spawn over an
-/// unwritable bookkeeping file would be worse than a stale mirror.
-pub(crate) fn persist_leases(leases: &HashMap<u32, LeaseRecord>, path: &str) {
+/// Every failure is logged here, at the one place that sees it. Most callers
+/// still don't propagate it — refusing a paid-for spawn over an unwritable
+/// bookkeeping file would be worse than a stale mirror, so a spawn, extend,
+/// termination and the rest go on answering their tenant and simply ignore
+/// the return value. `rotate` is the one caller that cannot: a rotation is a
+/// revocation, so it may confirm one only once the new token is on disk
+/// (spec §6.8, ADR 0018, TOON_Network#78), and it checks this to know.
+pub(crate) fn persist_leases(leases: &HashMap<u32, LeaseRecord>, path: &str) -> bool {
     let tmp = format!("{}.tmp", path);
     let encoded = match serde_json::to_vec_pretty(leases) {
         Ok(v) => v,
         Err(e) => {
             error!("failed to encode lease table: {}", e);
-            return;
+            return false;
         }
     };
     if let Err(e) = std::fs::write(&tmp, &encoded) {
         error!("failed to write lease table to {}: {}", tmp, e);
-        return;
+        return false;
     }
     if let Err(e) = std::fs::rename(&tmp, path) {
         error!("failed to install lease table at {}: {}", path, e);
         let _ = std::fs::remove_file(&tmp);
+        return false;
     }
+    true
 }
 
 /// The persisted lease table, read from outside a running provider.
@@ -487,10 +494,43 @@ mod tests {
     fn write_leaves_no_temp_file_behind() {
         let p = temp_path("tmpfile");
         let map = HashMap::from([(2000, lease(2000, 42))]);
-        persist_leases(&map, &p);
+        assert!(persist_leases(&map, &p), "a writable path succeeds");
         assert!(!std::path::Path::new(&format!("{}.tmp", p)).exists());
         assert!(std::path::Path::new(&p).exists());
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// The seam `rotate` depends on (TOON_Network#78): a write that cannot
+    /// reach disk reports failure rather than only logging it, so a caller
+    /// that must not confirm a change it could not save can find out. A
+    /// directory with no write permission is the failure a full disk or a
+    /// yanked mount both look like from here.
+    #[test]
+    fn a_write_into_an_unwritable_directory_reports_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut dir = std::env::temp_dir();
+        dir.push(format!(
+            "toon-provider-lease-state-unwritable-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.to_string_lossy().into_owned();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let p = format!("{}/leases.json", dir);
+        let map = HashMap::from([(2000, lease(2000, 42))]);
+        let ok = persist_leases(&map, &p);
+
+        // Restored before asserting, so a failed assertion still leaves a
+        // directory the test runner can clean up.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            !ok,
+            "a write into a read-only directory must report failure, not just log it"
+        );
+        assert!(!std::path::Path::new(&p).exists(), "nothing was installed");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

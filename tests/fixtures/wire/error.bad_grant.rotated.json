@@ -1,0 +1,29 @@
+{
+  "fixture": {
+    "case": "bad_grant.rotated",
+    "description": "A Workload Gateway's status on the rotated lease, presenting the grant the tenant derived from the token `rotate.ok` replaced — the same grant `status.delegated` shows being admitted. The provider recomputes a grant from whatever token it stores, and it stores only the new one, so every grant of the old token stopped working at the rotation. A tenant that keeps its gateway hands it grants derived from the new token (§12).",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "error"
+  },
+  "http_path": "/status",
+  "request_body": {
+    "request": {
+      "content": {
+        "gateway_expires_at": 1700086400,
+        "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "continuation": "d86f4764fa750ebd0a7f27303878c0b31afd941de27960fe538649f376a3d10f",
+      "expiration": 1700000060,
+      "op": "status",
+      "provider": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27",
+      "request_id": "fd2373ba69a21afaa3767ad8ef3556ab90e2b463854335b0c9cefe19cbed0a31"
+    }
+  },
+  "response_body": {
+    "error": "bad_grant",
+    "message": "this delegation does not apply here; ask the tenant for one derived for this workload and this moment"
+  },
+  "response_status": 403,
+  "route": "g.fixture.status",
+  "validation_step": "§6.5.1 step 3: the presented value MUST be the grant the lease's CURRENT token derives for the moment the request asserts"
+}

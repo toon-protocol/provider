@@ -404,6 +404,37 @@ async fn a_stopped_lease_is_still_paid_still_extends_and_still_expires() {
     );
 }
 
+/// A stopped primary's tenant can still rotate its token: every state short
+/// of Ended can be rotated (spec §6.8). The lease stays stopped, and the
+/// backend is asked for nothing — a rotation touches the token alone.
+#[tokio::test]
+async fn a_stopped_lease_can_be_rotated() {
+    let h = fresh().await;
+    let primary = spawn_primary(&h, 1).await;
+
+    liveness_refused_on(&h, &OWN_RELAYS[0..2]);
+    cadences(&h, SELF_STOP_CADENCES.into()).await;
+    assert_eq!(status_of(&h, &primary).await["state"], "stopped");
+    let calls = h.backend.calls();
+
+    let next = mint().continuation_for(&h.provider);
+    let spec = RequestSpec::op(
+        &h,
+        "rotate",
+        json!({ "workload_id": primary.workload_id, "next": next }),
+    )
+    .with_token(&primary.token);
+    let (code, body) = post(&h.app, "/rotate", json!({ "request": spec.request() })).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+
+    let rotated = Lease {
+        token: next,
+        ..primary
+    };
+    assert_eq!(status_of(&h, &rotated).await["state"], "stopped");
+    assert_eq!(h.backend.calls(), calls, "the backend was asked nothing");
+}
+
 // ── starting again, and the one reason not to ────────────────────────────
 
 /// The majority comes back and nobody claimed the workload, so the same

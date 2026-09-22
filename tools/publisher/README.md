@@ -115,9 +115,45 @@ exactly as it did before the field existed — absent means direct.
 
 ## Tests
 
-`npm test` (`node --test`) covers `proxy.mjs`: which proxy a publication
-rides, what is refused at startup, and what stays direct. It needs no network,
-no chain and no mnemonic.
+`npm test` (`node --test`) covers `proxy.mjs` — which proxy a publication
+rides, what is refused at startup, and what stays direct — and `blob.mjs`
+below. Neither needs network, a chain or a mnemonic.
+
+## Deciding a Blob Record's shape: `blob.mjs`
+
+A Blob Record's content (spec §8.2, §11 item 2, TOON_Network #73) carries
+EXACTLY ONE of `parts` (today's shape) or `pages` — the large-blob shape a
+record over roughly 700 parts (~70 MB at the sandbox's 100 KiB part size)
+needs, since that many parts do not fit inline in one TOON store data item.
+`blob.mjs` is the pure half of that decision: bytes in, a plan out — which
+shape the record gets, the ordered parts either way, and the exact bytes
+every upload (a part, or a page) would carry. Like `publish.mjs`, it holds no
+identity and touches no network: signing the record and uploading these
+bytes to a real store is the caller's job (the sandbox's
+`infra/sandbox/scripts/publisher`, which imports `planBlobRecord` from here
+for the decision and keeps only the signing and the paying — `make
+smoke-m7` publishes a paged image through it — or any other deployment).
+The threshold is measured on the WHOLE signed event, escaped content and
+tags included: at the 100 KiB part size, 689 parts stay inline and 690 page.
+
+```js
+import { planBlobRecord } from './blob.mjs';
+const plan = planBlobRecord({ bytes, partSize, dataItemMax });
+// plan.parts XOR plan.pages is non-null; plan.uploads is every upload
+// (`{ kind: 'part' | 'page', txid, bytes }`) in the order a real storer
+// would pay for them.
+```
+
+`blob-cli.mjs` is a thin driver over it — `node blob-cli.mjs plan <file>
+[--part-size N] [--data-item-max N] [--parts-per-page N]` prints the plan as
+JSON (byte fields as `bytes_hex`) — so the decision can be watched from
+OUTSIDE this process: `toon-provider`'s own `tests/publisher_blob_tool.rs`
+runs it as a subprocess on both sides of its threshold and hands what it
+planned to this provider's real `BlobFetcher`, proving the tool's output and
+the provider's reader agree on the same bytes whichever shape the record
+took (the pattern `tests/gateway_handover.rs` already uses for
+`tools/grant/seal.mjs`). The switch point (`dataItemMax`, `partSize`) is this
+tool's own choice, never the protocol's.
 
 ## Why the provider knows relays by URL and this process knows them by route
 

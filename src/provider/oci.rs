@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, bail, Context, Result};
+use bytes::BytesMut;
 use reqwest::header::{HeaderValue, ACCEPT, WWW_AUTHENTICATE};
 use serde_json::Value;
 
@@ -26,6 +27,14 @@ const MANIFEST_ACCEPT: &str = "application/vnd.oci.image.index.v1+json, \
      application/vnd.oci.image.manifest.v1+json, \
      application/vnd.docker.distribution.manifest.list.v2+json, \
      application/vnd.docker.distribution.manifest.v2+json";
+
+/// How large a manifest or an index's own body may be before a fetch gives
+/// up on it (TOON_Network#79) — a fixed ceiling, unrelated to any blob-size
+/// limit, since nothing describes a size for these ahead of fetching them:
+/// they are what a size (§8.1's `EntryBlob.size`, or a manifest's own
+/// per-layer `size`) is read FROM. A real manifest or index is a few KB to
+/// a few hundred KB even for a large image; generous headroom over that.
+const MANIFEST_JSON_CEILING_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Which distribution endpoint a blob lives behind. A registry serves
 /// indexes and manifests from `/manifests/` and everything else from
@@ -85,12 +94,26 @@ impl OciClient {
     /// The raw bytes of `digest` from `registry`'s `repository`, over the
     /// endpoint the blob's kind calls for. Unverified: the caller checks
     /// them against `digest`.
+    ///
+    /// Streamed chunk by chunk and cut off the instant the body exceeds its
+    /// bound (TOON_Network#79), the same way `fetcher::gateway_read` bounds
+    /// a TOON store read — a hostile or merely misconfigured upstream
+    /// registry gets no more chance to exhaust memory than a hostile
+    /// gateway does. `Manifests` is bounded by the fixed
+    /// `MANIFEST_JSON_CEILING_BYTES`, since nothing describes a size for an
+    /// index or a manifest ahead of fetching it; `Blobs` is bounded by
+    /// `blob_size_hint` — the blob's own declared size, an Image Registry
+    /// entry's `EntryBlob.size` (§8.1), when the caller has one — or
+    /// `default_blob_limit` (the provider's own whole-blob limit,
+    /// `BlobFetcher::blob_byte_limit`) otherwise.
     pub async fn fetch(
         &self,
         registry: &str,
         repository: &str,
         endpoint: OciEndpoint,
         digest: &str,
+        blob_size_hint: Option<u64>,
+        default_blob_limit: u64,
     ) -> Result<bytes::Bytes> {
         let base = self
             .base_url_override
@@ -120,7 +143,7 @@ impl OciClient {
             .await
             .with_context(|| format!("could not reach registry for {} ({})", what, digest))?;
 
-        let response = if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let mut response = if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             // The generic bearer challenge flow (docker distribution spec):
             // the 401 names a token endpoint in `Www-Authenticate`, and an
             // anonymous pull token from it is usually enough for a public
@@ -151,10 +174,27 @@ impl OciClient {
                 response.status()
             );
         }
-        response
-            .bytes()
+        let limit = match endpoint {
+            OciEndpoint::Manifests => MANIFEST_JSON_CEILING_BYTES,
+            OciEndpoint::Blobs => blob_size_hint.unwrap_or(default_blob_limit),
+        };
+        let mut body = BytesMut::with_capacity(usize::try_from(limit).unwrap_or(0));
+        while let Some(chunk) = response
+            .chunk()
             .await
-            .with_context(|| format!("could not read the body of {} ({})", what, digest))
+            .with_context(|| format!("could not read the body of {} ({})", what, digest))?
+        {
+            body.extend_from_slice(&chunk);
+            if body.len() as u64 > limit {
+                bail!(
+                    "the body of {} ({}) is longer than the {} bytes allowed for it",
+                    what,
+                    digest,
+                    limit
+                );
+            }
+        }
+        Ok(body.freeze())
     }
 
     /// Exchange a `WWW-Authenticate: Bearer ...` challenge for an anonymous

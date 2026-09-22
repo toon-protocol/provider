@@ -8,16 +8,16 @@
 // body, not from who paid.
 //
 // Paths are `provider::routes`'s: the connector forwards each ILP prefix to
-// one of them. Spawn, extend, standby, standby.extend, availability, status
-// and terminate are all served.
+// one of them. Spawn, extend, standby, standby.extend, availability, status,
+// terminate and rotate are all served.
 //
-// The free routes (`availability`, `status`, `terminate`) arrive with nothing
-// paid and are served exactly like the paid ones: this app never looks at what
-// a packet was worth.
+// The free routes (`availability`, `status`, `terminate`, `rotate`) arrive
+// with nothing paid and are served exactly like the paid ones: this app never
+// looks at what a packet was worth.
 //
-// `status` and `terminate` are free but not unauthenticated: each carries a
-// Lease Request presenting the lease's Continuation Token (spec §6.1). Only
-// `availability` and `.extend` carry nothing at all.
+// `status`, `terminate` and `rotate` are free but not unauthenticated: each
+// carries a Lease Request presenting the lease's Continuation Token (spec
+// §6.1). Only `availability` and `.extend` carry nothing at all.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,11 +42,11 @@ use crate::nostr::lease_request::AcceptedRequests;
 use crate::nostr::wire::{ErrorCode, ErrorResponse, EvictRequest};
 use crate::outbound_proxy::OutboundProxy;
 use crate::provider::routes::{
-    AVAILABILITY_PATH, EXTEND_PATTERN, SPAWN_PATTERN, STANDBY_EXTEND_PATTERN, STANDBY_PATTERN,
-    STATUS_PATH, TERMINATE_PATH,
+    AVAILABILITY_PATH, EXTEND_PATTERN, ROTATE_PATH, SPAWN_PATTERN, STANDBY_EXTEND_PATTERN,
+    STANDBY_PATTERN, STATUS_PATH, TERMINATE_PATH,
 };
 use crate::provider::{
-    availability, evict, extend, spawn, standby_extend, standby_spawn, status, terminate,
+    availability, evict, extend, rotate, spawn, standby_extend, standby_spawn, status, terminate,
     BlobCache, BlobFetcher, ImagePolicy, LeaseRecord, ProviderConfig,
 };
 
@@ -106,6 +106,7 @@ impl AppState {
         let fetcher = BlobFetcher::new(
             config.gateway_url_pattern.clone(),
             config.image_policy.registry_url_override.clone(),
+            config.image_policy.max_image_bytes,
             cache,
         );
         let fetcher = Arc::new(match &proxy {
@@ -236,6 +237,7 @@ pub fn router(state: AppState) -> Router {
         .route(AVAILABILITY_PATH, post(availability_route))
         .route(STATUS_PATH, post(status_route))
         .route(TERMINATE_PATH, post(terminate_route))
+        .route(ROTATE_PATH, post(rotate_route))
         .with_state(state)
 }
 
@@ -396,6 +398,13 @@ async fn terminate_route(State(state): State<AppState>, body: Bytes) -> Response
     }
 }
 
+async fn rotate_route(State(state): State<AppState>, body: Bytes) -> Response {
+    match rotate(&state, &body).await {
+        Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
+        Err(e) => refuse(e),
+    }
+}
+
 /// `POST /operator/evict` on the OPERATOR router (`operator_router`), never
 /// on `router`. No signature to check: the caller already reached a loopback
 /// port that `router` never listens on.
@@ -431,9 +440,11 @@ fn parse_version(segment: &str) -> Option<u32> {
     segment.strip_prefix('v')?.parse().ok().filter(|v| *v > 0)
 }
 
-/// Every refusal is the spec's JSON error shape with a 4xx status. The
-/// connector bills a paid route regardless of status (ADR 0003); the status
-/// is for tooling that reads HTTP before it reads the body.
+/// Every refusal is the spec's JSON error shape with a 4xx status — except
+/// `Unavailable`, which is not a mistaken request and gets a 5xx (spec §5,
+/// TOON_Network#78). The connector bills a paid route regardless of status
+/// (ADR 0003); the status is for tooling that reads HTTP before it reads the
+/// body.
 pub fn refuse(error: ErrorResponse) -> Response {
     let status = match error.error {
         ErrorCode::NotTenant | ErrorCode::BadGrant => StatusCode::FORBIDDEN,
@@ -445,6 +456,7 @@ pub fn refuse(error: ErrorResponse) -> Response {
         | ErrorCode::NotStandby
         | ErrorCode::NotRunning => StatusCode::CONFLICT,
         ErrorCode::RefusedImage | ErrorCode::NoMatchingArch => StatusCode::UNPROCESSABLE_ENTITY,
+        ErrorCode::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
     };
     (status, Json(error)).into_response()
 }

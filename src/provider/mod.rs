@@ -12,8 +12,8 @@
 //
 // The routes themselves are one module each: `spawn` starts a lease — or, on
 // `.standby`, reserves capacity for one without starting it — `lifecycle`
-// extends, reports and ends one, `availability` answers whether a spawn would
-// run without starting anything, and `cleanup` is where every ending — Expiry
+// extends, reports, ends and rotates one, `availability` answers whether a
+// spawn would run without starting anything, and `cleanup` is where every ending — Expiry
 // or Termination — releases the slot and, when there is a workload, destroys
 // it. `standby` is the rule the two spawn routes share: which role a
 // `standby_set` and a route give this provider, and what the lease then
@@ -54,15 +54,17 @@ pub use config::{
 };
 pub use fetcher::BlobFetcher;
 pub use image_policy::{ImagePolicy, ResolvedImage};
-pub use lifecycle::{evict, extend, standby_extend, status, terminate};
+pub use lifecycle::{evict, extend, rotate, standby_extend, status, terminate};
 pub use persistence::persisted_leases;
 pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
 pub use routes::{render_routes, route_table, RouteRow};
 pub use self_stop::{reached_a_majority, SELF_STOP_CADENCES};
-pub use settle::{pick_winner, Claim, TakeoverSettlement};
+pub use settle::{pick_winner, Claim, TakeoverSettlement, SETTLE_CADENCES};
 pub use spawn::{spawn, standby_spawn, VOLUME_MOUNT_PATH};
 pub use standby::StandbySet;
-pub use watchdog::{silent_on_a_majority, TakeoverAnnouncement, WATCHDOG_INTERVAL_SECS};
+pub use watchdog::{
+    silent_on_a_majority, TakeoverAnnouncement, TRIGGER_CADENCES, WATCHDOG_INTERVAL_SECS,
+};
 
 use std::collections::HashMap;
 use std::sync::Arc;
