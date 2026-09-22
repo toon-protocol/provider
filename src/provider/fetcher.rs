@@ -842,11 +842,13 @@ fn expected_part_count(size: u64, part_size: u64) -> Result<u64> {
         bail!("the Blob Record's part_size is 0, which cannot split its size into parts");
     }
     let whole = size / part_size;
-    Ok(if size.is_multiple_of(part_size) {
-        whole
-    } else {
-        whole + 1
-    })
+    // `%` rather than `is_multiple_of`, for the reason `config::validate`
+    // gives at its own use of it: the release image builds on the Rust in
+    // Dockerfile (1.85), where that method is still unstable, and a provider
+    // that only compiles on the host is not a provider the sandbox can run.
+    #[allow(clippy::manual_is_multiple_of)]
+    let exact = size % part_size == 0;
+    Ok(if exact { whole } else { whole + 1 })
 }
 
 /// The bytes hash to `digest`, or why not.
