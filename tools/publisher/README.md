@@ -73,6 +73,17 @@ are never written at all. `TOON_TRANSPORT=auto` reads the pin out of the
 node's own self-description and dials whatever it asks for, which is what a
 deployment against such a relay wants.
 
+**A pin is published on the route that enforces it** (connector ADR 0072,
+TOON_Network#111): each entry in `routes[]` carries a `requiredTransport` where
+that route pins one, and a node-wide `requiredTransport` beside them summarises
+the routes covering the node's own addresses — stated only where they agree. The
+relay's do not agree (`g.toon.relay` is pinned, `g.toon.relay.ephemeral` is not),
+which is why for a while it published no pin at all while refusing every
+HTTP-carried write to the first prefix, and why `deploy/docker-compose.yml` names
+`btp` outright until the relay box runs a connector that publishes the per-route
+field. `curl -s <relay>/ilp | jq '.routes[] | select(.prefix == "g.toon.relay")'`
+is the whole check.
+
 **Two things the HTTP carriage carries that a websocket does not**, and both
 are startup refusals rather than warnings, because both fail silently:
 

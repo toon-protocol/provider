@@ -609,8 +609,28 @@ fn the_publisher_pays_over_a_carriage_the_relay_will_accept() {
     // routes carry only a prefix and a price. `auto` therefore falls back to
     // HTTP and is refused `TRANSPORT_REQUIRED` — observed against the devnet
     // relay on 2026-09-22, once its connector carried ADR 0069's wire and
-    // could refuse in words rather than in a parse error. When a connector
-    // publishes the pin it enforces, this may go back to `auto`.
+    // could refuse in words rather than in a parse error.
+    //
+    // TOON_Network#111 found WHY the document was silent, which is the part
+    // that decides when this may change back. The pin is enforced per ROUTE
+    // and was published per NODE: the relay answers to `g.toon.relay`, pinned
+    // to BTP, and `g.toon.relay.ephemeral`, which is not, so the node-wide
+    // `requiredTransport` had no honest value and was omitted while the pin
+    // was enforced on every packet. Connector ADR 0072 publishes a pin on the
+    // route that enforces it, and `@toon-protocol/client`'s `auto` reads it
+    // there; a client and a connector carrying both were proved end to end
+    // against a node configured exactly as this relay is.
+    //
+    // **So this goes back to `auto` when the relay BOX runs such a connector,
+    // and not before.** That is a fleet release and a pin bump, neither of
+    // which this repository performs. The check is one request:
+    //
+    //   curl -s https://proxy.relay.devnet.toonprotocol.dev/ilp \
+    //     | jq '.routes[] | select(.prefix == "g.toon.relay")'
+    //
+    // When that object carries `requiredTransport: "btp"`, flip the compose
+    // file and this assertion together. Until then, naming the carriage is
+    // the only way this publisher can honour a pin it cannot read.
     let compose = deploy("docker-compose.yml");
     assert!(compose.contains("TOON_TRANSPORT: btp"));
 

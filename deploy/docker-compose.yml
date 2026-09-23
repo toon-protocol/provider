@@ -165,13 +165,31 @@ services:
       # websocket, so it passes through neither a SOCKS5h proxy nor
       # TOON_ENDPOINT_REWRITE, and this publisher sets neither.
       # tools/publisher/README.md § "Which carriage the packets ride".
-      # `auto` cannot work against this relay: its `GET /ilp` advertises
+      # `auto` cannot work against this relay YET: its `GET /ilp` advertises
       # `peerCarriages: []` and no per-route carriage, so nothing there names
       # the pin, the publisher falls back to HTTP and every write comes back
       # `TRANSPORT_REQUIRED ... the route requires the btp transport`
       # (observed on the devnet relay, 2026-09-22, once its connector carried
-      # ADR 0069's wire and could refuse in words). Named outright until a
-      # connector publishes the pin it enforces.
+      # ADR 0069's wire and could refuse in words).
+      #
+      # WHY the document said nothing, established under TOON_Network#111: the
+      # pin is enforced per ROUTE and was published per NODE. The relay answers
+      # to `g.toon.relay`, pinned to BTP, and `g.toon.relay.ephemeral`, which is
+      # not, so the node-wide `requiredTransport` had no honest value and was
+      # omitted — correctly, by its own rule — while every HTTP-carried write to
+      # the first prefix was refused. Greeting each destination unpaid shows it:
+      # `g.toon.relay` answers 402 carrying `extra.requiredTransport: "btp"`,
+      # `.ephemeral`, `.gas` and `.store` answer 402 with no such key.
+      #
+      # The fix is connector ADR 0072: a route publishes the carriage it pins,
+      # on its own `routes[]` entry, and `@toon-protocol/client`'s `auto` reads
+      # it there. THIS LINE GOES BACK TO `auto` once the relay box runs a
+      # connector carrying that — check with
+      #   curl -s https://proxy.relay.devnet.toonprotocol.dev/ilp \
+      #     | jq '.routes[] | select(.prefix == "g.toon.relay")'
+      # and flip it when that object carries `requiredTransport: "btp"`. Until
+      # then the carriage is named outright, because a publisher that cannot
+      # read the pin has no other way to honour it.
       TOON_TRANSPORT: btp
     volumes:
       # The channel watermark. A named volume so a restart keeps it: a claim
