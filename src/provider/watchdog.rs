@@ -12,6 +12,13 @@
 // one `liveness_cadence_s`. One relay that lost a write, or a majority that
 // comes back inside the cadence, triggers nothing.
 //
+// Those relays are the PRIMARY's choice, published in an event anybody can
+// sign, so none of them is dialled until the Directory port has checked it
+// against the rule a tenant's relay hint is checked against (`directory.rs`,
+// spec §8.4, TOON_Network#113). A relay this provider must not dial comes
+// back `Absent` — silence — and so counts here exactly as a relay it cannot
+// reach does, which is what stops a primary hiding behind one.
+//
 // When the trigger holds, this provider publishes ONE Takeover to the
 // primary's Relay Set and remembers, on the lease and on disk, that it did
 // and when. Settling the race and starting the workload are `settle`'s

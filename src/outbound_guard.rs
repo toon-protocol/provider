@@ -1,5 +1,5 @@
-// Where a tenant's image may send this provider (spec §8.4, ADR 0022,
-// TOON_Network#105, TOON_Network#107).
+// Where somebody else may send this provider (spec §8.4, ADR 0022,
+// TOON_Network#105, TOON_Network#107, TOON_Network#113).
 //
 // A spawn's `image.reference` names the registry, and the provider dials it:
 // `reference.example/team/app` becomes `https://reference.example/v2/...`.
@@ -34,6 +34,13 @@
 // nostr-sdk resolves and dials the name itself, so the name is resolved here
 // and refused before the dial rather than resolved ONCE for both. What that
 // costs is written out on `check_relay`.
+//
+// The same rule, the same transport and a different author: the relays a
+// PEER's Provider Profile lists, which a Warm Standby dials to watch its
+// primary and to settle a Takeover (`check_peer_relay`, spec §7.1,
+// TOON_Network#113). A Profile is a published event, so "another provider
+// said so" is worth exactly as much as "a tenant said so" — which is why
+// there is one rule here and only the wording of the refusal differs.
 //
 // Two things this does NOT cover, on purpose:
 //
@@ -200,6 +207,65 @@ fn masked<const N: usize>(octets: &[u8; N], prefix: u8) -> [u8; N] {
     out
 }
 
+/// Who chose a relay URL, and so how a refusal of it reads.
+///
+/// The rule does not depend on this — one rule, whoever wrote the URL — but
+/// the refusal does: it has to name the door the URL came in at, what the
+/// provider would have done with it, and the ticket that says it must not,
+/// so that an operator reading a log knows which of their peers or tenants
+/// to look at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelaySource {
+    /// The `relay` of a spawn's `registry_entry`: a TENANT's URL, dialled to
+    /// read an Image Registry entry (spec §6.2, TOON_Network#107).
+    Hint,
+    /// A relay another provider's Provider Profile lists: a PEER's URL,
+    /// dialled to watch that provider and to settle a Takeover on it (spec
+    /// §7.1, TOON_Network#113).
+    Peer,
+}
+
+impl RelaySource {
+    /// How a refusal names the URL.
+    fn named(self, relay: &str) -> String {
+        match self {
+            Self::Hint => format!("the relay hint {}", relay),
+            Self::Peer => format!("the relay {} in a peer's Provider Profile", relay),
+        }
+    }
+
+    /// What the provider dials it for, for the scheme refusal.
+    fn dialled_for(self) -> &'static str {
+        match self {
+            Self::Hint => {
+                "a provider reads an Image Registry entry over a websocket and nothing else"
+            }
+            Self::Peer => "a provider watches a peer over a websocket and nothing else",
+        }
+    }
+
+    /// What the provider will not do, for the address refusal.
+    fn will_not(self) -> &'static str {
+        match self {
+            Self::Hint => {
+                "this provider does not read an Image Registry entry from inside its operator's \
+                 own network"
+            }
+            Self::Peer => {
+                "this provider does not dial inside its operator's own network because another \
+                 provider said so"
+            }
+        }
+    }
+
+    fn ticket(self) -> &'static str {
+        match self {
+            Self::Hint => "TOON_Network#107",
+            Self::Peer => "TOON_Network#113",
+        }
+    }
+}
+
 /// The rule, plus what the OPERATOR has exempted from it.
 ///
 /// Cheap to clone (a short list of parsed entries), and both a resolver and
@@ -345,6 +411,8 @@ impl OutboundGuard {
     /// The same rule for the one outbound address a tenant names that is NOT
     /// an image fetch: the `relay` of a spawn's `registry_entry`, dialled as
     /// a websocket to read the entry (spec §6.2 step 5, TOON_Network#107).
+    /// `check_peer_relay` is the same check for a relay a PEER names, and
+    /// everything below holds for both.
     ///
     /// `ws` or `wss` and nothing else: a relay speaks NIP-01 over a
     /// websocket, and every other scheme a URL parser accepts is a different
@@ -372,17 +440,52 @@ impl OutboundGuard {
     /// operator's network, and a lookup here would undo the hiding that is
     /// the point. An address literal is still checked.
     pub async fn check_relay(&self, relay: &str, resolve_names: bool) -> Result<()> {
+        self.check_relay_url(relay, resolve_names, RelaySource::Hint)
+            .await
+    }
+
+    /// The same rule for a relay a PEER names: one of the `relays` in another
+    /// provider's Provider Profile, which a Warm Standby dials to read that
+    /// provider's Liveness, to announce a Takeover and to settle one (spec
+    /// §7.1, §8.4, TOON_Network#113).
+    ///
+    /// A Profile is a published event and anybody can sign one, so a peer
+    /// that joins a Standby Set — or merely stands in one — chooses these
+    /// URLs exactly as freely as a tenant chooses a hint, and they are read
+    /// on a schedule rather than only when a tenant asks. Hence the same
+    /// rule, the same exemption (the provider's own Relay Set, by
+    /// authority), and the same `resolve_names` trade on a Hidden Provider.
+    ///
+    /// What DIFFERS is what a refusal costs the peer, and that is the
+    /// caller's to say rather than this module's: `directory.rs` reads a
+    /// refused relay as `Absent` — silent, like a relay that refuses the
+    /// connection — and asks the peer's other relays anyway. Refusing the
+    /// whole Profile instead would let any peer make itself impossible to
+    /// take over by listing one relay nobody may dial.
+    pub async fn check_peer_relay(&self, relay: &str, resolve_names: bool) -> Result<()> {
+        self.check_relay_url(relay, resolve_names, RelaySource::Peer)
+            .await
+    }
+
+    /// One rule for both doors; `source` decides only how a refusal reads.
+    async fn check_relay_url(
+        &self,
+        relay: &str,
+        resolve_names: bool,
+        source: RelaySource,
+    ) -> Result<()> {
         let url = Url::parse(relay)
-            .with_context(|| format!("the relay hint {:?} is not a URL", relay))?;
+            .with_context(|| format!("{} is not a URL", source.named(&format!("{:?}", relay))))?;
         if !matches!(url.scheme(), "ws" | "wss") {
             bail!(
-                "the relay hint {} is not ws or wss: a provider reads an Image Registry entry \
-                 over a websocket and nothing else (spec §8.4, TOON_Network#107)",
-                relay
+                "{} is not ws or wss: {} (spec §8.4, {})",
+                source.named(relay),
+                source.dialled_for(),
+                source.ticket()
             );
         }
         let Some(host) = url.host() else {
-            bail!("the relay hint {} names no relay to read from", relay);
+            bail!("{} names no relay to read from", source.named(relay));
         };
         // By AUTHORITY, not by name: an operator whose relay is at
         // `ws://relay:7100` has said that relay is theirs, not that the rest
@@ -395,10 +498,11 @@ impl OutboundGuard {
         }
         let refuse = || {
             anyhow!(
-                "the relay hint {} is not at a publicly routable address: this provider does not \
-                 read an Image Registry entry from inside its operator's own network (spec §8.4, \
-                 TOON_Network#107). An operator whose relay is internal names it in relay_set",
-                relay
+                "{} is not at a publicly routable address: {} (spec §8.4, {}). An operator whose \
+                 relay is internal names it in relay_set",
+                source.named(relay),
+                source.will_not(),
+                source.ticket()
             )
         };
         match host {
@@ -413,9 +517,9 @@ impl OutboundGuard {
             Host::Domain(name) if resolve_names => {
                 let addrs = resolve_all(name).await.map_err(|e| {
                     anyhow!(
-                        "the relay hint {} could not be resolved, so this provider will not dial \
-                         it (TOON_Network#107): {}",
-                        relay,
+                        "{} could not be resolved, so this provider will not dial it ({}): {}",
+                        source.named(relay),
+                        source.ticket(),
                         e
                     )
                 })?;
@@ -729,6 +833,64 @@ mod tests {
             .check_relay("ws://127.0.0.1:7100", false)
             .await
             .is_err());
+    }
+
+    /// A peer's Profile is judged by the same rule, exemption and all — only
+    /// the refusal reads differently, because an operator looking at a log
+    /// needs to know whether a tenant or a peer named it (TOON_Network#113).
+    #[tokio::test]
+    async fn a_relay_a_peer_named_is_judged_exactly_as_a_tenants_hint_is() {
+        let guard = OutboundGuard::default().exempting(Some("ws://relay:7100"));
+        for written in [
+            "ws://127.0.0.1:7100",
+            "wss://169.254.169.254",
+            "ws://10.0.0.5:7100",
+            "ws://localhost:7100",
+            "ws://relay.invalid:7100",
+            "http://relay.example",
+            "ws://relay:9944",
+        ] {
+            assert!(
+                guard.check_peer_relay(written, true).await.is_err(),
+                "{written}"
+            );
+        }
+        assert!(guard
+            .check_peer_relay("wss://203.0.113.7", true)
+            .await
+            .is_ok());
+        assert!(guard
+            .check_peer_relay("ws://relay:7100", true)
+            .await
+            .is_ok());
+        // …and a hidden provider leaves names to its proxy here too.
+        assert!(guard
+            .check_peer_relay("ws://localhost:7100", false)
+            .await
+            .is_ok());
+        assert!(guard
+            .check_peer_relay("ws://127.0.0.1:7100", false)
+            .await
+            .is_err());
+    }
+
+    /// The refusal says who named it and what the provider will not do, and
+    /// still never says what the name resolved to.
+    #[tokio::test]
+    async fn a_refused_peer_relay_names_the_peer_and_not_the_address() {
+        let why = OutboundGuard::default()
+            .check_peer_relay("ws://localhost:7100", true)
+            .await
+            .expect_err("localhost resolves inward")
+            .to_string();
+        assert!(why.contains("ws://localhost:7100"), "{}", why);
+        assert!(why.contains("peer's Provider Profile"), "{}", why);
+        assert!(why.contains("TOON_Network#113"), "{}", why);
+        assert!(
+            !why.contains("127.0.0.1") && !why.contains("::1"),
+            "{}",
+            why
+        );
     }
 
     #[test]

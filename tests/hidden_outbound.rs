@@ -256,6 +256,54 @@ async fn a_relay_hint_on_a_hidden_provider_rides_the_proxy_and_is_not_resolved_h
     );
 }
 
+/// A PEER's relays on a hidden provider (TOON_Network#113): the same trade,
+/// at the door a Warm Standby watches through. A primary's Profile naming a
+/// host only the proxy can resolve is watched through the proxy — the name
+/// is the proxy's to judge, and a lookup here would undo the hiding — while
+/// a literal inside the operator's network reads as `Absent` without a dial.
+#[tokio::test]
+async fn a_peers_relay_on_a_hidden_provider_rides_the_proxy_and_is_not_resolved_here() {
+    let relay = StubRelay::start().await;
+    let socks = SocksStub::start(&[(RELAY_HOST, relay.socket_addr())]).await;
+    let proxy = OutboundProxy::resolve(&socks.url()).unwrap();
+    let primary = Keys::generate();
+    seed(&relay, &primary);
+    let named = relay.url_as(RELAY_HOST);
+
+    // No Relay Set at all: nothing here is exempt, and the peer's relay is
+    // still watched — through the proxy, which is the only thing that can
+    // resolve it.
+    let directory = NullDirectory::new(vec![]).with_proxy(&proxy);
+    let states = directory
+        .liveness_state(
+            primary.public_key(),
+            std::slice::from_ref(&named),
+            wall_now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        states.get(&named),
+        Some(&toon_provider::LivenessState::Live)
+    );
+    assert_relay_only_through(&socks, &relay, RELAY_HOST);
+
+    let inward = "ws://127.0.0.1:9944".to_string();
+    let states = directory
+        .liveness_state(
+            primary.public_key(),
+            std::slice::from_ref(&inward),
+            wall_now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        states.get(&inward),
+        Some(&toon_provider::LivenessState::Absent),
+        "a literal inside the operator's network is refused on a hidden provider too"
+    );
+}
+
 /// The other half of the claim: a provider that is not hidden opens every
 /// connection itself, and the proxy — running, and reachable — is never
 /// asked for anything.
