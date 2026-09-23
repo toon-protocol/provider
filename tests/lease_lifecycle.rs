@@ -217,6 +217,45 @@ async fn an_extension_body_that_is_not_a_workload_id_is_invalid() {
     assert_eq!(error_of(&body), "invalid_request");
 }
 
+/// An extension wrapped the way its neighbours are wrapped is refused, on
+/// both extension routes, and the lease it named keeps the expiry it had
+/// (spec §5, §6.3, ADR 0025; TOON_Network#115).
+///
+/// This is the mistake that costs money. `spawn`, `status`, `terminate` and
+/// `rotate` all take `{ "request": <Lease Request> }`, and an extension takes
+/// its content bare because it presents no Continuation Token: it is
+/// authorised by paying its route (ADR 0005). The envelope is an unknown
+/// field here, and the connector has already collected the route's full price
+/// by the time this app sees it (ADR 0003) — so a tenant that wraps an
+/// extension buys nothing and pays one Lease Interval to be told so. The
+/// refusal is the reference implementation's, and it is deliberate: a
+/// provider that quietly accepted both shapes would be inviting tenants to
+/// put a lease's token on a route that never compares it.
+#[tokio::test]
+async fn an_extension_wrapped_as_a_lease_request_is_invalid_and_buys_nothing() {
+    let h = harness().await;
+    let lease = spawn_lease(&h, 1).await;
+
+    // The envelope, filled in as well as a tenant could fill it in: the
+    // lease's own token, and an `op` the route might plausibly be given.
+    // There is no `Op::Extend` to name, which is the shape saying so.
+    let spec = RequestSpec::about(&h, "status", &lease.workload_id).with_token(&lease.token);
+    let (status, body) = post(
+        &h.app,
+        "/listings/basic/v1/extend",
+        json!({ "request": spec.request() }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", body);
+    assert_eq!(error_of(&body), "invalid_request");
+
+    // The lease is untouched: no interval was added by a refused extension,
+    // whatever the payer was charged for it.
+    let (status, body) = status_with(&h, &lease.token, &lease.workload_id).await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["expires_at"].as_u64().unwrap(), lease.expires_at);
+}
+
 // ── status (spec §6.5) ──────────────────────────────────────────────────
 
 async fn status_with(
