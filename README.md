@@ -835,6 +835,17 @@ yet, because there is no grace period — and `wrong_listing_version` when the l
 spawned on another listing version: a lease keeps the price it started at
 (ADR 0009), so its extensions are bought on its own route.
 
+**That body is bare, and getting it wrong costs an interval.** The two
+extension routes are the only paid ones that take no Lease Request: the
+envelope is the Continuation Token's carriage, and an extension presents no
+token because it is authorised by paying its route (spec §5, §6.3, ADR 0025).
+So `{ "request": { … } }` — the shape `spawn`, `status`, `terminate` and
+`rotate` all take — is an unknown field here and is refused `invalid_request`
+**after the connector has already collected the route's full price**
+(ADR 0003), which is a Lease Interval paid for an answer that bought nothing.
+This app cannot refund it and cannot refuse it any earlier; a tenant's tooling
+is what has to check the shape before the packet leaves (TOON_Network#115).
+
 **`POST /status`** (free) and **`POST /terminate`** (free) both take
 `{ "request": <Lease Request> }` with `op` = `status` or `terminate` and the
 content `{ "workload_id": "…" }`. The request is validated exactly as a
