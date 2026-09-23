@@ -28,6 +28,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      # Deliberately still `@stable`, not a pin to the Dockerfile's 1.85 — see
+      # "Why not a rust-toolchain.toml" in the PR description. Short version:
+      # a repo-wide pin to 1.85 broke `cargo test` here, because the dev-only
+      # `wiremock` dependency needs a newer Rust than the image ever needs to
+      # ship. The `docker-build` job below is the actual guard against
+      # TOON_Network#79 recurring: it compiles the same `--bin toon-provider`
+      # the Dockerfile ships, inside the same pinned image, on every PR.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -42,3 +49,25 @@ jobs:
       # the spec repository's copy is synced by hand (README, "Wire fixtures").
       - run: cargo test --locked --no-fail-fast
       - run: cargo clippy --locked --all-targets -- -D warnings
+
+  docker-build:
+    name: Build provider image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      # Not pushed: no registry write, no `packages: write` permission. This
+      # job's job is to prove the image still builds on the pinned toolchain,
+      # the way `provider/Dockerfile` is actually built for the sandbox and
+      # the fleet — see the PR description for the publish question.
+      - name: Build provider image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          tags: toon-provider:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
