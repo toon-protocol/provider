@@ -20,25 +20,31 @@ One host, five containers, and the workloads it sells.
 | File | What it is |
 |---|---|
 | `docker-compose.yml` | The five services. The connector's pin lives here and nowhere else. |
-| `provider.toml.template` | What this provider sells, and who it is. Rendered — **and the rendered file is a secret.** |
-| `connector.toml.template` | The connector's config. Its `[[routes]]` are *generated*, not written. |
+| `provider.toml.template` | Who this provider is, filled in from `.env`. Rendered — **and the rendered file is a secret.** |
+| `listings.example.toml` | What a provider sells: the devnet box's own tiers. Copy it to `listings.toml` (gitignored) and make it yours. |
+| `connector.toml.template` | The connector's config. Its `[[routes]]` are *generated* at render time, not written. |
 | `nginx/node.conf.template` | Two server blocks: the paid edge, and `GET /health`. Rendered. |
-| `render.sh` | Renders the above from `.env`. Idempotent. |
+| `render.sh` | Renders the above from `.env` and the listings file. Idempotent. |
 | `bootstrap.sh` | Fresh host → running box, including the sealing-key handshake. Idempotent. |
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
 | `auto-apply.sh` + the two units | The box half of GitOps: follow the branch, apply what merged. |
-| `.env.example` | Every variable, with what it is and how to generate it. |
+| `.env.example` | Every variable, with what it is and how to generate it, and the devnet's relay and settlement values as a preset. |
 
 The guard is `../tests/deploy_bundle.rs`, and it runs under the ordinary
-`cargo test`. It is not a regex suite: it renders these templates and puts
-them through the **real** config loader and the **real** route renderer, so
-the strongest thing it asserts is that `toon-provider routes` on this
-bundle's `provider.toml` prints exactly the `[[routes]]` this bundle's
-`connector.toml` carries.
+`cargo test`. It is not a regex suite: it runs the **real** `render.sh` on the
+devnet preset in `.env.example` and on `listings.example.toml`, with the
+**real** `toon-provider` binary generating the routes, and puts what comes out
+through the **real** config loader. So the strongest thing it asserts is that
+`toon-provider routes` on the rendered `provider.toml` prints exactly the
+`[[routes]]` the rendered `connector.toml` carries. It also renders a second
+operator, with an address and tiers of its own, and checks that nothing of the
+devnet box's comes along.
 
-`.env`, the rendered `provider.toml` and `connector.toml`, the operator
-credentials, `nginx/conf.d/` and all key material are gitignored. **Only
-templates are committed.**
+`.env`, `listings.toml`, the rendered `provider.toml` and `connector.toml`,
+the operator credentials, `nginx/conf.d/` and all key material are gitignored.
+**Only templates and examples are committed**, so everything that makes a box
+yours lives outside the checkout, and the checkout stays clean enough for
+`auto-apply.sh` to keep fast-forwarding it.
 
 ## What is different about a provider box
 
@@ -104,8 +110,9 @@ box holds."* So here is this box's arithmetic, honestly.
 | The host | ≈ 250 MiB |
 | Left for page cache and headroom | ≈ 700 MiB |
 
-That is tight on purpose rather than by accident, and `tests/deploy_bundle.rs`
-asserts the 2560 MiB ceiling so a capacity bump has to move this table with it.
+That is tight on purpose rather than by accident. `render.sh` reads the memory
+of the box it runs on and warns when the listings, sold out, leave less than
+about 1 GiB for the five containers and the host.
 If `dmesg` ever shows the OOM killer, the two knobs are a `capacity` and the
 plan — raise them together.
 
@@ -131,10 +138,11 @@ reason. A tenant filters on that tag, so it has to be true.
 ## Standing one up
 
 **Before you start** you need a host, two DNS A-records pointing at it —
-`proxy.provider.<your-domain>` and `provider.<your-domain>` — three key files,
-and two funded identities.
+`proxy.provider.<your-domain>` and `provider.<your-domain>` — an ILP address of
+your own, three key files, and two funded identities.
 
-**1. Clone and configure.**
+**1. Clone and configure.** Two files are yours, both gitignored: `.env` and
+the listings file. Nothing else in the checkout is edited, ever.
 
 ```bash
 git clone https://github.com/toon-protocol/provider /root/provider
@@ -142,7 +150,15 @@ cd /root/provider/deploy
 git checkout main
 cp .env.example .env
 $EDITOR .env          # every variable is documented in the file
+cp listings.example.toml listings.toml
+$EDITOR listings.toml # what you sell; see § "Make it yours"
 ```
+
+In `.env`, three values say who you are and have no default: `DOMAIN`,
+`PROVIDER_NAME` and `ILP_ADDRESS`. Pick an address of your own, such as
+`g.<your-name>.provider`; `render.sh` refuses one under `g.toon.`, the TOON
+fleet's namespace. The relay and settlement block is the **devnet preset**:
+leave it as it is to join the TOON devnet, which settles in mock USDC.
 
 The box follows `main`, and `auto-apply.sh` tracks `main` unless `.env` says
 otherwise. To run ahead of `main` — the way the devnet provider box does while a
@@ -150,7 +166,9 @@ milestone is unmerged — check out that branch here instead and set
 `TRACK_BRANCH` to the same name in `.env`. Keep the two in agreement: the
 timer fast-forwards whatever is checked out to `origin/$TRACK_BRANCH`, and it
 applies only a fast-forward, so a checkout that is not an ancestor of that
-branch stops it.
+branch stops it. So does a dirty one: if `git status` in `/root/provider` is
+ever not clean, something was edited that belongs in `.env` or the listings
+file instead.
 
 **2. Generate the key material.** Four secrets, none of them ever committed.
 
@@ -261,29 +279,45 @@ tagged `["L","toon.network"]`. If they are not there, `docker compose logs
 directory-publisher` is where the reason is: it is the one container here that
 spends money.
 
-To prove the paid path, spawn against `g.toon.provider.basic.v1.spawn` at this
-edge. The infra repository's sandbox tooling drives exactly that.
+To prove the paid path, spawn against `<ILP_ADDRESS>.<tier>.v1.spawn` at this
+edge (`g.toon.provider.basic.v1.spawn` on the devnet box). The infra
+repository's sandbox tooling drives exactly that.
 
 ## Changing a listing's price
 
 A price or resource change is a **new version** — bump `version`, keep the old
 entry until its last lease ends — so running leases keep the price they started
-at. The order matters:
+at. The listings file is the only thing you edit; the connector's routes follow
+from it.
 
-1. edit `provider.toml.template`;
-2. re-run `toon-provider routes --config deploy/provider.toml` and paste the
-   output over the generated block in `connector.toml.template`. Do not edit
-   those rows by hand; `tests/deploy_bundle.rs` fails if they are not what the
-   command prints;
-3. commit both, and let the box's timer apply them. `auto-apply.sh` restarts
-   the **connector first and the app second**, which is the harmless order: for
-   the moment between the two, a stale connector prices a route the app still
-   serves. The other way round, the app would have stopped selling a tier the
-   connector was still charging for — a packet taken and then refused, and a
-   refusal on a paid route is still billed (ADR 0003).
+1. edit your listings file (`listings.toml`, or whatever `LISTINGS_FILE`
+   names);
+2. `./render.sh`. It re-renders `provider.toml` and regenerates the
+   connector's `[[routes]]` from it, reading the live lease table so a retired
+   version keeps its rows while a lease still runs on it;
+3. restart the **connector first and the app second**:
 
-Delete a retired version's entry once `toon-provider routes` stops printing its
-rows, which is the signal that its last lease has ended.
+   ```bash
+   docker compose restart provider-connector
+   docker compose restart provider
+   ```
+
+   That is the harmless order: for the moment between the two, a stale
+   connector prices a route the app still serves. The other way round, the app
+   would have stopped selling a tier the connector was still charging for — a
+   packet taken and then refused, and a refusal on a paid route is still billed
+   (ADR 0003).
+
+The timer does not do this for you: the listings file is not in git, so
+editing it moves nothing `auto-apply.sh` watches, and a render it did not run
+is not one it knows to restart for. Do all three steps together.
+
+The devnet box is the exception: its `.env` sets
+`LISTINGS_FILE=listings.example.toml`, so its tiers are a reviewed commit and
+the timer applies a change to them like any other.
+
+Delete a retired version's entry once `render.sh` stops putting its rows in
+`connector.toml`, which is the signal that its last lease has ended.
 
 ## How updates arrive
 
@@ -367,15 +401,39 @@ restarted, rebuilt and rolled back without touching anything that holds money.
 
 ## Make it yours
 
-Most of both templates describes any provider behind any connector. What is
-specific to the TOON devnet is the `[node]` block at the bottom of
-`connector.toml.template`, the settlement tables in both files, and the two
-`[[listings]]`.
+Nothing committed in this directory names an operator, and nothing committed
+is yours to edit. Everything that makes a box yours is in two gitignored files:
 
-Replace the listings with what your box actually holds, re-run
-`toon-provider routes` and paste the result over the generated block, point the
-settlement sections at whatever chain and token you settle in, generate your
-own keys, and the rest of this directory works unchanged.
+- **`.env`** — who you are (`DOMAIN`, `PROVIDER_NAME`, `ILP_ADDRESS`, your
+  keys) and where you are listed and paid (the relay and settlement block,
+  shipped as the devnet preset). The settlement values are rendered into both
+  `provider.toml`'s `[[settlement]]` and the connector's `[settlement.*]`, so
+  the Profile can never advertise a token the connector does not settle.
+- **the listings file** — `listings.toml` unless `LISTINGS_FILE` says
+  otherwise, started from `listings.example.toml`. Replace the devnet tiers
+  with what your box actually holds; `render.sh` warns if they do not fit its
+  memory.
+
+The connector's `[[routes]]` are not in either: `render.sh` generates them by
+running `toon-provider routes` on the `provider.toml` it has just rendered, so
+a price is written once and the two configs cannot drift. On a box the binary
+comes from the provider image in `docker-compose.yml`, which `render.sh` pulls
+or builds first so the rows come from the build that will serve them. Off a
+box, point it at a binary of your own:
+
+```bash
+cargo build --release --bin toon-provider
+TOON_PROVIDER_BIN=../target/release/toon-provider ./render.sh
+```
+
+Because the checkout stays unmodified, `auto-apply.sh` follows `main` with no
+fork: `git status` stays clean, and a merge here reaches your box like any
+other.
+
+**`ILP_ADDRESS` is refused under `g.toon.`** unless `.env` also sets
+`TOON_DEVNET_BOX=1`. That namespace is the TOON fleet's, and a second box
+answering for `g.toon.provider` would take payment for another box's routes.
+Only the fleet's own boxes set the flag.
 
 `../provider.example.toml` documents every configuration key there is,
 including the `[anon]` tables this box does not use — a **Hidden Provider**

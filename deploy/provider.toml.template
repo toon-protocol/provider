@@ -1,8 +1,13 @@
 # =============================================================================
-# The TOON devnet provider — rendered by ./render.sh, THEN A SECRET
+# A TOON provider — rendered by ./render.sh, THEN A SECRET
 # =============================================================================
 # `provider.example.toml` at the repository root documents every key; this is
 # the deployment, and only the decisions specific to it are explained here.
+#
+# Nothing here names an operator. Who this provider is (its name, ILP address,
+# key and domain) and what it settles in come from .env; what it sells comes
+# from the listings file .env names, spliced in below. So a box runs from an
+# unmodified checkout and auto-apply.sh can keep following the branch.
 #
 # ── The rendered file is a SECRET, unlike every other config in this fleet ───
 # `nostr_private_key` is the value, inline, not a path to it. That key IS this
@@ -24,10 +29,12 @@ backend = "docker"
 
 provider_name = "${PROVIDER_NAME}"
 
-# Every route is a suffix of this: g.toon.provider.<tier>.v1.spawn / .extend
+# Every route is a suffix of this: <ilp_address>.<tier>.v1.spawn / .extend
 # (and .standby / .standby.extend for a tier that prices one), plus the free
-# g.toon.provider.availability / .status / .terminate / .rotate.
-ilp_address = "g.toon.provider"
+# <ilp_address>.availability / .status / .terminate / .rotate. render.sh
+# refuses one under `g.toon.`, the TOON fleet's own namespace, unless .env
+# says this box is one of the fleet's (TOON_DEVNET_BOX=1).
+ilp_address = "${ILP_ADDRESS}"
 
 # Where tenants reach their workloads: this box's public address, and the
 # host ports the daemon publishes there. No hostnames, no TLS — a workload
@@ -132,79 +139,24 @@ blob_cache_dir = "/var/lib/toon-provider/blobs"
 blob_cache_max_bytes = 21474836480
 
 # ── What this provider's connector settles in ────────────────────────────────
-# Published in the Profile so a tenant knows what it can pay with. These must
-# mirror connector.toml.template's [settlement.*] tables; the connector proves
-# each of them against a live chain at boot, and this file is what says so to
-# a tenant who has not asked the connector yet.
+# Published in the Profile so a tenant knows what it can pay with. They are
+# rendered from the SAME .env values as connector.toml.template's
+# [settlement.*] tables, so the two cannot disagree; the connector proves each
+# of them against a live chain at boot, and this file is what says so to a
+# tenant who has not asked the connector yet.
 [[settlement]]
-chain = "evm:84532"                                            # Base Sepolia
-token = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"           # mock USDC
-decimals = 6
+chain = "evm:${SETTLEMENT_EVM_CHAIN_ID}"
+token = "${SETTLEMENT_EVM_TOKEN}"
+decimals = ${SETTLEMENT_EVM_DECIMALS}
 
 [[settlement]]
-chain = "solana"                                               # Solana devnet
-token = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"         # mock USDC
-decimals = 6
+chain = "solana"
+token = "${SETTLEMENT_SOLANA_TOKEN}"
+decimals = ${SETTLEMENT_SOLANA_DECIMALS}
 
-# ── What this provider sells ─────────────────────────────────────────────────
-# Two tiers. A price or resource change is a NEW VERSION — bump `version`,
-# keep the old entry until its last lease ends — so running leases keep the
-# price they started at.
-#
-# CAPACITY IS A PROMISE, NOT A MEASUREMENT. Sold out, the two tiers below
-# commit 2.5 GiB of this box's 4 GiB to tenants, leaving the rest for the five
-# containers that run the provider and for the page cache. That is deliberate
-# and it is the number to change — `capacity`, or the Linode plan — if the
-# OOM killer ever shows up in `dmesg`. deploy/README.md § "Sizing the box"
-# does the arithmetic.
-
-# `basic` — the tier the console demos, and the one that sells Warm Standbys.
-#
-# `standby_price` is what makes the standby routes exist at all: `toon-provider
-# routes` prints a `.standby` and a `.standby.extend` row at this price for a
-# tier that sets it, and neither for one that does not — so a connector never
-# terminates a standby route the provider did not price, and an unset price is
-# never read as free. Never 0: that would sell held capacity for nothing.
-#
-# A Standby Set has to span two PROVIDERS (spec §7) — a standby bought from
-# the provider already running the primary is no standby at all — so this tier
-# sells the standby HALF of a set whose other half is somebody else's box.
-# Until the devnet has a second provider, that half is what exists.
-[[listings]]
-name = "basic"
-version = 1
-arch = "amd64"
-lease_interval_s = 3600
-price = 1000          # µUSDC per hour, on spawn and on extend
-standby_price = 400   # µUSDC per hour for held capacity with nothing running
-capabilities = []
-capacity = 3
-[listings.resources]
-cpu_millicores = 500
-memory_mb = 512
-storage_gb = 5
-
-# `ci` — spec Appendix A.1: the tier a workflow runner buys when it needs a
-# Docker daemon INSIDE the workload. `capabilities = ["docker"]` is what makes
-# it that (spec §4.4): the provider runs a privileged `dind` sidecar of its
-# own beside each such workload, under the same per-lease cgroup slice, whose
-# socket is the workload's /var/run/docker.sock — never this host's.
-#
-# Capacity 1, and smaller than the spec's example tier, because the sidecar
-# and the workload share the slice's memory and this is a 4 GiB box. An
-# operator with more to sell raises both together.
-[[listings]]
-name = "ci"
-version = 1
-arch = "amd64"
-lease_interval_s = 3600
-price = 5000
-capabilities = ["docker"]
-capacity = 1
-[listings.resources]
-cpu_millicores = 1000
-memory_mb = 1024
-storage_gb = 10
+# render.sh splices the listings file .env names (LISTINGS_FILE) in verbatim
+# in place of the next line.
+# @render: listings
 
 # ── What this provider refuses to run ────────────────────────────────────────
 # Applied identically by the free `availability` route and by a paid spawn, so

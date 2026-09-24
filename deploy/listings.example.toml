@@ -1,0 +1,66 @@
+# ── What this provider sells ─────────────────────────────────────────────────
+# This is the operator's own file. Copy listings.example.toml to listings.toml
+# (gitignored) and make it yours: render.sh splices it into provider.toml
+# as-is, and generates the connector's [[routes]] from the result, so a price
+# is written once. This example is the TOON devnet provider's own two tiers,
+# which the devnet box renders straight from the example.
+#
+# Two tiers. A price or resource change is a NEW VERSION — bump `version`,
+# keep the old entry until its last lease ends — so running leases keep the
+# price they started at.
+#
+# CAPACITY IS A PROMISE, NOT A MEASUREMENT. Sold out, the two tiers below
+# commit 2.5 GiB of this box's 4 GiB to tenants, leaving the rest for the five
+# containers that run the provider and for the page cache. That is deliberate
+# and it is the number to change — `capacity`, or the Linode plan — if the
+# OOM killer ever shows up in `dmesg`. deploy/README.md § "Sizing the box"
+# does the arithmetic, and render.sh warns when what is sold here does not fit
+# the memory of the box it runs on.
+
+# `basic` — the tier the console demos, and the one that sells Warm Standbys.
+#
+# `standby_price` is what makes the standby routes exist at all: `toon-provider
+# routes` prints a `.standby` and a `.standby.extend` row at this price for a
+# tier that sets it, and neither for one that does not — so a connector never
+# terminates a standby route the provider did not price, and an unset price is
+# never read as free. Never 0: that would sell held capacity for nothing.
+#
+# A Standby Set has to span two PROVIDERS (spec §7) — a standby bought from
+# the provider already running the primary is no standby at all — so this tier
+# sells the standby HALF of a set whose other half is somebody else's box.
+# Until the devnet has a second provider, that half is what exists.
+[[listings]]
+name = "basic"
+version = 1
+arch = "amd64"
+lease_interval_s = 3600
+price = 1000          # µUSDC per hour, on spawn and on extend
+standby_price = 400   # µUSDC per hour for held capacity with nothing running
+capabilities = []
+capacity = 3
+[listings.resources]
+cpu_millicores = 500
+memory_mb = 512
+storage_gb = 5
+
+# `ci` — spec Appendix A.1: the tier a workflow runner buys when it needs a
+# Docker daemon INSIDE the workload. `capabilities = ["docker"]` is what makes
+# it that (spec §4.4): the provider runs a privileged `dind` sidecar of its
+# own beside each such workload, under the same per-lease cgroup slice, whose
+# socket is the workload's /var/run/docker.sock — never this host's.
+#
+# Capacity 1, and smaller than the spec's example tier, because the sidecar
+# and the workload share the slice's memory and this is a 4 GiB box. An
+# operator with more to sell raises both together.
+[[listings]]
+name = "ci"
+version = 1
+arch = "amd64"
+lease_interval_s = 3600
+price = 5000
+capabilities = ["docker"]
+capacity = 1
+[listings.resources]
+cpu_millicores = 1000
+memory_mb = 1024
+storage_gb = 10
