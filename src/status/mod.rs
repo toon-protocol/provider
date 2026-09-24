@@ -41,6 +41,10 @@ pub use gather::{
     gather, ChannelEarnings, EarningsSection, FundingSection, OperatorSource, PublisherSection,
     PublisherStatus, Report, Sources,
 };
+// What `redeem` shares with `status`: the same connector, the same earnings.
+pub(crate) use gather::{
+    channel_key, connector_operator_url, error_chain, origin, read_earnings_from,
+};
 pub use render::{render_text, to_json};
 
 use crate::provider::ProviderConfig;

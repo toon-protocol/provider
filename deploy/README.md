@@ -330,8 +330,11 @@ redeemed since the connector started); and **funding** (the connector's Solana
 settlement key's SOL). Each source is read on its own: an unreachable
 publisher is shown as unreachable and the rest still print.
 
-**The connector's dashboard** shows every claim and channel in full, and the
-redeem steps: `https://proxy.provider.<domain>/dashboard` (or
+To collect what the earnings section shows, run `toon-provider redeem`
+(§ "Redeeming earnings").
+
+**The connector's dashboard** shows every claim and channel in full:
+`https://proxy.provider.<domain>/dashboard` (or
 `http://127.0.0.1:4000/dashboard` through `ssh -L 4000:127.0.0.1:4000
 root@<box>`; on a hidden box, the `.anyone` address's `/dashboard`), signed in
 with `OPERATOR_BEARER_TOKEN`. `status`'s earnings section links it.
@@ -440,6 +443,81 @@ provider app reaches `/publish` — `publish_url`'s origin — never through
 nginx and never on a published port; see `tools/publisher/README.md` §
 "`GET /status` and `POST /topup`" for the response shapes and what the
 runway figure assumes.
+
+## Redeeming earnings
+
+A tenant's payments reach this box as signed claims on a payment channel, held
+by the connector. They are money only once a claim is **redeemed** on chain,
+and nothing here redeems on its own (ADR 0029: money is shown everywhere and
+moved only by a person). `toon-provider status` shows what is unredeemed;
+`toon-provider redeem` collects it.
+
+```bash
+cd /root/provider/deploy
+docker compose exec provider toon-provider redeem --list           # what is owed, and the gas to collect it
+docker compose exec provider toon-provider redeem                  # pick rows, type yes, then paste the key
+docker compose exec provider toon-provider redeem --all-above 1000 # every channel over 1000 base units
+docker compose exec provider toon-provider redeem --channel <id>   # repeatable
+```
+
+It lists each inbound channel with its unredeemed amount (token base units:
+1000 is 0.001 USDC at 6dp) and an **estimated gas cost** for its chain, then
+redeems the channels you pick at the prompt, or those `--channel` names, or
+every one over `--all-above` (strictly more than the amount). It asks for a
+typed `yes` unless `--yes`. Each redeem is one on-chain transaction, and the
+connector's settlement key pays its gas in that chain's own coin, not out of
+the channel. That is why `keys.sh addresses` says the EVM key needs ETH
+"before your first redeem". The estimate is:
+
+- **EVM:** 160,000 gas (the most `claimFromChannel` has taken in the
+  connector's own gas report, plus the transaction's base cost) times the
+  chain's current `eth_gasPrice`, read from `SETTLEMENT_EVM_RPC_URL`. On Base
+  the L1 data fee is extra. With no RPC it says `unknown`.
+- **Solana:** 10,000 lamports, the base fee for the redeem transaction's two
+  signatures (the fee payer's and the Ed25519 precompile's). The connector
+  sets no priority fee.
+
+It is an estimate. A redeem never waits on one.
+
+**The operator key is read from stdin, and only from stdin.** It is the
+private half `./keys.sh init` printed once (64 hex characters), whose public
+half is `OPERATOR_WRITE_KEY`. On a terminal, `redeem` prompts for it after you
+confirm, with echo off. It is held in memory for the signing and wiped, and
+never written anywhere. A key given on the command line (`--operator-key`, or
+as an argument) is refused before anything is dialled, because `ps` and your
+shell's history have already seen it. Replace a key you have typed there.
+
+Each redeem signs the connector's `POST /channels/:id/redeem-latest` exactly as
+`connector send` signs a write: RFC 9421 over `@method`, `@path` and an RFC
+9530 `Content-Digest`, keyid the public key, valid for 60 seconds. The
+connector submits the latest claim it holds and answers the channel as it now
+stands. `redeem` prints what was collected and what the chain now shows as
+redeemed. The connector returns no transaction id, so look for the
+transaction under the settlement key's address on the chain's explorer.
+
+**Without typing the key on the box.** The key can come from the machine you
+administer from, through SSH's stdin, and never touch the box's disk:
+
+```bash
+ssh root@<box> 'cd /root/provider/deploy && docker compose exec -T provider toon-provider redeem --all-above 1000 --yes' < operator.key
+```
+
+`-T` because stdin is the key, not a terminal. With no terminal there is also
+nowhere to pick or confirm, so name the channels (`--channel` or
+`--all-above`) and pass `--yes`, or `redeem` refuses.
+
+**From a laptop, against the public edge.** The connector's operator surface is
+on `https://proxy.provider.<domain>`: the bearer token gates the reads and the
+signature authorises the writes. The binary needs no provider config there:
+
+```bash
+toon-provider redeem --connector https://proxy.provider.<domain> \
+  --bearer-file ./operator-bearer.token --evm-rpc-url "$SETTLEMENT_EVM_RPC_URL" < operator.key
+```
+
+The picks and the `yes` are then read from `/dev/tty`. A `401` names the keyid
+it signed with. It means that key is not `OPERATOR_WRITE_KEY` (or this
+machine's clock is off by more than the 60 seconds a signature lives).
 
 ## Changing a listing's price
 

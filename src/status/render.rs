@@ -290,8 +290,14 @@ pub fn render_text(report: &Report) -> String {
     }
     let _ = writeln!(
         out,
-        "  Every claim and channel, and the redeem steps: the connector's dashboard{}, \
-         signed in with the operator bearer token.",
+        "  To collect it: `toon-provider redeem` lists each channel with a gas estimate and \
+         redeems the ones you pick, or `--all-above <amount>`; it reads the operator key from \
+         stdin (deploy/README.md \"Redeeming earnings\")."
+    );
+    let _ = writeln!(
+        out,
+        "  Every claim and channel in full: the connector's dashboard{}, signed in with the \
+         operator bearer token.",
         match &e.dashboard_url {
             Some(url) => format!(
                 " at {url} (or http://127.0.0.1:4000/dashboard through \

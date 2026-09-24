@@ -17,6 +17,7 @@ pub mod outbound_guard;
 pub mod outbound_proxy;
 pub mod provider;
 pub mod provider_http;
+pub mod redeem;
 pub mod reputation;
 pub mod status;
 pub mod topup;

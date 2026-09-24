@@ -1624,13 +1624,17 @@ fn env_value<'a>(block: &'a str, key: &str) -> Option<&'a str> {
         .find_map(|l| l.strip_prefix(&format!("{key}: ")))
 }
 
-/// Every environment variable `toon-provider status` reads, from the flags
-/// themselves, so a renamed flag cannot leave the compose file pointing at
-/// nothing.
+/// Every environment variable `toon-provider status` and `toon-provider
+/// redeem` read, from the flags themselves, so a renamed flag cannot leave
+/// the compose file pointing at nothing.
 fn status_env_vars() -> Vec<String> {
     use clap::Args;
     toon_provider::status::StatusArgs::augment_args(clap::Command::new("status"))
         .get_arguments()
+        .chain(
+            toon_provider::redeem::RedeemArgs::augment_args(clap::Command::new("redeem"))
+                .get_arguments(),
+        )
         .filter_map(|a| a.get_env().map(|e| e.to_string_lossy().into_owned()))
         .collect()
 }
@@ -1698,6 +1702,20 @@ fn the_provider_container_is_pointed_at_every_status_source() {
             "TOON_SETTLEMENT_SOLANA_RPC_URL"
         ),
         Some("${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-}")
+    );
+
+    // `redeem`'s EVM gas price: the RPC the connector redeems through, and
+    // the box's own node on a hidden one.
+    assert_eq!(
+        env_value(provider, "TOON_SETTLEMENT_EVM_RPC_URL"),
+        Some("${SETTLEMENT_EVM_RPC_URL:-}")
+    );
+    assert_eq!(
+        env_value(
+            service_block(&hidden, "provider"),
+            "TOON_SETTLEMENT_EVM_RPC_URL"
+        ),
+        Some("${HIDDEN_SETTLEMENT_EVM_RPC_URL:-}")
     );
 
     // No key file is mounted into the provider.

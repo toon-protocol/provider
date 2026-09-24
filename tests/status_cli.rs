@@ -355,6 +355,10 @@ async fn earnings_join_claims_to_channels_and_name_the_dashboard() {
         "the earnings section names the connector's dashboard:\n{text}"
     );
     assert!(text.contains("total unredeemed 3000"), "{text}");
+    assert!(
+        text.contains("To collect it: `toon-provider redeem`"),
+        "the earnings section points at redeem:\n{text}"
+    );
 }
 
 #[tokio::test]
