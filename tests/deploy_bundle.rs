@@ -834,6 +834,117 @@ fn the_connector_pin_is_immutable_and_written_once() {
     );
 }
 
+// ── The provider and publisher pins (TOON_Network#151) ──────────────────────
+//
+// Neither has been published yet — `docker-compose.yml` carries
+// `sha-0000000` (git's own null-object-id spelling) for both, honestly, until
+// `.github/workflows/publish-provider-image.yml` runs for real once this
+// merges to `main`. So unlike `the_connector_pin_is_immutable_and_written_once`
+// above, these two do not assert a literal tag — there isn't a real one to
+// assert yet. What they hold still is the shape (an immutable tag, never a
+// floating alias, never a `build:`) and the single-location invariant, the
+// same two properties the connector's test enforces.
+
+/// `sha-<hex>` (this repo's own scheme, see the workflow) or a bare dated
+/// release handle such as `2026.09.11.1` (the connector's own alias shape,
+/// minus its `rust-` prefix, in case a provider release ever wants one).
+/// `latest`, `main` and anything empty are floating, not pins.
+fn is_immutable_tag(tag: &str) -> bool {
+    if tag.is_empty() || tag == "latest" || tag == "main" {
+        return false;
+    }
+    if let Some(hex) = tag.strip_prefix("sha-") {
+        return !hex.is_empty()
+            && hex
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase());
+    }
+    tag.contains('.') && tag.chars().all(|c| c.is_ascii_digit() || c == '.')
+}
+
+#[test]
+fn is_immutable_tag_agrees_with_the_connector_pin() {
+    // The predicate above must not be so loose it would have waved the
+    // connector's OWN known-good and known-bad tags through differently than
+    // the hand-written check in `the_connector_pin_is_immutable_and_written_once`
+    // does — that would mean the two tests disagree about what a pin is.
+    assert!(is_immutable_tag("sha-f278cd6"));
+    assert!(is_immutable_tag("2026.09.11.1"));
+    assert!(!is_immutable_tag("main"));
+    assert!(!is_immutable_tag("latest"));
+    assert!(!is_immutable_tag(""));
+}
+
+/// Every `image:` line in `compose` naming `image` exactly (colon-terminated,
+/// so `provider` never matches a `provider-publisher` line), with its tag.
+fn image_pins<'a>(compose: &'a str, image: &str) -> Vec<&'a str> {
+    let prefix = format!("image: {image}:");
+    compose
+        .lines()
+        .filter_map(|l| l.trim_start().strip_prefix(prefix.as_str()))
+        .collect()
+}
+
+fn assert_pinned_exactly_once(image: &str) {
+    let compose = deploy("docker-compose.yml");
+    let pins = image_pins(&compose, image);
+    assert_eq!(
+        pins.len(),
+        1,
+        "expected exactly one `image: {image}:<tag>` line in docker-compose.yml, found {pins:?}"
+    );
+    let tag = pins[0];
+    assert!(
+        is_immutable_tag(tag),
+        "{image}:{tag} is not an immutable pin (floating alias or malformed tag)"
+    );
+
+    // No `build:` left for a service pinned by image — the whole point of
+    // #151 is that this box no longer compiles anything.
+    assert!(
+        !compose.contains("build:"),
+        "docker-compose.yml still has a `build:` step; {image} was supposed to replace it with a pin"
+    );
+
+    // Written once: no other file under deploy/ may carry a compose-shaped
+    // `image:` line for the same image, mirroring the connector's own check.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("deploy");
+    let mut naming: Vec<String> = Vec::new();
+    for entry in walk(&dir) {
+        let name = entry
+            .strip_prefix(&dir)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        if name == "docker-compose.yml" {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(&entry) else {
+            continue;
+        };
+        if text
+            .lines()
+            .any(|l| l.trim_start().starts_with(&format!("image: {image}:")))
+        {
+            naming.push(name);
+        }
+    }
+    assert!(
+        naming.is_empty(),
+        "{image}'s pin is written in more than one place: {naming:?}. Two copies drift."
+    );
+}
+
+#[test]
+fn the_provider_pin_is_immutable_and_written_once() {
+    assert_pinned_exactly_once("ghcr.io/toon-protocol/provider");
+}
+
+#[test]
+fn the_publisher_pin_is_immutable_and_written_once() {
+    assert_pinned_exactly_once("ghcr.io/toon-protocol/provider-publisher");
+}
+
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(dir) else {

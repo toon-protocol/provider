@@ -18,15 +18,11 @@
 #   * after `up -d` every service must reach `healthy`, or this exits non-zero
 #     so `systemctl status` and the journal show it.
 #
-# ── Two deliberate differences from the store and relay copies ───────────────
-# 1. IT BUILDS. Those bundles run a published image on a moving tag and let
-#    Watchtower recreate it; this repository publishes no image yet, so the
-#    provider and its publisher are built from the checkout this script just
-#    fast-forwarded. A build with nothing changed is a cache hit.
-# 2. IT TRACKS A NAMED BRANCH. `TRACK_BRANCH` in .env, defaulting to `main`,
-#    because the devnet provider runs ahead of this repository's `main` while
-#    a milestone is unmerged, and a box silently following a branch that does
-#    not exist would report success every five minutes while standing still.
+# ── One deliberate difference from the store and relay copies ────────────────
+# IT TRACKS A NAMED BRANCH. `TRACK_BRANCH` in .env, defaulting to `main`,
+# because the devnet provider runs ahead of this repository's `main` while
+# a milestone is unmerged, and a box silently following a branch that does
+# not exist would report success every five minutes while standing still.
 #
 # ── And one difference from the gateway's copy ───────────────────────────────
 # THE PROVIDER APP HAS RENDERED CONFIG OF ITS OWN, and it reads it once at
@@ -136,11 +132,13 @@ COMPOSE=(-f docker-compose.yml)
 CONNECTOR_BEFORE_UP=$(docker compose "${COMPOSE[@]}" ps -q provider-connector || true)
 PROVIDER_BEFORE_UP=$(docker compose "${COMPOSE[@]}" ps -q provider || true)
 
-# --ignore-buildable: `provider` and `directory-publisher` have no image to
-# pull, and without it a pull fails the whole apply on the two services the
-# apply exists for.
-docker compose "${COMPOSE[@]}" pull --ignore-buildable --ignore-pull-failures
-docker compose "${COMPOSE[@]}" build
+# Every service is a published image now (TOON_Network#151): `provider` and
+# `directory-publisher` pull the immutable pin `docker-compose.yml` names, the
+# same as the connector already did. No `build` step and no `--ignore-*`
+# flags: a pull that fails is a real problem (a bad pin, an unpublished tag,
+# GHCR unreachable) and this should fail loudly on it, not paper over it and
+# bring up a stale container.
+docker compose "${COMPOSE[@]}" pull
 docker compose "${COMPOSE[@]}" up -d
 
 # A service must reach `healthy`. Docker resets Health.Status to `starting` on
