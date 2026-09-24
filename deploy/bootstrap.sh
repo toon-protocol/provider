@@ -5,7 +5,9 @@
 #   ./bootstrap.sh
 #
 # Expects .env, the listings file it names and the three connector key files
-# to already be in this directory; see README.md § "Standing one up". Everything it installs is
+# to already be in this directory (./keys.sh init makes the keys), and the
+# keys ./keys.sh addresses lists to be funded; see README.md § "Standing one
+# up". Everything it installs is
 # listed here, and it makes no changes outside this directory, ufw, docker,
 # journald and the systemd units it owns.
 #
@@ -16,9 +18,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-[ -f .env ] || { echo "Missing .env — copy .env.example and fill it in." >&2; exit 1; }
+[ -f .env ] || { echo "Missing .env — run ./keys.sh init, then fill in the rest of it." >&2; exit 1; }
 for f in signer.key settlement.key settlement-solana.key; do
-  [ -f "$f" ] || { echo "Missing $f — see README.md § Standing one up." >&2; exit 1; }
+  [ -f "$f" ] || { echo "Missing $f — run ./keys.sh init (README.md § Standing one up)." >&2; exit 1; }
 done
 
 set -a; . ./.env; set +a
@@ -34,6 +36,28 @@ fi
   echo "Missing ${LISTINGS_FILE:-listings.toml} — cp listings.example.toml listings.toml and edit it." >&2
   exit 1
 }
+
+echo "==> Keys and funding"
+# Before anything is installed or started: an unfunded Solana settlement key
+# is a connector that restart-loops at step 5 with the reason buried in its
+# log, and an unfunded publisher is a provider nobody can find. keys.sh asks
+# the Solana RPC for both balances (a free read) and, when one is short,
+# refuses here with every address to fund and what to fund it with -- the
+# list ./keys.sh addresses prints.
+#
+# On a box that has booted before (CONNECTOR_SEAL_KEY is recorded, step 5) a
+# shortfall is a warning, not a refusal: a re-run reconciles a working box,
+# and the publisher's deposit is already in its channel, not in its wallet.
+# An RPC that does not answer is a warning either way. A hidden box asks only
+# its own Solana node, never a public one (keys.py says why).
+command -v python3 >/dev/null 2>&1 || { apt-get update -y && apt-get install -y python3-minimal; }
+funded=0
+if [ -n "${CONNECTOR_SEAL_KEY:-}" ]; then
+  ./keys.sh check-funded --warn-only || funded=$?
+else
+  ./keys.sh check-funded || funded=$?
+fi
+if [ "$funded" = 1 ]; then exit 1; fi
 
 echo "==> [1/9] Firewall"
 # SSH, HTTP (ACME), HTTPS — and the workload ranges, which is what makes this

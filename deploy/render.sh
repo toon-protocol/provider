@@ -68,10 +68,10 @@ esac
 set -a; . ./.env; set +a
 
 : "${PROVIDER_NAME:?set PROVIDER_NAME in .env}"
-: "${NOSTR_PRIVATE_KEY:?set NOSTR_PRIVATE_KEY in .env (openssl rand -hex 32)}"
+: "${NOSTR_PRIVATE_KEY:?set NOSTR_PRIVATE_KEY in .env (./keys.sh init generates it)}"
 : "${RELAY_WS:?set RELAY_WS in .env (the relay READ url this provider publishes to)}"
-: "${OPERATOR_BEARER_TOKEN:?set OPERATOR_BEARER_TOKEN in .env (openssl rand -hex 32)}"
-: "${OPERATOR_WRITE_KEY:?set OPERATOR_WRITE_KEY in .env (the ed25519 public key allowed to sign operator writes)}"
+: "${OPERATOR_BEARER_TOKEN:?set OPERATOR_BEARER_TOKEN in .env (./keys.sh init generates it)}"
+: "${OPERATOR_WRITE_KEY:?set OPERATOR_WRITE_KEY in .env (the ed25519 public key allowed to sign operator writes; ./keys.sh init generates a pair)}"
 : "${ILP_ADDRESS:?set ILP_ADDRESS in .env (the ILP address every route of this provider hangs off)}"
 : "${SETTLEMENT_EVM_CHAIN_ID:?set SETTLEMENT_EVM_CHAIN_ID in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_EVM_RPC_URL:?set SETTLEMENT_EVM_RPC_URL in .env (.env.example has the devnet preset)}"
