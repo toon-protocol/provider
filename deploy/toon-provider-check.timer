@@ -1,0 +1,11 @@
+[Unit]
+Description=Run toon-provider status --check every 5 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=toon-provider-check.service
+
+[Install]
+WantedBy=timers.target

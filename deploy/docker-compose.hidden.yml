@@ -146,6 +146,14 @@ services:
       # READ-ONLY, and the cookie alone: how the provider authenticates to
       # 172.30.2.2:9051 to make and destroy each lease's address.
       - anon_control:/var/lib/anon/control:ro
+    environment:
+      # `toon-provider status` reads the settlement key's balance from this
+      # box's OWN Solana node, never the public RPC the base file names: a
+      # getBalance for this address from this box's real address would link
+      # the two (keys.py § check-funded, the same rule). The command reads
+      # anon.settlement_rpc_url on a hidden provider regardless; this keeps
+      # the public URL out of the container altogether.
+      TOON_SETTLEMENT_SOLANA_RPC_URL: ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-}
     networks:
       default: {}
       # Where the daemon's control and SOCKS ports are. No fixed address: it

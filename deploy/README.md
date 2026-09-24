@@ -30,6 +30,7 @@ One host, five containers, and the workloads it sells.
 | `pull-images.sh` | Gets the pinned images onto the box: pulls them, or builds one from the checkout while its pin is still the `sha-0000000` placeholder. |
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
 | `auto-apply.sh` + the two units | The box half of GitOps: follow the branch, apply what merged. |
+| `toon-provider-check.service` + `.timer` | Runs `toon-provider status --check` every five minutes, into the journal. § "Is it working?". |
 | `docker-compose.hidden.yml` | The overlay a **hidden** box adds (`HIDDEN=1`): the anon daemon, its two pinned networks, and no nginx. § "Running hidden". |
 | `anon/Dockerfile`, `anon/anonrc` | The hidden box's anon daemon, built here from a digest-pinned base and a checksummed release, and its config. Committed, not rendered. |
 | `hidden-firewall.sh` + `toon-hidden-firewall.service` | A hidden box's DOCKER-USER rules: no lease port reachable from outside. |
@@ -308,7 +309,98 @@ the component's own on fixed keys:
 Once the node is up, `GET /ilp` serves the connector's two addresses as well,
 after the connector has proved each of them against a live chain.
 
-## Checking it works
+## Is it working? `toon-provider status`
+
+One command, on the box, answers all of it (ADR 0029):
+
+```bash
+docker compose exec provider toon-provider status          # six sections, for a person
+docker compose exec provider toon-provider status --json   # one document, for a program
+docker compose exec provider toon-provider status --check  # exit 1 naming each problem
+```
+
+It prints, in this order: **identity** (the npub, the ILP address, public or
+hidden, and whether the Profile's sealing key matches the connector's live
+one); **directory** (per relay, when the Profile, each Listing and the Liveness
+were last accepted, or the refusal); **publisher** (the channel, deposit,
+spent, remaining and runway); **leases** (capacity in use, and per lease its
+state, expiry, ports and what it has been billed); **earnings** (per payer
+channel, what is claimed, redeemed and unredeemed, and when it was last
+redeemed since the connector started); and **funding** (the connector's Solana
+settlement key's SOL). Each source is read on its own: an unreachable
+publisher is shown as unreachable and the rest still print.
+
+**The connector's dashboard** shows every claim and channel in full, and the
+redeem steps: `https://proxy.provider.<domain>/dashboard` (or
+`http://127.0.0.1:4000/dashboard` through `ssh -L 4000:127.0.0.1:4000
+root@<box>`; on a hidden box, the `.anyone` address's `/dashboard`), signed in
+with `OPERATOR_BEARER_TOKEN`. `status`'s earnings section links it.
+
+### Where each source is, from inside the provider container
+
+| section | source | how the container reaches it |
+|---|---|---|
+| identity, directory, leases | `GET /operator/status` | `operator_url`, loopback inside this container |
+| publisher | the publisher's `GET /status` | `publish_url`'s origin, `http://directory-publisher:8081` — as `topup` does |
+| earnings | the connector's `GET /claims`, `/channels`, `/audit-log` | `TOON_CONNECTOR_OPERATOR_URL=http://provider-connector:4000`, with the bearer token from `TOON_CONNECTOR_BEARER_TOKEN_FILE` |
+| funding | `getBalance` of the connector's Solana settlement address | `TOON_SETTLEMENT_SOLANA_ADDRESS_FILE` and `TOON_SETTLEMENT_SOLANA_RPC_URL` |
+
+`docker-compose.yml` sets those variables on the `provider` service and mounts
+two files read-only beside `provider.toml`:
+
+- **`operator-bearer.token`**, the one `render.sh` writes for the connector.
+  Root in the provider container reads it although it is 0600 and owned by
+  uid 10001.
+- **`settlement-solana.address`**, which `render.sh` writes from
+  `settlement-solana.key` with `keys.py` (the same derivation `keys.sh
+  addresses` prints and `tests/deploy_keys.rs` pins). It is public. The key
+  itself is never mounted into the provider. With no key file or no
+  `python3`, the file is written empty and `status` says the address is
+  unknown.
+
+The connector is reached by its **compose name**, not by `connector_url`. On a
+public box `connector_url` is the public edge, so the bearer token would
+hairpin out through nginx. On a hidden box it is an `.anyone` address. Both
+stacks put `provider` and `provider-connector` on the default network, so the
+one compose address works for both. **On a hidden box** `status` dials
+nothing public: the balance is read from `anon.settlement_rpc_url` (the
+overlay also sets `HIDDEN_SETTLEMENT_SOLANA_RPC_URL` into the container), and
+any source that is not on the box's private network is reported as "not
+asked" rather than dialled.
+
+### `--check`, and the timer that runs it
+
+`--check` exits 1, with one `PROBLEM` line each, when:
+
+- the latest Liveness expires within **two cadences**, or already has;
+- a relay **refused the latest write** of the Profile, a Listing or the
+  Liveness, or was never offered one. The first cadence after a restart, and
+  the retry that ends it, are exempt: a restarted box has been seen to report
+  `not attempted: dns error` for a few seconds and heal on the next cadence;
+- the publisher's channel is **drained**, or its runway is under
+  `--min-runway` (default `7d`; a runway the publisher cannot estimate yet is
+  a warning, not a failure);
+- the Profile's **sealing key** is not the connector's live one;
+- the settlement key holds less than `--min-sol` (default `0.005`, the floor
+  `keys.sh` refuses to boot under).
+
+It also fails when the provider or the publisher does not answer. An
+unreadable earnings or balance source is a `warning` line and does not fail
+the check.
+
+`bootstrap.sh` installs **`toon-provider-check.timer`**, which runs
+`toon-provider-check.service` every five minutes: `docker compose exec -T
+provider toon-provider status --check`, from this directory, into the
+journal. `auto-apply.sh` installs or updates both units on a box that was
+bootstrapped before they existed.
+
+```bash
+journalctl -u toon-provider-check -n 20       # the latest findings
+systemctl list-timers toon-provider-check     # when it runs next
+systemctl --failed                            # a failing check shows here
+```
+
+## Checking it works by hand
 
 ```bash
 docker compose ps                                    # five services; three healthy

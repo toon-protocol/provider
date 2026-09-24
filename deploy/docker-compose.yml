@@ -118,6 +118,32 @@ services:
       # paid workload; a named volume means `docker compose restart provider`
       # strands nothing.
       - provider_state:/var/lib/toon-provider
+      # WHAT `toon-provider status` READS (TOON_Network#172), and nothing the
+      # running app uses. The operator bearer token gates the connector's
+      # claim and channel reads (the earnings section); root in this container
+      # reads it although render.sh hands it to uid 10001 at 0600. The
+      # settlement address is PUBLIC, render.sh derives it from
+      # settlement-solana.key with keys.py, and it is all `status` needs for
+      # the funding section: the key itself never comes near this container.
+      - ./operator-bearer.token:/etc/toon-provider/operator-bearer.token:ro
+      - ./settlement-solana.address:/etc/toon-provider/settlement-solana.address:ro
+    environment:
+      # So `docker compose exec provider toon-provider <command>` finds the
+      # config without `--config` (`status`, `topup`, `evict`).
+      TOON_PROVIDER_CONFIG: /etc/toon-provider/provider.toml
+      # Where `toon-provider status` finds each source from inside this
+      # container. The connector by its COMPOSE name, never `connector_url`:
+      # that is the public edge (a hairpin out through nginx carrying the
+      # bearer token) on a public box, and an `.anyone` address on a hidden
+      # one. Both stacks put this service and provider-connector on the
+      # default network, so this one address works for both.
+      TOON_CONNECTOR_OPERATOR_URL: http://provider-connector:4000
+      TOON_CONNECTOR_BEARER_TOKEN_FILE: /etc/toon-provider/operator-bearer.token
+      TOON_SETTLEMENT_SOLANA_ADDRESS_FILE: /etc/toon-provider/settlement-solana.address
+      # The same RPC the connector settles on. docker-compose.hidden.yml
+      # replaces it with the box's own node, and `status` on a hidden
+      # provider reads anon.settlement_rpc_url and nothing else anyway.
+      TOON_SETTLEMENT_SOLANA_RPC_URL: ${SETTLEMENT_SOLANA_RPC_URL:-}
     expose: ['8080']
     healthcheck:
       # Free and unauthenticated; it says the process is up and nothing more.

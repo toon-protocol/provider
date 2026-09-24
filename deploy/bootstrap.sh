@@ -263,15 +263,25 @@ elif ! ./init-letsencrypt.sh; then
   exit 1
 fi
 
-echo "==> [9/9] The auto-apply timer"
+echo "==> [9/9] The auto-apply and check timers"
 # The box follows the tracked branch from here on: every five minutes it
 # fast-forwards, re-renders and applies. ExecStart is absolute, so the unit
 # only works from the checkout path it names — README § "Standing one up"
 # clones to /root/provider for exactly that reason.
+#
+# And every five minutes `toon-provider status --check` asks whether anything
+# needs a person (TOON_Network#172, ADR 0029 "Alerts are an exit code"): a
+# Liveness close to expiry, a relay refusing writes, the publisher's runway
+# short, the sealing key mismatched, the settlement key low on SOL. Each
+# problem is a line in `journalctl -u toon-provider-check`, and a failed run
+# is in `systemctl --failed`. auto-apply.sh keeps both units current.
 install -m 644 toon-auto-apply.service /etc/systemd/system/toon-auto-apply.service
 install -m 644 toon-auto-apply.timer   /etc/systemd/system/toon-auto-apply.timer
+install -m 644 toon-provider-check.service /etc/systemd/system/toon-provider-check.service
+install -m 644 toon-provider-check.timer   /etc/systemd/system/toon-provider-check.timer
 systemctl daemon-reload
 systemctl enable --now toon-auto-apply.timer
+systemctl enable --now toon-provider-check.timer
 
 echo
 if [ "$HIDDEN" = 1 ]; then
@@ -289,6 +299,8 @@ else
   echo "  health        : https://provider.${DOMAIN}/health"
   echo "  workloads     : ${PUBLIC_IP}:40000-40099 (ssh), ${PUBLIC_IP}:41000-42599 (published)"
 fi
+echo
+echo "Check it works:  docker compose exec provider toon-provider status"
 echo
 echo "The Profile, the Listings and the Liveness are published by"
 echo "directory-publisher. If they do not appear on the relay, that container's"

@@ -96,6 +96,8 @@ fn fresh_origin() -> (tempfile::TempDir, String) {
         ".env.example",
         ".gitignore",
         "docker-compose.yml",
+        "toon-provider-check.service",
+        "toon-provider-check.timer",
     ] {
         fs::copy(deploy_dir().join(name), deploy.join(name))
             .unwrap_or_else(|e| panic!("copying {name}: {e}"));
@@ -246,9 +248,20 @@ echo "stub curl: unexpected call: $*" >&2
 exit 7
 "#;
 
+/// systemd, as far as auto-apply.sh touches it: every call logged, every
+/// call succeeding.
+const SYSTEMCTL_STUB: &str = r#"#!/usr/bin/env bash
+echo "systemctl $*" >> "$STUB_LOG"
+exit 0
+"#;
+
 fn stub_bin() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("tempdir");
-    for (name, content) in [("docker", DOCKER_STUB), ("curl", CURL_STUB)] {
+    for (name, content) in [
+        ("docker", DOCKER_STUB),
+        ("curl", CURL_STUB),
+        ("systemctl", SYSTEMCTL_STUB),
+    ] {
         let path = dir.path().join(name);
         fs::write(&path, content).unwrap();
         let mut perms = fs::metadata(&path).unwrap().permissions();
@@ -266,6 +279,19 @@ struct Run {
 }
 
 fn auto_apply(handle: &tempfile::TempDir, stub: &Path, run_id: usize) -> Run {
+    // An empty unit directory: a box bootstrap.sh never set up, so nothing
+    // is installed into it — and never the real /etc/systemd/system.
+    let units = box_dir(handle).join("no-systemd");
+    fs::create_dir_all(&units).unwrap();
+    auto_apply_with_units(handle, stub, run_id, &units)
+}
+
+fn auto_apply_with_units(
+    handle: &tempfile::TempDir,
+    stub: &Path,
+    run_id: usize,
+    systemd_dir: &Path,
+) -> Run {
     let dir = box_dir(handle);
     let log = dir.join(format!("stub-log-{run_id}"));
     fs::write(&log, "").unwrap();
@@ -284,6 +310,7 @@ fn auto_apply(handle: &tempfile::TempDir, stub: &Path, run_id: usize) -> Run {
         .env("HOME", std::env::var("HOME").unwrap_or_default())
         .env("TOON_PROVIDER_BIN", env!("CARGO_BIN_EXE_toon-provider"))
         .env("TOON_AUTOAPPLY_LOCK", dir.join(".autoapply.lock"))
+        .env("TOON_SYSTEMD_DIR", systemd_dir)
         .env("STUB_LOG", &log)
         .env(
             "STUB_SERVICES",
@@ -449,4 +476,65 @@ fn a_box_with_no_applied_file_treats_it_as_needing_an_apply() {
         "it actually ran the apply, not a silent no-op:\n{}",
         result.calls
     );
+}
+
+/// TOON_Network#172: a box bootstrapped before the check timer existed gets
+/// it from its next apply, and one whose units are current is left alone.
+#[test]
+fn an_apply_installs_the_check_timer_on_a_bootstrapped_box() {
+    let (origin, _) = fresh_origin();
+    let stub = stub_bin();
+    let box_handle = clone_box(origin.path());
+    write_env(&box_dir(&box_handle), &base_env());
+
+    // What bootstrap.sh left: its auto-apply units, and no check units.
+    let units = tempfile::tempdir().unwrap();
+    fs::write(units.path().join("toon-auto-apply.timer"), "[Timer]\n").unwrap();
+
+    let first = auto_apply_with_units(&box_handle, stub.path(), 0, units.path());
+    assert_eq!(first.status, 0, "{}\n{}", first.stdout, first.stderr);
+    for unit in ["toon-provider-check.service", "toon-provider-check.timer"] {
+        assert_eq!(
+            fs::read_to_string(units.path().join(unit)).unwrap(),
+            read(unit),
+            "{unit} is installed as committed"
+        );
+    }
+    assert!(
+        first
+            .calls
+            .contains("systemctl enable --now toon-provider-check.timer"),
+        "{}",
+        first.calls
+    );
+    assert!(first
+        .stdout
+        .contains("installed the toon-provider-check timer"));
+
+    // Already current: nothing to install, and systemd is not touched. (A
+    // new commit makes the run do real work; .applied would otherwise skip
+    // it before this step.)
+    fs::write(origin.path().join("deploy/README.md"), "moved on\n").unwrap();
+    commit_all(origin.path(), "an unrelated change");
+    let second = auto_apply_with_units(&box_handle, stub.path(), 1, units.path());
+    assert_eq!(second.status, 0, "{}\n{}", second.stdout, second.stderr);
+    assert!(
+        !second.calls.contains("systemctl"),
+        "current units are left alone:\n{}",
+        second.calls
+    );
+}
+
+#[test]
+fn an_apply_installs_no_unit_on_a_box_bootstrap_did_not_set_up() {
+    let (origin, _) = fresh_origin();
+    let stub = stub_bin();
+    let box_handle = clone_box(origin.path());
+    write_env(&box_dir(&box_handle), &base_env());
+    let units = tempfile::tempdir().unwrap();
+
+    let run = auto_apply_with_units(&box_handle, stub.path(), 0, units.path());
+    assert_eq!(run.status, 0, "{}\n{}", run.stdout, run.stderr);
+    assert!(!units.path().join("toon-provider-check.timer").exists());
+    assert!(!run.calls.contains("systemctl"), "{}", run.calls);
 }

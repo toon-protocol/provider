@@ -630,7 +630,7 @@ def cmd_check_funded(role, warn_only):
 
 def main(argv):
     if len(argv) < 3 or argv[1] not in ("provider", "gateway"):
-        print("usage: keys.py provider|gateway init|addresses|check-funded [--warn-only]", file=sys.stderr)
+        print("usage: keys.py provider|gateway init|addresses|check-funded [--warn-only]|solana-address", file=sys.stderr)
         return 2
     role, command = argv[1], argv[2]
     try:
@@ -642,6 +642,11 @@ def main(argv):
             return 0
         if command == "check-funded":
             return cmd_check_funded(role, "--warn-only" in argv[3:])
+        # The connector's Solana settlement address and nothing else: what
+        # render.sh writes for `toon-provider status` to read a balance for.
+        if command == "solana-address":
+            print(base58(ed25519_public_key(read_key("settlement-solana.key"))))
+            return 0
         # The derivations alone, one per line, for the tests that pin them.
         if command == "derive":
             print(json.dumps(derive_all(role)))
