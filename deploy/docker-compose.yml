@@ -3,7 +3,7 @@
 # =============================================================================
 #   nginx                the public TLS edge (the only service on a public port)
 #   provider-connector   the payment proxy: meters, settles, unseals, forwards
-#   provider             toon-provider, built from the checkout this box follows
+#   provider             toon-provider, an immutable image pin (TOON_Network#151)
 #   directory-publisher  the payer for relay writes (Profile, Listings, Liveness)
 #   certbot              renews the certificate
 #
@@ -20,12 +20,17 @@
 #
 # ── Why there is no Watchtower here ──────────────────────────────────────────
 # The store and relay boxes run Watchtower because their app is a published
-# image on a moving `:release` tag. This repository publishes no image yet, so
-# `provider` and `directory-publisher` are BUILT FROM THE CHECKOUT — and the
-# checkout is what `auto-apply.sh` fast-forwards every five minutes. The update
-# path is therefore the git one, for the app and its config together, and a
-# Watchtower here would have nothing to follow. The connector is an immutable
-# pin, as on every other box, so it would have nothing to follow either.
+# image on a moving `:release` tag. `provider` and `directory-publisher` are
+# published images too now (TOON_Network#151,
+# .github/workflows/publish-provider-image.yml), but each is pinned to an
+# IMMUTABLE `sha-<short>` — never a moving tag — for the same reason the
+# connector below is: the config parser is `deny_unknown_fields` and
+# fail-closed, so a pin and the config it was validated against have to land
+# in the same reviewed commit (README § "Bumping the connector pin", which now
+# covers all three images' pins the same way). A Watchtower here would have
+# nothing to follow; `auto-apply.sh` fast-forwards the checkout every five
+# minutes and pulls whatever these three `image:`
+# lines say, and that is the whole update path.
 # =============================================================================
 
 name: provider
@@ -85,10 +90,19 @@ services:
   # packet. nginx proxies exactly one path of it — GET /health, by exact match
   # — and 404s everything else on that hostname.
   provider:
-    build:
-      # The repository this bundle lives in. `auto-apply.sh` rebuilds it when
-      # the tracked branch moves; a build with nothing changed is a cache hit.
-      context: ..
+    # An IMMUTABLE pin, published by
+    # .github/workflows/publish-provider-image.yml on every push to `main`
+    # (TOON_Network#151) and bumped here by a reviewed commit — never a
+    # floating tag, same regime as the connector's pin below.
+    #
+    # `sha-0000000` is git's own convention for "no commit" (the all-zero
+    # object id), used deliberately: this workflow has not published anything
+    # yet, so there is no real tag to write here honestly. It is replaced with
+    # the first real `sha-<short>` the workflow publishes once this branch
+    # reaches `main` — see the PR's "For a human" and
+    # tests/deploy_bundle.rs::the_provider_pin_is_immutable_and_written_once,
+    # which checks the SHAPE of this pin, not this literal value.
+    image: ghcr.io/toon-protocol/provider:sha-0000000
     volumes:
       - ./provider.toml:/etc/toon-provider/provider.toml:ro
       # THE DOCKER SOCKET, and that is the whole deployment shape: the provider
@@ -130,9 +144,10 @@ services:
   # THE PROVIDER'S NOSTR KEY NEVER REACHES IT. It holds money, not identity: it
   # cannot forge a directory event, only decline to pay for one.
   directory-publisher:
-    build:
-      context: ..
-      dockerfile: tools/publisher/Dockerfile
+    # Same scheme and the same caveat as the provider pin above: immutable,
+    # bumped by a reviewed commit, and `sha-0000000` until the first real
+    # `sha-<short>` exists. README § "Bumping the connector pin".
+    image: ghcr.io/toon-protocol/provider-publisher:sha-0000000
     environment:
       # The devnet relay's own client edge. This process pays it directly, as a
       # client with a channel — there is no hub on this devnet and no peering.

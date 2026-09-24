@@ -1,0 +1,173 @@
+name: Publish provider images
+
+# Publishes the two images `deploy/docker-compose.yml` pins by immutable tag
+# (TOON_Network#151):
+#
+#   ghcr.io/toon-protocol/provider             the toon-provider binary, built
+#                                               from the repo-root Dockerfile
+#   ghcr.io/toon-protocol/provider-publisher   the directory publisher, built
+#                                               from tools/publisher/Dockerfile
+#
+# Both get `sha-<short-sha>` on every push to `main` — immutable, tagged by
+# content, same scheme as the connector's `rust-sha-<short>` — plus a bare
+# `<version>` alias (the git tag with its `v` stripped) when the push is a
+# version tag. Neither gets a floating alias like the connector's `rust-main`:
+# nothing in this repository follows one automatically (`auto-apply.sh` pulls
+# whatever `docker-compose.yml` pins, and that pin only ever moves by a
+# reviewed commit — see deploy/README.md, "Bumping the provider pin"), so a
+# moving tag here would have nothing to be pulled by except a human, who may
+# as well pull the sha.
+#
+# Modelled on toon-protocol/connector's own
+# .github/workflows/publish-connector-rust-image.yml — see that file's header
+# for the fuller history of this pattern: content-addressed tags, GHCR
+# defaulting a brand-new package to PRIVATE, and why a Rust build here targets
+# linux/amd64 only (an emulated arm64 build of a whole Cargo workspace is far
+# slower than a native one, and nothing pulls that platform — both existing
+# devnet boxes and this ticket's target box are x86_64).
+#
+# CI's own `docker-build` job (.github/workflows/ci.yml) already proves the
+# provider Dockerfile builds on every PR, with `push: false`. This workflow
+# does the pushing half, on `main` and on a release tag only.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+    paths:
+      - 'src/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Dockerfile'
+      - 'tools/publisher/**'
+      - '.github/workflows/publish-provider-image.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  # A push to `main`: only the newest build is ever wanted, and it's tagged by
+  # content, so cancelling a superseded run costs nothing (rebuild it by
+  # `workflow_dispatch` on that commit if it's ever needed again). A tag push
+  # or a manual dispatch gets a group of its own, so a release build can
+  # neither cancel nor be cancelled by an unrelated push to `main`.
+  group: publish-provider-image-${{ (github.ref_type == 'branch' && github.event_name == 'push') && 'auto' || github.run_id }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' && github.event_name == 'push' }}
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  PROVIDER_IMAGE: ghcr.io/${{ github.repository_owner }}/provider
+  PUBLISHER_IMAGE: ghcr.io/${{ github.repository_owner }}/provider-publisher
+
+jobs:
+  build-and-push:
+    name: Build and push provider images
+    runs-on: ubuntu-latest
+    outputs:
+      short_sha: ${{ steps.tags.outputs.short }}
+      provider_tags: ${{ steps.tags.outputs.provider }}
+      publisher_tags: ${{ steps.tags.outputs.publisher }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compute tags
+        id: tags
+        run: |
+          short=$(echo "${{ github.sha }}" | cut -c1-7)
+          provider_tags="${PROVIDER_IMAGE}:sha-${short}"
+          publisher_tags="${PUBLISHER_IMAGE}:sha-${short}"
+          # A version tag (`v1.2.3`) additionally gets the bare version as an
+          # alias onto the exact same manifest the sha tag names — never a
+          # separate build, so the two can never disagree about which image
+          # they mean.
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            provider_tags="$(printf '%s\n%s' "$provider_tags" "${PROVIDER_IMAGE}:${version}")"
+            publisher_tags="$(printf '%s\n%s' "$publisher_tags" "${PUBLISHER_IMAGE}:${version}")"
+          fi
+          {
+            echo "short=$short"
+            echo "provider<<TAGS_EOF"
+            echo "$provider_tags"
+            echo "TAGS_EOF"
+            echo "publisher<<TAGS_EOF"
+            echo "$publisher_tags"
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push the provider image
+        id: build-provider
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.provider }}
+          cache-from: type=gha,scope=provider
+          cache-to: type=gha,mode=max,scope=provider
+          # amd64 only — see the header above.
+          platforms: linux/amd64
+
+      - name: Build and push the publisher image
+        id: build-publisher
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: tools/publisher/Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.publisher }}
+          cache-from: type=gha,scope=publisher
+          cache-to: type=gha,mode=max,scope=publisher
+          platforms: linux/amd64
+
+      # Make both packages public so `docker pull` works with no
+      # authentication (#151's acceptance criterion) — GHCR defaults a new
+      # container package to PRIVATE regardless of the linked repo's
+      # visibility. Idempotent once public. continue-on-error because the
+      # very first run creates each package, and a repo-scoped GITHUB_TOKEN
+      # cannot always flip visibility on a package in the same run it was
+      # created in — see the PR's "For a human" if this warns.
+      - name: Set container package visibility to public
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          for pkg in provider provider-publisher; do
+            gh api --method PATCH \
+              "/orgs/${{ github.repository_owner }}/packages/container/$pkg" \
+              -f visibility=public \
+              && echo "✓ $pkg visibility set to public" \
+              || echo "::warning::could not set $pkg visibility — may need manual fix in the GHCR UI"
+          done
+
+      - name: Publish summary
+        run: |
+          {
+            echo "## provider images published"
+            echo ""
+            echo "**Provider:** \`${PROVIDER_IMAGE}\`"
+            echo '```'
+            echo "${{ steps.tags.outputs.provider }}"
+            echo '```'
+            echo "digest: \`${{ steps.build-provider.outputs.digest }}\`"
+            echo ""
+            echo "**Publisher:** \`${PUBLISHER_IMAGE}\`"
+            echo '```'
+            echo "${{ steps.tags.outputs.publisher }}"
+            echo '```'
+            echo "digest: \`${{ steps.build-publisher.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
