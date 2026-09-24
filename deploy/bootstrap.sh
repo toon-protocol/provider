@@ -256,8 +256,11 @@ docker compose up -d
 echo "==> [8/9] TLS"
 if [ "$HIDDEN" = 1 ]; then
   echo "    none: a hidden box has no public name. The address is its own key."
-else
-  ./init-letsencrypt.sh
+elif ! ./init-letsencrypt.sh; then
+  echo "FAILED: certificate issuance did not succeed (its message is above, naming the" >&2
+  echo "likely cause). Everything up to here already applied. Fix it, then re-run:" >&2
+  echo "  cd $(pwd) && ./init-letsencrypt.sh" >&2
+  exit 1
 fi
 
 echo "==> [9/9] The auto-apply timer"

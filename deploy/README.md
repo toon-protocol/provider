@@ -247,9 +247,17 @@ handshake, render, pull (or, before the first publish, build), start,
 certificate, timer. Idempotent — re-run it to
 reconcile a box.
 
+`init-letsencrypt.sh` warns first if either A-record — `proxy.provider.<domain>`
+or `provider.<domain>` — does not yet resolve to `PUBLIC_IP`. If issuance
+itself fails, it exits non-zero naming the likely cause (almost always that
+one of those A-records isn't pointed here yet), and `bootstrap.sh` stops there
+with that message and the command to re-run, rather than reporting the box up
+on no valid certificate. A certificate that is still valid and outside its
+renewal window — the case on every idempotent re-run — is reused without going
+near any of this.
+
 **5. Go to production TLS.** `bootstrap.sh` starts on Let's Encrypt *staging*
-so a DNS mistake does not burn the real rate limit. Once
-`https://provider.<domain>/health` answers (with a certificate warning), set
+so a DNS mistake does not burn the real rate limit. Once step 4 succeeds, set
 `LETSENCRYPT_STAGING=0` in `.env` and re-run `./init-letsencrypt.sh`.
 
 ## The two funded identities

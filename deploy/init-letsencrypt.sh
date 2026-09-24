@@ -16,6 +16,7 @@ cd "$(dirname "$0")"
 
 set -a; . ./.env; set +a
 : "${DOMAIN:?set DOMAIN in .env}"
+: "${PUBLIC_IP:?set PUBLIC_IP in .env}"
 : "${LETSENCRYPT_EMAIL:?set LETSENCRYPT_EMAIL in .env}"
 
 DC=(docker compose)
@@ -67,6 +68,23 @@ SANS
   ' 2>/dev/null | tr -d '[:space:]'
 }
 
+# A warning, not a gate: certbot's own attempt below is the real test, and
+# giving it the chance still tells the operator more (the exact hostname and
+# the exact API/HTTP error) than refusing to try. But most HTTP-01 failures
+# ARE just an A-record that has not propagated yet, and that is worth saying
+# before spending an attempt on it, not only after.
+warn_if_dns_wrong() {
+  local d ip
+  for d in "${DOMAINS[@]}"; do
+    ip="$(getent ahostsv4 "$d" 2>/dev/null | awk '{print $1; exit}' || true)"
+    if [ -z "$ip" ]; then
+      echo "::warning:: ${d} does not resolve yet — issuance will fail until its A-record points at ${PUBLIC_IP}."
+    elif [ "$ip" != "$PUBLIC_IP" ]; then
+      echo "::warning:: ${d} resolves to ${ip}, not this box's PUBLIC_IP (${PUBLIC_IP}) — issuance will fail until the A-record is fixed."
+    fi
+  done
+}
+
 echo "==> Checking for an existing valid certificate (${CERT_NAME})"
 if [ "$(existing_cert_ok)" = "ok" ]; then
   echo "==> Valid certificate found — reusing it, not re-issuing."
@@ -80,6 +98,8 @@ seed_dummy
 "${DC[@]}" up -d nginx
 "${DC[@]}" run --rm --entrypoint sh certbot -c \
   "rm -rf /etc/letsencrypt/live/${CERT_NAME} /etc/letsencrypt/archive/${CERT_NAME} /etc/letsencrypt/renewal/${CERT_NAME}.conf"
+
+warn_if_dns_wrong
 
 d_args=()
 for d in "${DOMAINS[@]}"; do d_args+=(-d "$d"); done
@@ -105,8 +125,15 @@ if "${DC[@]}" run --rm --entrypoint certbot certbot \
     || echo "::warning:: nginx would not reload; it will pick the new certificate up on its own within 6h."
   echo "Done.${staging_arg:+ STAGING certificate — re-run with LETSENCRYPT_STAGING=0 once DNS resolves.}"
 else
-  echo "::warning:: Certificate issuance failed (DNS may not have propagated yet)."
-  echo "  Point the A-records at this box, then re-run with LETSENCRYPT_STAGING=0."
+  # A dummy is reseeded so nginx still answers something, but this script
+  # itself must fail: a box serving no valid certificate is the
+  # half-configured state worse than one that refused to come up at all
+  # (TOON_Network#163), so it is not this script's place to call that "done".
   seed_dummy
   "${DC[@]}" exec nginx nginx -s reload 2>/dev/null || true
+  echo "::error:: Certificate issuance failed." >&2
+  echo "  Almost always: an A-record (${DOMAINS[*]}) does not resolve to this box (${PUBLIC_IP}) yet." >&2
+  echo "  The certbot log above names the call that failed. Once the A-records are fixed," >&2
+  echo "  re-run ./init-letsencrypt.sh." >&2
+  exit 1
 fi
