@@ -68,6 +68,19 @@ bytes = "1"
 # streamed straight out of the blob cache.
 tar = "0.4"
 
+# `toon-provider redeem` (TOON_Network#173) signs the connector's
+# `POST /channels/:id/redeem-latest` exactly as `connector send` does: an
+# RFC 9421 ed25519 signature over `@method`, `@path` and an RFC 9530
+# `Content-Digest`. ed25519-dalek is the implementation the connector itself
+# verifies with (it is on 1.x; 2.x signs the same RFC 8032 bytes), and its
+# `SigningKey` wipes itself on drop — `ring`, already in the tree through
+# rustls, signs ed25519 too but leaves its expanded key in freed memory.
+# `zeroize` and `base64` are already in the tree (rustls, reqwest); they are
+# named here to wipe the key text read from stdin and to encode the headers.
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize"] }
+zeroize = "1"
+base64 = "0.22"
+
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
 proptest = "1"

@@ -88,6 +88,20 @@ enum Command {
     /// `--check`, exits 1 naming each problem that needs a person — what
     /// `toon-provider-check.timer` runs every five minutes.
     Status(toon_provider::status::StatusArgs),
+
+    /// Collect earnings: redeem the connector's inbound claims on chain,
+    /// channel by channel, only the ones a person picks (ADR 0029).
+    ///
+    /// Lists each inbound channel with its unredeemed amount and an
+    /// estimated gas cost, then redeems the ones picked at the prompt, or
+    /// `--channel <id>` (repeatable), or everything `--all-above <amount>`,
+    /// after a typed `yes` unless `--yes`. Each redeem is the connector's
+    /// `POST /channels/:id/redeem-latest`, signed with the operator key.
+    ///
+    /// THE OPERATOR KEY IS READ FROM STDIN ONLY (64 hex characters): typed
+    /// at a prompt that does not echo it, or piped in. It is never written
+    /// anywhere, and one given on the command line is refused.
+    Redeem(toon_provider::redeem::RedeemArgs),
 }
 
 /// `EvictionReason` as a `clap` value: `toon_provider::nostr::wire` stays
@@ -125,6 +139,12 @@ async fn main() -> Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
+    // Before the config is loaded: `redeem` runs from a laptop with none,
+    // and refuses a key on the command line before doing anything else.
+    if let Some(Command::Redeem(args)) = &cli.command {
+        let code = toon_provider::redeem::run(&cli.config, args).await?;
+        std::process::exit(code)
+    }
     let config = load_config(&cli.config).with_context(|| format!("config: {}", cli.config))?;
 
     match cli.command {
@@ -231,6 +251,7 @@ async fn main() -> Result<()> {
             let code = toon_provider::status::run(&config, &args).await?;
             std::process::exit(code)
         }
+        Some(Command::Redeem(_)) => unreachable!("handled before the config is loaded"),
         None => ProviderService::new(config)?.run().await,
     }
 }
