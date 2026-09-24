@@ -333,7 +333,10 @@ provider_routes() {
     "$TOON_PROVIDER_BIN" --config "$1" routes
   else
     local image volume state=()
-    image=$(docker compose config --images provider)
+    # Read from the resolved model, not `config --images provider`: compose
+    # lists a service's dependencies' images too, and provider depends_on the
+    # publisher, so that answered two lines and `docker run` refused them.
+    image=$(docker compose config --format json | jq -r '.services.provider.image')
     volume=$(docker volume ls -q \
       --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME:-provider}" \
       --filter label=com.docker.compose.volume=provider_state)

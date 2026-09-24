@@ -1837,3 +1837,29 @@ fn bootstrap_installs_and_starts_the_check_timer() {
     assert!(apply.contains("toon-provider-check.service toon-provider-check.timer"));
     assert!(apply.contains("systemctl enable --now toon-provider-check.timer"));
 }
+
+/// `docker compose config --images <service>` also lists the images of the
+/// services it depends_on, and provider depends_on the publisher, so it
+/// answers two lines. render.sh handed both to `docker run` and the devnet
+/// box's apply failed on every run until this was fixed. The scripts read a
+/// service's image from `config --format json` instead.
+#[test]
+fn no_script_asks_compose_for_one_services_images() {
+    for script in [
+        "render.sh",
+        "pull-images.sh",
+        "bootstrap.sh",
+        "auto-apply.sh",
+    ] {
+        let text = fs::read_to_string(deploy_dir().join(script)).unwrap();
+        let offending: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .filter(|l| l.contains("config --images"))
+            .collect();
+        assert!(
+            offending.is_empty(),
+            "{script} asks `config --images`, which includes depends_on images: {offending:?}"
+        );
+    }
+}
