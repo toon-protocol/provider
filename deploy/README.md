@@ -131,7 +131,7 @@ is the one box in the fleet that built its own app — and a Rust release build
 of this crate needed more memory than a nanode has on top of everything above.
 `provider` and `directory-publisher` are published images now, pulled like the
 connector already was, so that floor is gone once their pins name a published
-build, and they do (`sha-dce2bd2`). The sold-capacity arithmetic above is what
+build, and they do. The sold-capacity arithmetic above is what
 sizes this box.)
 
 **Disk.** 20 GiB of the 80 GB is the verified-blob cache
