@@ -467,8 +467,9 @@ every spawn, extend, standby, status, terminate and rotate handler. The
 connector is the only thing that may reach it, because the connector is what
 charged for the packet.
 
-**The operator endpoint is never published.** `POST /operator/evict` carries no
-signature and no payment: reaching it at all is what authorises an eviction.
+**The operator endpoint is never published.** `POST /operator/evict` and
+`GET /operator/status` carry no signature and no payment: reaching the port at
+all is what authorises an eviction or a status read.
 The config validator refuses a non-loopback bind, and it is in no `ports:` row.
 
 **`ports:` bypasses ufw.** Docker manages its own iptables rules ahead of

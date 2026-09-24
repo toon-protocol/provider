@@ -1,0 +1,190 @@
+{
+  "fixture": {
+    "case": "listed",
+    "description": "What `toon-provider status` reads from the running provider (ADR 0029): the `identity`, `directory` and `leases` sections, under a top-level `version`. The connector's live `/identity` matches the published `connector_seal_key`. Every relay of the Relay Set took the Profile and each Listing; `relay-two` refused the latest Liveness and still serves the previous one until its `expires_at`. `billed` is the listing price times the Lease Intervals paid for — two at `price` for the extended `basic` lease, one at `standby_price` for the `warm` reservation. No Continuation Token and no key but public ones appear anywhere.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "operator_status"
+  },
+  "http_method": "GET",
+  "http_path": "/operator/status",
+  "listener": "operator (operator_bind_addr, loopback only)",
+  "response_body": {
+    "directory": {
+      "liveness_cadence_s": 60,
+      "liveness_expires_at": 1700000360,
+      "publishing": true,
+      "relays": {
+        "ws://relay-two.fixture.example:7100": {
+          "listings": {
+            "basic": {
+              "expires_at": null,
+              "last_accepted_at": 1700000000,
+              "last_attempt_at": 1700000000,
+              "refusal": null
+            },
+            "gpu": {
+              "expires_at": null,
+              "last_accepted_at": 1700000000,
+              "last_attempt_at": 1700000000,
+              "refusal": null
+            },
+            "warm": {
+              "expires_at": null,
+              "last_accepted_at": 1700000000,
+              "last_attempt_at": 1700000000,
+              "refusal": null
+            }
+          },
+          "liveness": {
+            "expires_at": 1700000300,
+            "last_accepted_at": 1700000000,
+            "last_attempt_at": 1700000060,
+            "refusal": "relay refused"
+          },
+          "profile": {
+            "expires_at": null,
+            "last_accepted_at": 1700000000,
+            "last_attempt_at": 1700000000,
+            "refusal": null
+          }
+        },
+        "ws://relay.fixture.example:7100": {
+          "listings": {
+            "basic": {
+              "expires_at": null,
+              "last_accepted_at": 1700000000,
+              "last_attempt_at": 1700000000,
+              "refusal": null
+            },
+            "gpu": {
+              "expires_at": null,
+              "last_accepted_at": 1700000000,
+              "last_attempt_at": 1700000000,
+              "refusal": null
+            },
+            "warm": {
+              "expires_at": null,
+              "last_accepted_at": 1700000000,
+              "last_attempt_at": 1700000000,
+              "refusal": null
+            }
+          },
+          "liveness": {
+            "expires_at": 1700000360,
+            "last_accepted_at": 1700000060,
+            "last_attempt_at": 1700000060,
+            "refusal": null
+          },
+          "profile": {
+            "expires_at": null,
+            "last_accepted_at": 1700000000,
+            "last_attempt_at": 1700000000,
+            "refusal": null
+          }
+        }
+      }
+    },
+    "generated_at": 1700000060,
+    "identity": {
+      "connector_identity": {
+        "error": null,
+        "live_seal_key": "0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188",
+        "matches": true,
+        "reachable": true,
+        "via_proxy": false
+      },
+      "connector_seal_key": "0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188",
+      "hidden": false,
+      "ilp_address": "g.fixture",
+      "npub": "npub1gekhljh9v0jukzdq6xrshdvqx3yqgctc0xs5jjw0yg597xaw8uns47vduw",
+      "provider_name": "Fixture Provider",
+      "pubkey": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+    },
+    "leases": {
+      "leases": [
+        {
+          "billed": 2000,
+          "billed_estimated": false,
+          "created_at": 1700000000,
+          "ended_at": null,
+          "expires_at": 1700007200,
+          "hidden_address": null,
+          "id": 1000,
+          "listing": "basic",
+          "listing_version": 1,
+          "paid_intervals": {
+            "running": 2,
+            "standby": 0
+          },
+          "ports": [
+            {
+              "container_port": 443,
+              "host_port": 41000
+            }
+          ],
+          "role": "standalone",
+          "ssh_port": 40000,
+          "state": "running",
+          "workload_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "billed": 400,
+          "billed_estimated": false,
+          "created_at": 1700000000,
+          "ended_at": null,
+          "expires_at": 1700003600,
+          "hidden_address": null,
+          "id": 1001,
+          "listing": "warm",
+          "listing_version": 1,
+          "paid_intervals": {
+            "running": 0,
+            "standby": 1
+          },
+          "ports": [
+            {
+              "container_port": 443,
+              "host_port": 41016
+            }
+          ],
+          "role": "standby",
+          "ssh_port": 40001,
+          "state": "reserved",
+          "workload_id": "a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+        }
+      ],
+      "listings": {
+        "basic": {
+          "available": 1,
+          "capacity": 2,
+          "lease_interval_s": 3600,
+          "live": 1,
+          "price": 1000,
+          "standby_price": null,
+          "version": 1
+        },
+        "gpu": {
+          "available": 1,
+          "capacity": 1,
+          "lease_interval_s": 3600,
+          "live": 0,
+          "price": 1000,
+          "standby_price": null,
+          "version": 1
+        },
+        "warm": {
+          "available": 0,
+          "capacity": 1,
+          "lease_interval_s": 3600,
+          "live": 1,
+          "price": 1000,
+          "standby_price": 400,
+          "version": 1
+        }
+      }
+    },
+    "service": "provider",
+    "version": 1
+  },
+  "response_status": 200
+}

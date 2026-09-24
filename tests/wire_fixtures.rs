@@ -3533,3 +3533,178 @@ async fn a_spawn_resolves_a_paged_blob_record() {
     doc["spawn_content"] = content.clone();
     golden("spawn_image.digest_only.paged.json", doc);
 }
+
+// ── the operator's status (ADR 0029, TOON_Network#170) ───────────────────────
+
+/// A second relay for the operator-status fixture, so its `directory` section
+/// can show one relay taking the Liveness while another refuses it.
+const RELAY_TWO: &str = "ws://relay-two.fixture.example:7100";
+
+/// `GET /operator/status` on the OPERATOR router — the loopback-only listener
+/// at `operator_bind_addr`, never the one the connector forwards to —
+/// captured as a fixture.
+async fn operator_status_exchange(
+    f: &Fixture,
+    (case, description): (&str, &str),
+) -> (StatusCode, Value, Value) {
+    use axum::body::Body;
+    use tower::ServiceExt;
+
+    let http_path = "/operator/status";
+    let response = toon_provider::operator_router(f.service.app_state())
+        .oneshot(
+            axum::http::Request::builder()
+                .uri(http_path)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).expect("status answers JSON");
+    let doc = json!({
+        "fixture": header("operator_status", case, description),
+        "listener": "operator (operator_bind_addr, loopback only)",
+        "http_method": "GET",
+        "http_path": http_path,
+        "response_status": status.as_u16(),
+        "response_body": body,
+    });
+    (status, body, doc)
+}
+
+#[tokio::test]
+async fn the_operator_status_document() {
+    // The connector in front of the fixture provider, answering its own
+    // `/ilp/identity` with the key the Profile publishes.
+    let connector = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ilp/identity"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "keyId": "fixture-connector",
+            "publicKey": CONNECTOR_SEAL_KEY,
+        })))
+        .mount(&connector)
+        .await;
+    let connector_url = format!("{}/ilp", connector.uri());
+    let f = fixture_provider_configured(
+        ImagePolicyConfig::default(),
+        stub_registry().await,
+        |config| ProviderConfig {
+            relay_set: vec![RELAY.to_string(), RELAY_TWO.to_string()],
+            connector_url,
+            publish_url: Some("http://publisher.fixture.example:8080/publish".to_string()),
+            ..config
+        },
+    )
+    .await;
+    f.directory.publishes_to(&[RELAY, RELAY_TWO]);
+
+    // A running lease on `basic`, extended once: two intervals at `price`.
+    let aa = 0xaa;
+    let (status, response) = post(
+        &f.app,
+        "/listings/basic/v1/spawn",
+        envelope(&f.spawn_request(aa, "operator_status.spawn")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+    let (status, response) = post(&f.app, "/listings/basic/v1/extend", about(aa)).await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+
+    // A Warm Standby reservation on `warm`: one interval at `standby_price`.
+    let standby_set = [keys(PRIMARY_SECRET).public_key(), f.provider_pubkey()];
+    let request = lease_request(
+        &f.tenant,
+        &f.provider_pubkey(),
+        "standby",
+        &standby_set_content(STANDBY_SET_WORKLOAD, &standby_set),
+        NOW + TTL,
+        "operator_status.standby",
+    );
+    let (status, response) = post(&f.app, "/listings/warm/v1/standby", envelope(&request)).await;
+    assert_eq!(status, StatusCode::OK, "{}", response);
+
+    // The directory: everything lands at `NOW`; a cadence later the second
+    // relay refuses the Liveness and still serves the one before it.
+    assert!(f.service.publish_directory().await.unwrap());
+    f.service.publish_liveness(NOW).await.unwrap();
+    f.directory.refuse_liveness_on(&[RELAY_TWO]);
+    f.clock.set(NOW + LIVENESS_CADENCE_S);
+    f.service
+        .publish_liveness(NOW + LIVENESS_CADENCE_S)
+        .await
+        .unwrap();
+
+    let (status, body, doc) = operator_status_exchange(
+        &f,
+        (
+            "listed",
+            "What `toon-provider status` reads from the running provider (ADR 0029): the \
+             `identity`, `directory` and `leases` sections, under a top-level `version`. The \
+             connector's live `/identity` matches the published `connector_seal_key`. Every \
+             relay of the Relay Set took the Profile and each Listing; `relay-two` refused the \
+             latest Liveness and still serves the previous one until its `expires_at`. \
+             `billed` is the listing price times the Lease Intervals paid for — two at `price` \
+             for the extended `basic` lease, one at `standby_price` for the `warm` reservation. \
+             No Continuation Token and no key but public ones appear anywhere.",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["version"], 1);
+    assert_eq!(body["identity"]["connector_identity"]["matches"], true);
+    assert_eq!(
+        body["directory"]["relays"][RELAY_TWO]["liveness"]["refusal"],
+        "relay refused"
+    );
+    let billed: Vec<(Value, Value)> = body["leases"]["leases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| (l["billed"].clone(), l["billed_estimated"].clone()))
+        .collect();
+    assert_eq!(
+        billed,
+        vec![
+            (json!(2000), json!(false)),
+            (json!(STANDBY_PRICE), json!(false))
+        ]
+    );
+    let rendered = body.to_string();
+    assert!(!rendered.contains(PROVIDER_SECRET));
+    assert!(!rendered.contains("continuation"));
+    golden("operator_status.listed.json", doc);
+
+    // A provider nobody has published yet, with no connector to ask: what an
+    // operator reads on first boot before the publisher is configured.
+    let g = fixture_provider_configured(
+        ImagePolicyConfig::default(),
+        stub_registry().await,
+        |config| ProviderConfig {
+            connector_url: String::new(),
+            publish_url: None,
+            ..config
+        },
+    )
+    .await;
+    let (status, body, doc) = operator_status_exchange(
+        &g,
+        (
+            "unlisted",
+            "The same document from a provider with no `publish_url` and no `connector_url`, \
+             before anything was published: every relay of the Relay Set is listed with `null` \
+             outcomes (never published to since start, which is not a refusal), \
+             `liveness_expires_at` is `null`, and the connector probe is reported as failed — \
+             a failed probe is part of the answer, never an error status.",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", body);
+    assert_eq!(body["identity"]["connector_identity"]["reachable"], false);
+    assert_eq!(body["directory"]["publishing"], false);
+    golden("operator_status.unlisted.json", doc);
+}

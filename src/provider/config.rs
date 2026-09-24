@@ -311,7 +311,8 @@ pub struct ProviderConfig {
     #[serde(default = "default_http_bind_addr")]
     pub http_bind_addr: String,
 
-    /// Where the operator endpoint listens (`POST /operator/evict`): a
+    /// Where the operator endpoint listens (`POST /operator/evict`,
+    /// `GET /operator/status`): a
     /// second, unrelated listener from `http_bind_addr`, carrying no
     /// signature and no payment — reaching it at all is what authorises it.
     /// MUST be loopback (`validate` refuses anything else): this port is not
@@ -1192,6 +1193,7 @@ mod tests {
             ssh_port: 40000,
             ports: vec![],
             hidden_address: None,
+            paid_intervals: None,
         }
     }
 

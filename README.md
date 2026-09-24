@@ -1049,13 +1049,54 @@ and carrying `["x", "<workload_id>"]` and `["L","toon.network"]`. Content:
 ```
 
 **The operator endpoint must never be exposed.** `POST /operator/evict`
-carries no signature and no payment — reaching it at all is what authorises
-an eviction — so it is served on its own listener, bound to
+and `GET /operator/status` carry no signature and no payment — reaching the
+port at all is what authorises an eviction or a status read — so it is served on its own listener, bound to
 `operator_bind_addr` (default `127.0.0.1:8090`, and `validate` refuses
 anything that is not a loopback address), and it is never part of the
 connector's route table (`toon-provider routes` output is unchanged by this
 feature). Do not publish this port through the connector, through a compose
 port mapping, or through anything else reachable off the box.
+
+## Operator status
+
+**`GET /operator/status`** on the same loopback operator listener answers, in
+one JSON document, what an operator asks first: *am I listed, and what am I
+running?* (ADR 0029). Read-only, no body, always `200`:
+
+```sh
+curl -s 127.0.0.1:8090/operator/status | jq
+```
+
+The document has a top-level `version` (1), `service` (`provider`) and
+`generated_at`, then one object per section, so later tooling can add its own
+sections (`publisher`, `earnings`, `funding`) beside these:
+
+- **`identity`** — `npub`, `pubkey`, `provider_name`, `ilp_address`, `hidden`,
+  the published `connector_seal_key`, and `connector_identity`: the
+  connector's live `GET <connector_url>/identity` (through `anon.socks_proxy`
+  on a Hidden Provider) and whether its `publicKey` `matches` the published
+  key byte for byte. A connector that does not answer is reported
+  (`reachable: false` and an `error`), never a failed request.
+- **`directory`** — for every relay of the Relay Set, what it last said to the
+  Profile, each Listing and the Liveness: `last_accepted_at`,
+  `last_attempt_at`, the `refusal` of the latest attempt (or `null`), and the
+  `expires_at` of the publication it last took. `null` means nothing was
+  published to that relay since the process started. `liveness_expires_at` is
+  the latest Liveness expiry any relay took. Kept in memory only: a restart
+  republishes everything anyway.
+- **`leases`** — per listing on sale, `capacity`, `live` and `available` (the
+  numbers the Liveness announces), and per lease its `id`, `workload_id`,
+  listing and version, `role`, `state`, `created_at`, `expires_at`, ports,
+  `ssh_port`, `.anyone` `hidden_address`, `paid_intervals` (`running` at
+  `price`, `standby` at `standby_price`) and **`billed`** in µUSDC. The lease
+  table counts paid intervals from this version on — one per spawn, one per
+  extension; a lease written by an older provider has no count, and its
+  `paid_intervals` and `billed` are estimated from its expiry and marked
+  `billed_estimated: true`.
+
+The answer carries no secret: no Continuation Token, no reserved spawn, no
+`.anyone` key, no private key. Fixtures: `operator_status.listed.json` and
+`operator_status.unlisted.json` under `tests/fixtures/wire/`.
 
 ## Availability and image policy
 
@@ -1303,7 +1344,8 @@ Notice and Takeover each, the two roles a Standby Set gives (`spawn.primary`,
 won a Takeover and of one that lost (`status.won`, `status.lost` — driven
 through the real watchdog over the fake Directory), a Hidden Provider's
 Profile and Listing (`directory.profile.hidden`, `directory.listing.hidden`),
-and the route table a Listing generates. Everything is produced
+the route table a Listing generates, and the operator's `GET /operator/status`
+document (`operator_status.listed`, `operator_status.unlisted`). Everything is produced
 over fixed test-only keys, a fixed clock and BIP-340 signatures with all-zero
 auxiliary randomness, so the bytes are reproducible and a tenant can re-derive
 every id and signature (TOON_Network #16).
