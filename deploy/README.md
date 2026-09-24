@@ -130,11 +130,8 @@ is the one box in the fleet that built its own app — and a Rust release build
 of this crate needed more memory than a nanode has on top of everything above.
 `provider` and `directory-publisher` are published images now, pulled like the
 connector already was, so that floor is gone once their pins name a published
-build; the sold-capacity arithmetic above is what sizes this box. **Until
-then** the pins read the placeholder `sha-0000000`, which names nothing on
-GHCR, and `pull-images.sh` builds both images from the checkout instead — so
-until the first publish, a box still compiles the provider and still needs
-the 4 GB this table assumes. § "How updates arrive" says more.)
+build, and they do (`sha-dce2bd2`). The sold-capacity arithmetic above is what
+sizes this box.)
 
 **Disk.** 20 GiB of the 80 GB is the verified-blob cache
 (`blob_cache_max_bytes`). There is no eviction yet: a blob that would cross the
@@ -390,14 +387,12 @@ Once the pins name published builds, nothing here compiles anything
 (TOON_Network#151), and the checkout this script fast-forwards is config, not
 a build input.
 
-**The placeholder pin.** Until that workflow has published its first
-`sha-<short>`, the `provider` and `directory-publisher` pins read
-`sha-0000000`, git's all-zero "no commit", which no registry has. Every pull
-goes through `pull-images.sh`, and for that one tag, and only for those two
-images, it builds the image from the checkout and tags it with the pinned
-name, so compose finds it locally and never asks GHCR. Any other pin that will
-not pull still fails the apply. The first real pin bump ends this without
-anything on the box changing: the next fast-forward pulls it like any other.
+**The placeholder pin.** Before the workflow's first publish the pins read
+`sha-0000000`, git's all-zero "no commit", which no registry has, and
+`pull-images.sh` still honours it: for that one tag, and only for the
+`provider` and `directory-publisher` images, it builds the image from the
+checkout and tags it with the pinned name. That is what a fork that has not
+published yet can use. Any other pin that will not pull fails the apply.
 
 ```bash
 systemctl status toon-auto-apply.timer

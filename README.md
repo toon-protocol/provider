@@ -67,10 +67,8 @@ Or run `node sandbox/scripts/devnet-status.mjs` in a clone of
 provider whose connector is `https://proxy.provider.<domain>/ilp`. If you are
 not listed, `docker compose logs directory-publisher` says why.
 
-The provider and publisher images are pinned to a commit, `sha-<short>`. Until
-the first image is published the pin is the placeholder `sha-0000000`, and
-`pull-images.sh` builds both images on the box instead, and compiling the
-provider needs that 4 GB too
+The provider and publisher images are published to GHCR and pinned to a
+commit, `sha-<short>`, so the box pulls them and compiles nothing
 ([How updates arrive](deploy/README.md#how-updates-arrive)). To run a
 [Hidden Provider](#hidden-provider) instead, reachable only through Anyone,
 set `HIDDEN=1` and follow
