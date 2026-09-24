@@ -1,5 +1,5 @@
 # =============================================================================
-# Connector config for the TOON devnet provider box — rendered by ./render.sh
+# Connector config for a TOON provider box — rendered by ./render.sh
 # =============================================================================
 # The connector is the payment proxy in front of `toon-provider`. It terminates
 # payment, unseals the packet and forwards a plain HTTP POST to the app — so
@@ -21,9 +21,11 @@
 #     rendered connector.toml is not a secret. (provider.toml, beside it, IS:
 #     it carries this provider's Nostr key inline.)
 #
-# deploy/README.md § "Bumping the connector pin" has the procedure, and
-# tests/deploy_bundle.rs fails the build if this file and provider.toml.template
-# ever disagree about a route, a price or a handler.
+# deploy/README.md § "Bumping the connector pin" has the procedure. Nothing
+# here names an operator: the address, the domain and the settlement values
+# come from .env, and the [[routes]] are generated from provider.toml at
+# render time, so the two files cannot disagree about a route, a price or a
+# handler.
 # =============================================================================
 
 # The client edge: POST /ilp, GET /ilp/btp, GET /ilp/identity and /metrics all
@@ -55,73 +57,25 @@ key_file = "/app/data/signer.key"
 # ═════════════════════════════════════════════════════════════════════════════
 # Everything between here and the settlement tables is the exact output of
 #
-#     toon-provider routes --config deploy/provider.toml
+#     toon-provider routes --config provider.toml
 #
-# pasted verbatim: one spawn and one extend row per LIVE listing version at
-# that version's price, a standby pair at its `standby_price` for a tier that
-# sells Warm Standbys, and the four free provider-wide rows. Every path is
-# literal and the app serves exactly these.
+# run by render.sh against the provider.toml it has just rendered, and spliced
+# in place of the marker line below: one spawn and one extend row per LIVE
+# listing version at that version's price, a standby pair at its
+# `standby_price` for a tier that sells Warm Standbys, and the four free
+# provider-wide rows. Every path is literal and the app serves exactly these.
 #
-# DO NOT EDIT THESE BY HAND. A listing change is a new version with new rows
-# and a restart (ADR 0009) — re-run the command. `tests/deploy_bundle.rs`
-# renders provider.toml.template, asks the real route renderer what it would
-# print, and fails if this block is not it, so the two cannot drift.
+# There is nothing to edit here. A listing change is a new version with new
+# rows and a restart (ADR 0009): change the listings file and re-render. On a
+# box the command runs inside the provider image and reads the live lease
+# table, so a retired version keeps its rows while a lease still runs on it.
 #
 # The connector both TERMINATES and PRICES each route: a packet must arrive
 # covered to the figure here or it is refused, and a refusal on a paid route
 # is still billed (TOON_Network ADR 0003 — one route, one price, no refunds).
 # The free rows are written `price = 0` rather than left out: a terminated
 # route is never silently free, and the parser requires a price either way.
-
-[[routes]]
-prefix = "g.toon.provider.basic.v1.spawn"
-handler_url = "http://provider:8080/listings/basic/v1/spawn"
-price = 1000
-
-[[routes]]
-prefix = "g.toon.provider.basic.v1.extend"
-handler_url = "http://provider:8080/listings/basic/v1/extend"
-price = 1000
-
-[[routes]]
-prefix = "g.toon.provider.basic.v1.standby"
-handler_url = "http://provider:8080/listings/basic/v1/standby"
-price = 400
-
-[[routes]]
-prefix = "g.toon.provider.basic.v1.standby.extend"
-handler_url = "http://provider:8080/listings/basic/v1/standby/extend"
-price = 400
-
-[[routes]]
-prefix = "g.toon.provider.ci.v1.spawn"
-handler_url = "http://provider:8080/listings/ci/v1/spawn"
-price = 5000
-
-[[routes]]
-prefix = "g.toon.provider.ci.v1.extend"
-handler_url = "http://provider:8080/listings/ci/v1/extend"
-price = 5000
-
-[[routes]]
-prefix = "g.toon.provider.availability"
-handler_url = "http://provider:8080/availability"
-price = 0
-
-[[routes]]
-prefix = "g.toon.provider.status"
-handler_url = "http://provider:8080/status"
-price = 0
-
-[[routes]]
-prefix = "g.toon.provider.terminate"
-handler_url = "http://provider:8080/terminate"
-price = 0
-
-[[routes]]
-prefix = "g.toon.provider.rotate"
-handler_url = "http://provider:8080/rotate"
-price = 0
+# @render: routes
 
 
 # ── Getting paid ─────────────────────────────────────────────────────────────
@@ -137,23 +91,25 @@ price = 0
 # token account create), so that key must hold SOL before the first `up -d` —
 # deploy/README.md § "The two funded identities".
 #
-# These are the values the rest of the devnet answers with; read them back
-# from any node's `GET /ilp` rather than trusting a second copy of them.
+# The values come from .env, the same ones provider.toml's [[settlement]]
+# publishes. .env.example ships the TOON devnet's as a preset (Base Sepolia and
+# Solana devnet mock USDC); read them back from any devnet node's `GET /ilp`
+# rather than trusting a second copy of them.
 
 [settlement.evm]
-rpc_url          = "https://base-sepolia-rpc.publicnode.com"
-contract_address = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"  # TokenNetworkRegistry
-token_address    = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"  # mock USDC (6dp)
-decimals         = 6
+rpc_url          = "${SETTLEMENT_EVM_RPC_URL}"
+contract_address = "${SETTLEMENT_EVM_REGISTRY}"  # TokenNetworkRegistry
+token_address    = "${SETTLEMENT_EVM_TOKEN}"
+decimals         = ${SETTLEMENT_EVM_DECIMALS}
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
 
 [settlement.solana]
-rpc_url       = "https://api.devnet.solana.com"
-program_id    = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
-token_address = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"   # mock USDC (6dp)
-decimals      = 6
+rpc_url       = "${SETTLEMENT_SOLANA_RPC_URL}"
+program_id    = "${SETTLEMENT_SOLANA_PROGRAM_ID}"
+token_address = "${SETTLEMENT_SOLANA_TOKEN}"
+decimals      = ${SETTLEMENT_SOLANA_DECIMALS}
 
 [settlement.solana.key]
 key_file = "/app/data/settlement-solana.key"
@@ -181,14 +137,15 @@ write_keys_file   = "/app/data/operator-write.keys"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# THIS DEPLOYMENT — the TOON devnet provider box
+# THIS DEPLOYMENT
 # ═════════════════════════════════════════════════════════════════════════════
 # Everything above describes any provider behind any connector. What follows is
-# this box's place in the TOON devnet: the address it answers for and the URLs
-# it is reachable on. A tenant reads these back from `GET /ilp` to discover the
-# node, and `auto-apply.sh` compares them against what the running process
-# actually serves on every apply.
+# this box's place on the network: the address it answers for (ILP_ADDRESS,
+# the same one provider.toml's routes hang off) and the URLs it is reachable
+# on. A tenant reads these back from `GET /ilp` to discover the node, and
+# `auto-apply.sh` compares them against what the running process actually
+# serves on every apply.
 [node]
-addresses     = ["g.toon.provider"]
+addresses     = ["${ILP_ADDRESS}"]
 http_endpoint = "https://proxy.provider.${DOMAIN}/ilp"
 btp_endpoint  = "wss://proxy.provider.${DOMAIN}/ilp/btp"

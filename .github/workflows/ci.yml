@@ -47,6 +47,10 @@ jobs:
       # This includes `--test wire_fixtures`, which verifies every file under
       # tests/fixtures/wire/ byte-for-byte against the code (TOON_Network #16);
       # the spec repository's copy is synced by hand (README, "Wire fixtures").
+      # tests/deploy_bundle.rs runs the real deploy/render.sh, which needs
+      # envsubst. The runner image has it today; this says so out loud rather
+      # than letting an image change turn into a baffling test failure.
+      - run: command -v envsubst || (sudo apt-get update && sudo apt-get install -y gettext-base)
       - run: cargo test --locked --no-fail-fast
       - run: cargo clippy --locked --all-targets -- -D warnings
 

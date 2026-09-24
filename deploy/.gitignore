@@ -1,4 +1,6 @@
-# Secrets and rendered output. Only the templates are committed.
+# Secrets, rendered output and the operator's own inputs. Only the templates
+# and the examples are committed, so a box's checkout stays clean and
+# auto-apply.sh can keep fast-forwarding it.
 #
 # provider.toml is in this list twice over: it is rendered, AND it carries this
 # provider's Nostr private key inline. The repository root's .gitignore already
@@ -8,6 +10,9 @@
 !.env.example
 provider.toml
 connector.toml
+# What this provider sells. listings.example.toml is committed; the copy an
+# operator makes theirs is not.
+listings.toml
 operator-bearer.token
 operator-write.keys
 nginx/conf.d/
