@@ -284,7 +284,10 @@ fn staging_vs_production_is_unaffected() {
         .iter()
         .find(|c| c.starts_with("compose run --rm --entrypoint certbot"))
         .expect("expected a certonly call");
-    assert!(!certonly.contains("--staging"), "{certonly}");
+    assert!(
+        !certonly.contains("--staging"),
+        "a production run must not pass --staging to certbot"
+    );
 }
 
 #[test]
