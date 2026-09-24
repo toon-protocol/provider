@@ -21,3 +21,5 @@ nginx/conf.d/
 # The last commit auto-apply.sh applied AND verified (TOON_Network#160).
 # Written only on success, so it never carries this operator's history.
 .applied
+# Python bytecode, should anything ever import keys.py rather than run it.
+__pycache__/
