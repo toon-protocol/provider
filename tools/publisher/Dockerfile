@@ -7,7 +7,7 @@ WORKDIR /app
 COPY tools/publisher/package.json tools/publisher/package-lock.json* ./
 RUN npm install --omit=dev --no-audit --no-fund
 
-COPY tools/publisher/publish.mjs tools/publisher/proxy.mjs ./
+COPY tools/publisher/publish.mjs tools/publisher/proxy.mjs tools/publisher/status.mjs tools/publisher/topup.mjs ./
 
 # The channel store: the client's own watermark for the channel it pays on. A
 # STALE one refuses every later claim, so it must outlive a restart and die

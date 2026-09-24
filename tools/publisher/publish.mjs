@@ -22,10 +22,12 @@
 import { createServer } from 'node:http';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { ToonClient } from '@toon-protocol/client';
+import { ToonClient, JsonFileChannelStore } from '@toon-protocol/client';
 import { createHiddenServiceTransport } from '@toon-protocol/client/hidden-service';
 import { lookup } from 'node:dns/promises';
 import { isNearUrl, isRpcTarget, isTrue, proxyFor, startupRefusal } from './proxy.mjs';
+import { estimateSpendPerCadence, loadChannelStatus, noChannelStatusBody, statusBody } from './status.mjs';
+import { topup } from './topup.mjs';
 
 const PORT = Number(process.env.PORT ?? 8081);
 const BIND = process.env.BIND_ADDR ?? '0.0.0.0';
@@ -37,6 +39,22 @@ const ACCOUNT_INDEX = Number(process.env.TOON_ACCOUNT_INDEX ?? 0);
 const CHANNEL_STORE = process.env.TOON_CHANNEL_STORE ?? '/var/lib/toon-publisher/channels.json';
 const DEPOSIT = BigInt(process.env.TOON_DEPOSIT ?? '10000000'); // 10 USDC at 6dp
 const TIMEOUT_MS = Number(process.env.TOON_TIMEOUT_MS ?? 60_000);
+
+// How often this provider writes a Liveness (TOON_Network#171, ADR 0029 §3).
+// Optional: `/status` reports a runway only when it knows both this and a
+// price, and says so either way rather than guessing a cadence nobody
+// configured. `undefined`, not a default, when unset — 60s is true of the
+// devnet compose profile but not a fact this process should assume.
+const LIVENESS_CADENCE_S = (() => {
+  const raw = process.env.TOON_LIVENESS_CADENCE_S;
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) {
+    console.error(`[publisher] TOON_LIVENESS_CADENCE_S must be a positive number of seconds, got ${JSON.stringify(raw)}.`);
+    process.exit(1);
+  }
+  return n;
+})();
 
 // Which ILP carriage the packets are paid over. `http` — a one-shot POST per
 // packet — is the default and was the only behaviour: publishing is a handful
@@ -273,6 +291,13 @@ async function publish({ event, relays, proxy }) {
   return report;
 }
 
+// The channel store this process's client already writes
+// (`ChannelManager`/`JsonFileChannelStore`, `channels.json` +
+// `channels.peers.json`). `/status` reads it directly rather than through a
+// live client — a status read must never build one, since building one can
+// open a channel (`ChannelFacade.open`/`ensure`).
+const channelStore = new JsonFileChannelStore(CHANNEL_STORE);
+
 const server = createServer((req, res) => {
   const answer = (status, body) => {
     const payload = JSON.stringify(body);
@@ -283,6 +308,68 @@ const server = createServer((req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     return answer(200, { status: 'ok' });
   }
+
+  // `/status` and `/topup` are private in exactly the way `/publish` is: this
+  // process listens on `BIND_ADDR`/`PORT` only, the compose file never
+  // publishes it (`expose:`, no `ports:`), and nothing here checks who is
+  // asking — reaching this listener at all is what the deploy shape treats as
+  // authorization (tools/publisher/README.md, deploy/README.md "Privacy and
+  // exposure invariants").
+  if (req.method === 'GET' && req.url === '/status') {
+    const channel = loadChannelStatus(channelStore);
+    if (channel === null) {
+      return answer(200, noChannelStatusBody(LIVENESS_CADENCE_S));
+    }
+    // Only ask the connector what a write costs right now if this process has
+    // already talked to it — a status read must not be what causes the first
+    // connection, let alone the first channel.
+    const priceOf =
+      current === null
+        ? undefined
+        : async (destination) => {
+            const c = await current.promise;
+            return c.price(destination);
+          };
+    const assumptions = [];
+    return estimateSpendPerCadence(WRITE_ROUTES, priceOf, assumptions)
+      .then((pricePerCadence) => {
+        const body = statusBody({ ...channel, pricePerCadence, cadenceS: LIVENESS_CADENCE_S });
+        body.assumptions = [...assumptions, ...body.assumptions];
+        answer(200, body);
+      })
+      .catch((e) => answer(502, { error: e?.message ?? String(e) }));
+  }
+
+  if (req.method === 'POST' && req.url === '/topup') {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      let request;
+      try {
+        request = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      } catch (e) {
+        return answer(400, { error: `body is not JSON: ${e.message}` });
+      }
+      if (request?.amount === undefined) {
+        return answer(400, { error: 'body must be { amount }' });
+      }
+      // Serialized behind the same queue as `/publish`: a deposit and a claim
+      // both touch this channel's tracked state, and the client is not safe
+      // to use from two calls at once.
+      serialize(() => topup(() => client(SOCKS_PROXY), request.amount)).then(
+        (body) => {
+          console.log(`[publisher] topped up channel ${body.channelId} to ${body.deposit}`);
+          answer(200, body);
+        },
+        (e) => {
+          const badRequest = e instanceof RangeError || e instanceof TypeError;
+          answer(badRequest ? 400 : 502, { error: e?.message ?? String(e) });
+        },
+      );
+    });
+    return;
+  }
+
   if (req.method !== 'POST' || req.url !== '/publish') {
     return answer(404, { error: 'not found' });
   }

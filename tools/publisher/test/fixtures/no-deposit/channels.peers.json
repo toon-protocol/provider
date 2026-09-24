@@ -1,0 +1,11 @@
+{
+  "peer-key-1": {
+    "channelId": "chan-nodep",
+    "context": {
+      "chainType": "evm",
+      "chainId": 84532,
+      "tokenNetworkAddress": "0x0000000000000000000000000000000000000000"
+    },
+    "openedAt": "2026-09-20T00:00:00.000Z"
+  }
+}
