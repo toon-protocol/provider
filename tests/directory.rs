@@ -476,6 +476,77 @@ async fn a_publication_every_relay_took_is_not_retried() {
     assert!(h.service.publish_directory().await.unwrap());
 }
 
+// ── the startup retry (TOON_Network#178) ────────────────────────────────────
+//
+// On every apply the devnet box recreates `provider` and its directory
+// publisher together, and the very first publish can race the publisher's
+// hostname into existing. These pin `publish_directory_at_startup`'s
+// backoff against real wall-clock time — `fail_publish_for` fails every
+// publish until a REAL instant, exactly what a publisher not up yet looks
+// like from here — rather than the fake `Clock` every other delay in this
+// file is measured on.
+
+#[tokio::test]
+async fn a_publisher_that_comes_up_a_few_seconds_late_is_caught_without_waiting_a_cadence() {
+    let h = harness().await; // CADENCE = 30s
+    h.directory
+        .fail_publish_for(std::time::Duration::from_secs(3));
+
+    let started = std::time::Instant::now();
+    let landed = h.service.publish_directory_at_startup().await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        landed,
+        "the publisher was up well inside the retry's budget"
+    );
+    assert_eq!(h.directory.of_kind(K_PROFILE).len(), 1);
+    assert!(
+        elapsed < std::time::Duration::from_secs(CADENCE),
+        "caught inside the backoff, not by waiting a whole cadence out: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_real_refusal_is_not_retried_by_the_startup_backoff() {
+    // A relay's own "no" is not worth an immediate second try — nothing
+    // about asking again a moment later changes its mind — so the startup
+    // retry gives up on the first attempt and leaves it to the regular
+    // cadence, rather than spending paid packets on a hot loop.
+    let h = harness().await;
+    h.directory.relay_always_refuses("wss://relay-two.example");
+
+    let started = std::time::Instant::now();
+    let landed = h.service.publish_directory_at_startup().await;
+    let elapsed = started.elapsed();
+
+    assert!(!landed);
+    assert!(
+        elapsed < std::time::Duration::from_millis(500),
+        "a real refusal returns at once, with no backoff sleep: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_publisher_that_never_comes_back_hands_off_to_the_regular_cadence() {
+    // The backoff must not become an infinite hot loop when the publisher
+    // stays down: it gives up comfortably inside one cadence and lets
+    // `directory_loop`'s regular per-cadence retry keep trying from there.
+    let h = harness().await; // CADENCE = 30s
+    h.directory
+        .fail_publish_for(std::time::Duration::from_secs(3600));
+
+    let started = std::time::Instant::now();
+    let landed = h.service.publish_directory_at_startup().await;
+    let elapsed = started.elapsed();
+
+    assert!(!landed);
+    assert!(
+        elapsed < std::time::Duration::from_secs(CADENCE),
+        "gives up well inside one cadence rather than retrying forever: {elapsed:?}"
+    );
+}
+
 // ── a config that would publish nothing usable ──────────────────────────────
 
 #[tokio::test]

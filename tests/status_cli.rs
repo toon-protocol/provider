@@ -315,6 +315,75 @@ async fn six_sections_in_adr_0029s_order() {
     assert!(text.contains("up 1h"), "{text}");
 }
 
+// ── DIRECTORY: NOT SENT vs REFUSED (TOON_Network#178) ────────────────────────
+
+#[tokio::test]
+async fn a_write_that_never_reached_a_relay_reads_as_not_sent_not_refused() {
+    // A relay's own "no" is REFUSED; a write the directory publisher never
+    // managed to make was never offered to any relay to refuse, so it reads
+    // as NOT SENT instead.
+    let world = World::new().await;
+    let mut doc = fixture_doc();
+    doc["started_at"] = json!(AT - 3_600);
+    doc["directory"]["relays"]["ws://relay-two.fixture.example:7100"]["liveness"] = json!({
+        "expires_at": null,
+        "last_accepted_at": null,
+        "last_attempt_at": AT - 5,
+        "refusal": "not attempted: dns error: failed to lookup address information",
+        "kind": "not_sent",
+    });
+    world.operator_answers(doc).await;
+    world
+        .publisher_answers(publisher_body("9997019", json!(1_209_600)))
+        .await;
+    world.connector_answers().await;
+    world.rpc_answers(1_500_000_000).await;
+
+    let text = render_text(&world.report().await);
+    assert!(text.contains("NOT SENT"), "{text}");
+    assert!(!text.contains("REFUSED"), "{text}");
+}
+
+#[tokio::test]
+async fn a_relays_own_refusal_still_reads_as_refused() {
+    // The fixture as generated has relay-two really refuse the latest
+    // Liveness (`"kind": "refused"`) — the case NOT SENT must not swallow.
+    let world = World::new().await;
+    let mut doc = fixture_doc();
+    doc["started_at"] = json!(AT - 3_600);
+    world.operator_answers(doc).await;
+    world
+        .publisher_answers(publisher_body("9997019", json!(1_209_600)))
+        .await;
+    world.connector_answers().await;
+    world.rpc_answers(1_500_000_000).await;
+
+    let text = render_text(&world.report().await);
+    assert!(text.contains("REFUSED"), "{text}");
+    assert!(!text.contains("NOT SENT"), "{text}");
+}
+
+// ── LEASES: an ended state in words, not raw JSON (TOON_Network#178) ────────
+
+#[tokio::test]
+async fn an_ended_lease_prints_its_reason_in_words() {
+    let world = World::new().await;
+    let mut doc = fixture_doc();
+    doc["started_at"] = json!(AT - 3_600);
+    doc["leases"]["leases"][0]["state"] = json!({ "ended": "termination" });
+    doc["leases"]["leases"][0]["ended_at"] = json!(AT - 60);
+    world.operator_answers(doc).await;
+    world
+        .publisher_answers(publisher_body("9997019", json!(1_209_600)))
+        .await;
+    world.connector_answers().await;
+    world.rpc_answers(1_500_000_000).await;
+
+    let text = render_text(&world.report().await);
+    assert!(text.contains("ended (termination)"), "{text}");
+    assert!(!text.contains("{\"ended\""), "{text}");
+}
+
 #[tokio::test]
 async fn earnings_join_claims_to_channels_and_name_the_dashboard() {
     let world = World::healthy().await;
@@ -597,6 +666,7 @@ async fn a_refusal_in_the_first_cadence_after_a_restart_is_not_a_problem() {
         "last_accepted_at": null,
         "last_attempt_at": AT - 5,
         "refusal": "not attempted: error sending request: dns error",
+        "kind": "not_sent",
     });
     let mut doc = fixture_doc();
     doc["started_at"] = json!(AT - 10);
@@ -630,6 +700,19 @@ async fn a_refusal_in_the_first_cadence_after_a_restart_is_not_a_problem() {
     );
     assert!(
         any_contains(&found, "no relay has accepted a Liveness"),
+        "{found:?}"
+    );
+    // A write that never reached a relay is NOT SENT, never "refused" — a
+    // relay was never asked to say no (TOON_Network#178).
+    assert!(
+        any_contains(
+            &found,
+            "was not sent: not attempted: error sending request: dns error"
+        ),
+        "{found:?}"
+    );
+    assert!(
+        !any_contains(&found, "refused the latest write"),
         "{found:?}"
     );
 }

@@ -152,6 +152,36 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
+    depends_on:
+      # DNS, not health: `condition: service_started` is enough to get this
+      # box's own directory publisher registered in Docker's embedded DNS
+      # before the provider's first publish asks for it. `auto-apply.sh`
+      # recreates `provider` and `directory-publisher` together on every
+      # apply, and that joint restart is exactly the race
+      # TOON_Network#178 was filed from: the startup publish failing
+      # `dns error: failed to lookup address information` for
+      # `directory-publisher`, healed only at the next Liveness cadence
+      # (~60s) before the provider's own retry (`publish_directory_at_startup`,
+      # `src/provider/publish.rs`) existed.
+      #
+      # `docker-compose.hidden.yml` already depends on this service for the
+      # very same reason — see its `provider.depends_on.directory-publisher`
+      # comment — so this brings the base (public) stack in line with a
+      # pattern already proven there rather than inventing a second one.
+      # `service_healthy` was considered instead and rejected: the publisher
+      # takes up to `start_period` (20s) plus its own boot time to report
+      # healthy, which would slow every apply's `provider` (and so
+      # `provider-connector`, which depends on `provider`) by that much for a
+      # race the retry below already closes in seconds; `service_started`
+      # gets the DNS record registered for a fraction of that cost. No
+      # deadlock: `directory-publisher` depends on nothing here.
+      #
+      # Belt and suspenders, not a replacement for the retry: this only
+      # helps at a JOINT startup. `directory-publisher` can also restart on
+      # its own later, mid-run, with `provider` untouched and no compose
+      # ordering in effect — which only the retry in publish.rs covers.
+      directory-publisher:
+        condition: service_started
     restart: unless-stopped
 
   # ── The payer for relay writes ─────────────────────────────────────────────

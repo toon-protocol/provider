@@ -9,6 +9,15 @@
 // describes the moment, so it goes out every `liveness_cadence_s` with the
 // availability of that instant.
 //
+// The startup publication gets a second, shorter rhythm of its own
+// (`publish_directory_at_startup`, TOON_Network#178): on every apply the
+// devnet box recreates `provider` and its directory publisher together, so
+// the very first attempt is the one most likely to find the publisher's
+// hostname not resolvable yet. A short backoff there catches it within a
+// handful of seconds; the plain per-cadence retry every later attempt gets
+// is for a publisher that is still down after that, or refuses on relay
+// grounds a backoff cannot fix.
+//
 // No failure of the DIRECTORY may take the provider down. A relay that
 // refuses a write, a publisher that is not up yet, a paid packet that times
 // out: each is logged and the loop carries on, because the leases already
@@ -17,6 +26,7 @@
 // started with, and one no amount of retrying fixes.
 
 use std::collections::{BTreeMap, HashMap};
+use std::time::Duration;
 
 use anyhow::Result;
 use tracing::{error, info, warn};
@@ -106,6 +116,41 @@ impl AppState {
     }
 }
 
+/// What one attempt at `publish_directory` accomplished — fine enough for
+/// the startup retry (below) to decide whether trying again immediately is
+/// worth it (TOON_Network#178). A relay's own "no" is not: nothing about
+/// asking again a moment later would change a relay's mind, and that is what
+/// `directory_loop`'s regular cadence keeps trying anyway. A publisher that
+/// could not be reached at all very likely is worth an immediate retry — on
+/// the devnet box every apply recreates `provider` and `directory-publisher`
+/// together, and the DNS record for the publisher's hostname is not always
+/// there the instant this process asks for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectoryAttempt {
+    /// Every relay of the Relay Set took the Profile and every Listing.
+    Landed,
+    /// At least one publication could not even reach the directory
+    /// publisher: not a relay's refusal, an `Err` from `publish_one`.
+    NotSent,
+    /// The publisher was reached for everything offered to it; at least one
+    /// relay refused at least one of them.
+    Refused,
+}
+
+impl DirectoryAttempt {
+    fn landed(self) -> bool {
+        matches!(self, Self::Landed)
+    }
+}
+
+/// The startup retry's backoff: short, doubling steps totalling 7s before
+/// the last of them, so the whole sequence stays well under one Liveness
+/// cadence even at a fast test's — and comfortably under the devnet's 60s (a
+/// publisher still not reachable after this hands off to `directory_loop`'s
+/// regular per-cadence retry, which is where a publisher that stays down
+/// keeps being tried).
+const STARTUP_RETRY_BACKOFF_S: [u64; 3] = [1, 2, 4];
+
 impl ProviderService {
     /// Publish the Provider Profile and every Listing, and say whether every
     /// one of them reached at least one relay of the Relay Set.
@@ -115,21 +160,35 @@ impl ProviderService {
     /// `false` to try again on, while an `Err` means the event could not be
     /// built at all — a config the provider should not have started with.
     pub async fn publish_directory(&self) -> Result<bool> {
+        Ok(self.publish_directory_attempt().await?.landed())
+    }
+
+    /// One attempt at `publish_directory`, reporting which KIND of miss it
+    /// was rather than collapsing straight to a bool — `publish_directory`
+    /// does that collapsing for its own callers, and the startup retry
+    /// (`publish_directory_at_startup`) is the one caller that needs to tell
+    /// "not sent" from "refused" apart.
+    async fn publish_directory_attempt(&self) -> Result<DirectoryAttempt> {
         let state = &self.state;
         let now = state.clock.now();
 
-        // Every relay took it, or it is tried again next cadence; a
-        // publisher that could not be reached is the same `false`.
-        let landed_on_every_relay = |what: &str, published: Result<PublishReport>| match published {
-            Ok(report) => report.reached_every_relay(),
+        let mut landed = true;
+        let mut not_sent = false;
+        let mut note = |what: &str, published: Result<PublishReport>| match published {
+            Ok(report) => {
+                if !report.reached_every_relay() {
+                    landed = false;
+                }
+            }
             Err(e) => {
                 warn!("{what} was not published: {e:#}");
-                false
+                landed = false;
+                not_sent = true;
             }
         };
 
         let profile = profile_event(&state.config, &state.keys, now)?;
-        let mut landed = landed_on_every_relay(
+        note(
             "Provider Profile",
             state.publish_one("Provider Profile", profile).await,
         );
@@ -142,10 +201,60 @@ impl ProviderService {
         for listing in state.config.listings_on_sale() {
             let what = format!("Listing {} v{}", listing.name, listing.version);
             let event = listing_event(listing, &state.config, &state.keys, now)?;
-            landed &= landed_on_every_relay(&what, state.publish_one(&what, event).await);
+            note(&what, state.publish_one(&what, event).await);
         }
 
-        Ok(landed)
+        Ok(if landed {
+            DirectoryAttempt::Landed
+        } else if not_sent {
+            DirectoryAttempt::NotSent
+        } else {
+            DirectoryAttempt::Refused
+        })
+    }
+
+    /// The startup publication, retried with a short backoff while the
+    /// directory publisher is simply not reachable yet (TOON_Network#178):
+    /// on every apply the devnet box recreates `provider` and
+    /// `directory-publisher` together, and this catches the publisher within
+    /// a handful of seconds instead of waiting out a whole Liveness cadence
+    /// (~60s) for `directory_loop`'s regular retry to come around. It also
+    /// covers a publisher that restarts on its own later, at whatever point
+    /// in the cadence that happens.
+    ///
+    /// Stops the moment an attempt lands, or the moment one comes back a
+    /// real relay refusal — retrying THAT in a hot loop would not change a
+    /// relay's mind, only spend paid packets faster — and otherwise hands
+    /// off to the regular cadence once the backoff runs out.
+    pub async fn publish_directory_at_startup(&self) -> bool {
+        // Bounded by the cadence itself, not just the fixed steps below: a
+        // provider configured with a cadence shorter than the backoff (a
+        // test's, mostly) hands off to the regular per-cadence retry sooner
+        // rather than sleeping past the cadence it is meant to stay under.
+        let cadence = Duration::from_secs(self.state.config.liveness_cadence_s.max(1));
+        for backoff_s in STARTUP_RETRY_BACKOFF_S {
+            match self.publish_directory_attempt().await {
+                Ok(DirectoryAttempt::Landed) => return true,
+                Ok(DirectoryAttempt::Refused) => return false,
+                Ok(DirectoryAttempt::NotSent) => {}
+                Err(e) => {
+                    error!("the Provider Profile or a Listing could not be built: {e:#}");
+                    return false;
+                }
+            }
+            let wait = Duration::from_secs(backoff_s);
+            if wait >= cadence {
+                break;
+            }
+            tokio::time::sleep(wait).await;
+        }
+        match self.publish_directory_attempt().await {
+            Ok(attempt) => attempt.landed(),
+            Err(e) => {
+                error!("the Provider Profile or a Listing could not be built: {e:#}");
+                false
+            }
+        }
     }
 
     /// Publish one Liveness event for the instant `now`, count it against
@@ -200,6 +309,7 @@ impl ProviderService {
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         let mut directory_published = false;
+        let mut first_tick = true;
         loop {
             // The first tick is immediate: the startup publication IS the
             // first cadence, and a provider that waited one out would be
@@ -207,11 +317,25 @@ impl ProviderService {
             ticker.tick().await;
 
             if !directory_published {
-                match self.publish_directory().await {
-                    Ok(landed) => directory_published = landed,
-                    Err(e) => error!("the Provider Profile or a Listing could not be built: {e:#}"),
-                }
+                directory_published = if first_tick {
+                    // The startup attempt gets its own short backoff rather
+                    // than the plain single try every later cadence gets:
+                    // this is the attempt most likely to race a directory
+                    // publisher recreated alongside this provider on the
+                    // same apply (TOON_Network#178), and it is over well
+                    // before the next tick would otherwise retry it.
+                    self.publish_directory_at_startup().await
+                } else {
+                    match self.publish_directory().await {
+                        Ok(landed) => landed,
+                        Err(e) => {
+                            error!("the Provider Profile or a Listing could not be built: {e:#}");
+                            false
+                        }
+                    }
+                };
             }
+            first_tick = false;
             if let Err(e) = self.publish_liveness(self.state.clock.now()).await {
                 error!("Liveness was not published: {e:#}");
             }

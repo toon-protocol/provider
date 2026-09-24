@@ -4,7 +4,7 @@
 //! and is printed without failing it — an alert that fires on "I could not
 //! tell" teaches an operator to ignore it.
 
-use crate::directory::RelayOutcome;
+use crate::directory::{RefusalKind, RelayOutcome};
 
 use super::gather::Report;
 use super::{format_duration, format_sol};
@@ -181,9 +181,19 @@ fn check_provider(report: &Report, out: &mut CheckOutcome) {
                         ),
                         None => "never accepted since the provider started".to_string(),
                     };
-                    out.problems.push(format!(
-                        "directory: {relay} refused the latest write of {what}: {refusal} ({last})"
-                    ));
+                    // A relay's own "no" reads as REFUSED; a write that never
+                    // reached a relay to be refused (the publisher was not
+                    // reachable) reads as NOT SENT — the same split the
+                    // human report makes (TOON_Network#178).
+                    out.problems.push(match outcome.kind {
+                        Some(RefusalKind::NotSent) => {
+                            format!("directory: {relay}: {what} was not sent: {refusal} ({last})")
+                        }
+                        _ => format!(
+                            "directory: {relay} refused the latest write of {what}: {refusal} \
+                             ({last})"
+                        ),
+                    });
                 }
             }
         }

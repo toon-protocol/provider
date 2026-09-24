@@ -6,7 +6,8 @@ use std::fmt::Write as _;
 
 use serde_json::{json, Map, Value};
 
-use crate::directory::RelayOutcome;
+use crate::directory::{RefusalKind, RelayOutcome};
+use crate::nostr::wire::LeaseState;
 use crate::provider::operator_status::OPERATOR_STATUS_VERSION;
 
 use super::check::{abbreviate, CheckOutcome};
@@ -220,7 +221,7 @@ pub fn render_text(report: &Report) -> String {
                     lease.listing,
                     lease.listing_version,
                     wire_name(&lease.role),
-                    wire_name(&lease.state),
+                    lease_state_name(&lease.state),
                     match lease.ended_at {
                         Some(_) => "expired",
                         None => "expires",
@@ -338,17 +339,40 @@ fn outcome_line(out: &mut String, now: u64, what: &str, outcome: Option<&RelayOu
                     .map(|t| format!(", expires {}", relative(now, t)))
                     .unwrap_or_default()
             ),
-            Some(refusal) => format!(
-                "REFUSED {}: {refusal}{}",
-                relative(now, o.last_attempt_at),
-                match o.last_accepted_at {
-                    Some(t) => format!(" (last accepted {})", relative(now, t)),
-                    None => String::new(),
-                }
-            ),
+            // A relay's own "no" is REFUSED; a write that never reached a
+            // relay to be refused — the directory publisher was not
+            // reachable — is NOT SENT (TOON_Network#178). `None` (a
+            // document from before this field, or one written by
+            // something else) reads as a refusal, the safer of the two to
+            // assume when it is not known which it was.
+            Some(refusal) => {
+                let verdict = match o.kind {
+                    Some(RefusalKind::NotSent) => "NOT SENT",
+                    Some(RefusalKind::Refused) | None => "REFUSED",
+                };
+                format!(
+                    "{verdict} {}: {refusal}{}",
+                    relative(now, o.last_attempt_at),
+                    match o.last_accepted_at {
+                        Some(t) => format!(" (last accepted {})", relative(now, t)),
+                        None => String::new(),
+                    }
+                )
+            }
         },
     };
     let _ = writeln!(out, "    {what:<14}{text}");
+}
+
+/// The lease state, for a person: `provisioning`, `reserved`, `running`,
+/// `stopped`, or for an ended lease `ended (<reason>)` — `expiry`,
+/// `termination` or `eviction` — rather than `wire_name`'s verbatim
+/// externally-tagged JSON, `{"ended":"termination"}` (TOON_Network#178).
+fn lease_state_name(state: &LeaseState) -> String {
+    match state {
+        LeaseState::Ended(reason) => format!("ended ({})", wire_name(reason)),
+        other => wire_name(other),
+    }
 }
 
 /// The report as one JSON document: the provider's own status document, with
