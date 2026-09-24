@@ -442,11 +442,12 @@ def cmd_init(role):
         made.append(path)
         print(f"    {path:<24} generated -- {what}")
 
-    secrets_in_env = [("OPERATOR_BEARER_TOKEN", lambda: secrets.token_hex(32), False)]
+    # (the .env line, what generates its value, whether to single-quote it)
+    env_lines = [("OPERATOR_BEARER_TOKEN", lambda: secrets.token_hex(32), False)]
     if role == "provider":
-        secrets_in_env.insert(0, ("NOSTR_PRIVATE_KEY", fresh_secp256k1_hex, False))
-        secrets_in_env.append(("PUBLISHER_MNEMONIC", generate_mnemonic, True))
-    for name, make, quote in secrets_in_env:
+        env_lines.insert(0, ("NOSTR_PRIVATE_KEY", fresh_secp256k1_hex, False))
+        env_lines.append(("PUBLISHER_MNEMONIC", generate_mnemonic, True))
+    for name, make, quote in env_lines:
         if env(name):
             print(f"    {name:<24} kept (set in .env)")
             continue
@@ -467,10 +468,11 @@ def cmd_init(role):
     print()
     if not made:
         print("Nothing was missing; nothing was changed.")
-    backup = [n for n in made if n in KEY_FILES or n in ("NOSTR_PRIVATE_KEY", "PUBLISHER_MNEMONIC")]
-    if backup:
+    to_back_up = [n for n in ("signer.key", "settlement.key", "settlement-solana.key",
+                              "NOSTR_PRIVATE_KEY", "PUBLISHER_MNEMONIC") if n in made]
+    if to_back_up:
         print("Back these up somewhere off this box; losing one loses what it identifies or holds:")
-        print("    " + ", ".join(backup))
+        print("    " + ", ".join(to_back_up))
     if operator_private is not None:
         print()
         print("THE OPERATOR WRITE KEY'S PRIVATE HALF -- shown once, and stored nowhere on this box.")
