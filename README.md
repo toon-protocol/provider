@@ -12,27 +12,85 @@ connector. The connector terminates payment, seals and unseals the payload, and
 forwards a plain HTTP request — so this app reads no `X-TOON-*` header, and a
 tenant paying through hops is served identically to one paying directly.
 
+## Run a provider
+
+A provider is five services on one host behind one domain: this app, a TOON
+connector, the [directory publisher](tools/publisher/README.md), nginx and
+certbot. The app never touches money: the connector takes and settles the
+payments, and the publisher pays the relay to list you. [`deploy/`](deploy/)
+runs all five, and [its README](deploy/README.md) has the detail behind each
+step below.
+
+**This is the TOON devnet.** It settles in mock USDC on Base Sepolia and Solana
+devnet (<https://faucet.devnet.toonprotocol.dev>), so nothing earned here is
+real money yet. You do **not** need a Workload Gateway: it is a separate,
+optional role, and the devnet's gateway already fronts every provider.
+
+**You need** an Ubuntu host you are root on, with a public IPv4 and at least
+4 GB of RAM; two DNS A-records at it, `proxy.provider.<domain>` and
+`provider.<domain>`; inbound TCP 22, 80, 443, 40000–40099 and 41000–42599
+(`bootstrap.sh` opens them in ufw, but a cloud firewall is yours to open); and
+two identities to fund with devnet SOL, the connector's Solana settlement key
+and the publisher's wallet, which also needs mock USDC.
+
+1. Clone to `/root/provider` (the auto-apply unit runs from there), then
+   `cd /root/provider/deploy`, `cp .env.example .env` and
+   `cp listings.example.toml listings.toml`. In `.env` set `DOMAIN`,
+   `PUBLIC_IP`, `PROVIDER_NAME` and an `ILP_ADDRESS` of your own such as
+   `g.<your-name>.provider`, and leave the relay and settlement block as the
+   devnet preset. Size `listings.toml` to your box.
+2. Generate the keys: `openssl rand -hex 32 > <file>` for `signer.key`,
+   `settlement.key` and `settlement-solana.key`, and `NOSTR_PRIVATE_KEY`,
+   `OPERATOR_BEARER_TOKEN`, `OPERATOR_WRITE_KEY` and `PUBLISHER_MNEMONIC` in
+   `.env` as it describes. Keep `NOSTR_PRIVATE_KEY` off the box too: it is
+   your provider.
+3. [Fund the two identities](deploy/README.md#the-two-funded-identities), the
+   Solana settlement key first: the connector will not start without SOL.
+4. Run `./bootstrap.sh`. It installs Docker, learns the connector's sealing
+   key, renders the config, starts the five services on a Let's Encrypt
+   *staging* certificate and installs the timer that keeps the box on `main`.
+5. Once `https://provider.<domain>/health` answers, set
+   `LETSENCRYPT_STAGING=0` in `.env` and run `./init-letsencrypt.sh`.
+
+Then [check it works](deploy/README.md#checking-it-works): `/health` answers
+`{"status":"ok"}`, `https://proxy.provider.<domain>/ilp/identity` answers the
+`CONNECTOR_SEAL_KEY` in `.env`, and the relay holds your Profile, Listings and
+Liveness:
+
+```bash
+nak req -k 10432 -k 30432 -k 10433 -a "$(nak key public <NOSTR_PRIVATE_KEY>)" \
+  wss://relay-ws.devnet.toonprotocol.dev
+```
+
+Or run `node sandbox/scripts/devnet-status.mjs` in a clone of
+[toon-protocol/infra](https://github.com/toon-protocol/infra) and look for the
+provider whose connector is `https://proxy.provider.<domain>/ilp`. If you are
+not listed, `docker compose logs directory-publisher` says why.
+
+The provider and publisher images are pinned to a commit, `sha-<short>`. Until
+the first image is published the pin is the placeholder `sha-0000000`, and
+`pull-images.sh` builds both images on the box instead, and compiling the
+provider needs that 4 GB too
+([How updates arrive](deploy/README.md#how-updates-arrive)). A
+[Hidden Provider](#hidden-provider), reachable only through Anyone, is
+configured with the `[anon]` tables in
+[`provider.example.toml`](provider.example.toml), but the bundle does not set
+one up yet.
+
 ## Status
 
-Milestone 1 is in progress. Today the app serves the whole lease lifecycle —
-a paid **spawn** (a Lease Request carrying a Continuation Token in, a running
-workload and its access details out), a paid **extension**, and the free **status**,
-**termination** and **availability** routes — applies its **image policy** to
-every spawn and every availability answer, sweeps expired leases, evicts a
-lease on an operator's command with a signed Eviction Notice, publishes its
-Provider Profile, Listings, Liveness and Eviction Notices to its Relay Set,
-and prints the connector route table it expects. A listing's price or
-resources can be changed without repricing the leases already running (see
-[Changing a listing's price](#changing-a-listings-price)). The milestone's
-acceptance test is `make smoke-m1` in the sandbox — see
-[Milestone 1 acceptance test](#milestone-1-acceptance-test).
-
-Milestone 2 is in progress: an image named by its **Image Registry entry**,
-or by its **digest alone**, is resolved and fetched through the TOON store,
-upstream registries and the **Blob Records** on this provider's Relay Set,
-verified blob by blob, cached across leases, and run — see
-[Spawning](#spawning) and
-[the resolution order](#availability-and-image-policy).
+A provider runs on the TOON devnet today from the bundle in
+[`deploy/`](deploy/). The app serves the whole lease lifecycle:
+a paid **spawn** and **extension**, and free **status**, **termination**,
+**availability** and **token rotation**. It resolves an image by its Image
+Registry entry or by digest alone, verifies it blob by blob and caches it
+across leases. It sweeps expired leases, evicts a lease on its operator's
+command, and publishes its Profile, Listings, Liveness and Eviction Notices to
+its Relay Set. It also runs as a member of a [Standby Set](#standby-sets), as a
+[Hidden Provider](#hidden-provider), and behind a Workload Gateway that a
+tenant hands a lease to. The protocol is still v1 on a devnet, so the wire can
+change, and when it does [the wire fixtures](#wire-fixtures-for-tenant-implementations)
+change in the same pull request.
 
 ## Spec, decisions and vocabulary
 
@@ -43,7 +101,7 @@ repository, not here:
 |---|---|
 | Protocol spec | `docs/spec/toon-network-v1.md` |
 | Glossary — the normative vocabulary this code uses | `CONTEXT.md` |
-| Architecture decision records | `docs/adr/0001`–`0011` |
+| Architecture decision records | `docs/adr/` |
 
 ## A fork of Paygress, with most of it removed
 
@@ -1135,7 +1193,30 @@ channel so the provider's Nostr key never has to share a process with money.
 Leave `publish_url` unset and the provider publishes nothing, which is legal:
 it simply does not appear in the directory.
 
-## Milestone 1 acceptance test
+## For contributors
+
+### Build, test and run
+
+```sh
+cargo build
+cargo test                 # no Docker daemon needed; Node on PATH (see below)
+cargo test -- --ignored    # the Docker backend and a registry-entry spawn against a real daemon,
+                           # and the anon control port against a real one (see Hidden Provider)
+cargo clippy --all-targets
+cargo run -- --config provider.toml
+```
+
+Two Node tools live beside the app under `tools/`, each with its own
+`npm install` and `npm test`: the [directory publisher](tools/publisher/README.md),
+the provider's payer for relay writes, and the [handover tool](tools/grant/README.md),
+the tenant-side command that derives a Gateway Grant from a lease's root
+secret and seals a Gateway Handover to a Workload Gateway's connector. It
+holds no Nostr key and publishes nothing, and `tests/gateway_handover.rs`
+runs it — `node tools/grant/seal.mjs handover … --dry-run` — against this
+app, so `cargo test` needs Node on `PATH`. That test is the proof that the
+derivation here and the derivation there are one derivation.
+
+### Milestone 1 acceptance test
 
 **`make smoke-m1` in `infra/sandbox` is Milestone 1's acceptance test**
 (TOON_Network #1, "Testing Decisions → Acceptance"; spec Appendix A). It runs
@@ -1202,7 +1283,7 @@ ticket-level smokes — `make smoke-provider`, `make smoke-directory`,
 provider (terminate, eviction), and can be run back to back with
 `make smoke-m1` in any order.
 
-## Wire fixtures for tenant implementations
+### Wire fixtures for tenant implementations
 
 `tests/wire_fixtures.rs` generates golden files under `tests/fixtures/wire/`
 from the real HTTP surface and the real event builders: a signed Lease
@@ -1234,36 +1315,14 @@ make fixtures-check                            # verify without touching them (w
 The spec repository's copy and its README (`docs/spec/fixtures/README.md`
 there) are what tenant implementations test against; keep them in sync with
 the same change that alters the wire. **That sync is the only drift guard
-between the two repositories:** TOON_Network is private, so this repository's
-CI has no token that reaches it and there is no job that diffs
-`tests/fixtures/wire` against the spec's copy. A wire change therefore lands
-in two pull requests — this one with the regenerated fixtures (CI verifies
-them byte-for-byte), and a TOON_Network one carrying the synced copy (its CI
-runs `check.mjs` over it) — and the reviewer confirms
+between the two repositories:** no CI job here diffs `tests/fixtures/wire`
+against the spec's copy. TOON_Network is public, so such a job would need no
+token, but none has been written. A wire change therefore lands in two pull
+requests — this one with the regenerated fixtures (CI verifies them
+byte-for-byte), and a TOON_Network one carrying the synced copy (its CI runs
+`check.mjs` over it) — and the reviewer confirms
 `diff -r tests/fixtures/wire <TOON_Network>/docs/spec/fixtures/wire` is
-empty. If TOON_Network becomes public or a read token is provisioned, add a
-CI job here that clones it and runs that diff.
-
-## Build, test and run
-
-```sh
-cargo build
-cargo test                 # no Docker daemon needed; Node on PATH (see below)
-cargo test -- --ignored    # the Docker backend and a registry-entry spawn against a real daemon,
-                           # and the anon control port against a real one (see Hidden Provider)
-cargo clippy --all-targets
-cargo run -- --config provider.toml
-```
-
-Two Node tools live beside the app under `tools/`, each with its own
-`npm install` and `npm test`: the [directory publisher](tools/publisher/README.md),
-the provider's payer for relay writes, and the [handover tool](tools/grant/README.md),
-the tenant-side command that derives a Gateway Grant from a lease's root
-secret and seals a Gateway Handover to a Workload Gateway's connector. It
-holds no Nostr key and publishes nothing, and `tests/gateway_handover.rs`
-runs it — `node tools/grant/seal.mjs handover … --dry-run` — against this
-app, so `cargo test` needs Node on `PATH`. That test is the proof that the
-derivation here and the derivation there are one derivation.
+empty.
 
 ## License
 
