@@ -377,9 +377,15 @@ asked" rather than dialled.
 
 - the latest Liveness expires within **two cadences**, or already has;
 - a relay **refused the latest write** of the Profile, a Listing or the
-  Liveness, or was never offered one. The first cadence after a restart, and
-  the retry that ends it, are exempt: a restarted box has been seen to report
-  `not attempted: dns error` for a few seconds and heal on the next cadence;
+  Liveness, or the write was **not sent** at all (the directory publisher was
+  not reachable), or nothing was ever offered to that relay. The first
+  cadence after a restart, and the retry that ends it, are exempt: on every
+  apply `provider` and `directory-publisher` are recreated together, and the
+  startup publish's own short backoff (`publish_directory_at_startup`,
+  `src/provider/publish.rs`) usually catches the publisher within a few
+  seconds of `dns error: failed to lookup address information` rather than
+  waiting a whole cadence for the regular retry to come around
+  (TOON_Network#178);
 - the publisher's channel is **drained**, or its runway is under
   `--min-runway` (default `7d`; a runway the publisher cannot estimate yet is
   a warning, not a failure);

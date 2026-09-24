@@ -18,18 +18,21 @@
           "listings": {
             "basic": {
               "expires_at": null,
+              "kind": null,
               "last_accepted_at": 1700000000,
               "last_attempt_at": 1700000000,
               "refusal": null
             },
             "gpu": {
               "expires_at": null,
+              "kind": null,
               "last_accepted_at": 1700000000,
               "last_attempt_at": 1700000000,
               "refusal": null
             },
             "warm": {
               "expires_at": null,
+              "kind": null,
               "last_accepted_at": 1700000000,
               "last_attempt_at": 1700000000,
               "refusal": null
@@ -37,12 +40,14 @@
           },
           "liveness": {
             "expires_at": 1700000300,
+            "kind": "refused",
             "last_accepted_at": 1700000000,
             "last_attempt_at": 1700000060,
             "refusal": "relay refused"
           },
           "profile": {
             "expires_at": null,
+            "kind": null,
             "last_accepted_at": 1700000000,
             "last_attempt_at": 1700000000,
             "refusal": null
@@ -52,18 +57,21 @@
           "listings": {
             "basic": {
               "expires_at": null,
+              "kind": null,
               "last_accepted_at": 1700000000,
               "last_attempt_at": 1700000000,
               "refusal": null
             },
             "gpu": {
               "expires_at": null,
+              "kind": null,
               "last_accepted_at": 1700000000,
               "last_attempt_at": 1700000000,
               "refusal": null
             },
             "warm": {
               "expires_at": null,
+              "kind": null,
               "last_accepted_at": 1700000000,
               "last_attempt_at": 1700000000,
               "refusal": null
@@ -71,12 +79,14 @@
           },
           "liveness": {
             "expires_at": 1700000360,
+            "kind": null,
             "last_accepted_at": 1700000060,
             "last_attempt_at": 1700000060,
             "refusal": null
           },
           "profile": {
             "expires_at": null,
+            "kind": null,
             "last_accepted_at": 1700000000,
             "last_attempt_at": 1700000000,
             "refusal": null

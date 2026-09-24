@@ -399,7 +399,7 @@ async fn each_relay_says_what_it_took_and_what_it_refused() {
 
     let status = operator_status(&h).await;
     let relays = &status["directory"]["relays"];
-    let took = |at: u64| json!({ "last_accepted_at": at, "last_attempt_at": at, "refusal": null, "expires_at": null });
+    let took = |at: u64| json!({ "last_accepted_at": at, "last_attempt_at": at, "refusal": null, "kind": null, "expires_at": null });
     assert_eq!(relays[RELAY_ONE]["profile"], took(NOW));
     assert_eq!(relays[RELAY_TWO]["listings"]["basic"], took(NOW));
     let cadence = 60;
@@ -410,16 +410,19 @@ async fn each_relay_says_what_it_took_and_what_it_refused() {
             "last_accepted_at": NOW + 60,
             "last_attempt_at": NOW + 60,
             "refusal": null,
+            "kind": null,
             "expires_at": expiry(NOW + 60),
         })
     );
-    // Relay two refused the latest, and still serves the one before.
+    // Relay two refused the latest, and still serves the one before. A
+    // relay's own "no" is `kind: "refused"` (TOON_Network#178).
     assert_eq!(
         relays[RELAY_TWO]["liveness"],
         json!({
             "last_accepted_at": NOW,
             "last_attempt_at": NOW + 60,
             "refusal": "relay refused",
+            "kind": "refused",
             "expires_at": expiry(NOW),
         })
     );
@@ -445,6 +448,9 @@ async fn a_publisher_that_is_down_is_a_refusal_on_every_relay() {
                 "last_accepted_at": null,
                 "last_attempt_at": NOW,
                 "refusal": "not attempted: the directory publisher could not be reached",
+                // Never reached a relay to be refused — NOT SENT, not
+                // REFUSED (TOON_Network#178).
+                "kind": "not_sent",
                 "expires_at": null,
             })
         );

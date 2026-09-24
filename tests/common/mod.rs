@@ -477,6 +477,13 @@ pub struct FakeDirectory {
     /// When set, the next publish fails with this message — a relay that is
     /// down, or a paid packet that was refused.
     fail_next_publish: Mutex<Option<String>>,
+    /// When set, every publish fails with "the directory publisher is not
+    /// reachable yet" until this REAL wall-clock instant, then publishes
+    /// normally. For a publisher that comes up a few real seconds after the
+    /// provider does (`fail_publish_for`, TOON_Network#178): the startup
+    /// retry sleeps in real time (`tokio::time::sleep`), not on the fake
+    /// `Clock` every other delay in these tests is measured on.
+    fail_publish_until: Mutex<Option<std::time::Instant>>,
     /// When set, every publish is recorded but reports this relay as having
     /// refused — a Relay Set reached only in part.
     relay_always_refuses: Mutex<Option<String>>,
@@ -562,6 +569,14 @@ impl FakeDirectory {
 
     pub fn fail_next_publish(&self, why: &str) {
         *self.fail_next_publish.lock().unwrap() = Some(why.to_string());
+    }
+
+    /// Every publish fails as "not attempted" until `dur` of REAL wall-clock
+    /// time has passed since this call, then publishes normally — a
+    /// directory publisher recreated alongside the provider that is not
+    /// reachable for a few seconds (TOON_Network#178).
+    pub fn fail_publish_for(&self, dur: std::time::Duration) {
+        *self.fail_publish_until.lock().unwrap() = Some(std::time::Instant::now() + dur);
     }
 
     /// One relay of the Relay Set refuses every write from now on, while the
@@ -667,6 +682,11 @@ impl FakeDirectory {
     fn record_publication(&self, event: nostr_sdk::Event) -> Result<PublishReport> {
         if let Some(why) = self.fail_next_publish.lock().unwrap().take() {
             anyhow::bail!("{}", why);
+        }
+        if let Some(until) = *self.fail_publish_until.lock().unwrap() {
+            if std::time::Instant::now() < until {
+                anyhow::bail!("the directory publisher is not reachable yet");
+            }
         }
         let kind = event.kind.as_u16();
         self.published.lock().unwrap().push(event);

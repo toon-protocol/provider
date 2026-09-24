@@ -146,6 +146,27 @@ impl DirectoryEntry {
     }
 }
 
+/// Whether a `RelayOutcome::refusal` is a relay's own "no" or a write that
+/// never reached a relay to be refused at all (TOON_Network#178). The status
+/// document's human output uses this to print `REFUSED` only for the first —
+/// a relay saying no — and `NOT SENT` for the second, since a write the
+/// publisher never managed to make was never offered to anyone to refuse.
+///
+/// Additive to the operator status document: it sits beside `refusal`
+/// rather than changing its shape, so the document stays at
+/// `OPERATOR_STATUS_VERSION` 1 and a reader that only looks at `refusal`'s
+/// text keeps working unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalKind {
+    /// A relay of the Relay Set said no to the write.
+    Refused,
+    /// The write never reached a relay at all: the directory publisher could
+    /// not be reached, or its answer could not be read (`PublicationLog`'s
+    /// `Err` case — "not attempted").
+    NotSent,
+}
+
 /// What one relay last said to one of this provider's directory events.
 ///
 /// Keeps the last ACCEPTED instant across a later refusal: "took it an hour
@@ -160,6 +181,11 @@ pub struct RelayOutcome {
     pub last_attempt_at: u64,
     /// Why the latest publication did not land here; `None` when it did.
     pub refusal: Option<String>,
+    /// Which KIND `refusal` is; `None` exactly when `refusal` is `None`.
+    /// `#[serde(default)]` so a `RelayOutcome` from before this field
+    /// deserializes as `None` rather than failing.
+    #[serde(default)]
+    pub kind: Option<RefusalKind>,
     /// The `expiration` of the publication this relay last took, for an
     /// event that carries one (Liveness, spec §4.3). What this relay serves
     /// until then, whatever it has refused since.
@@ -205,7 +231,7 @@ impl PublicationLog {
         relay_set: &[String],
         now: u64,
     ) {
-        let mut outcomes: Vec<(String, Option<String>)> = Vec::new();
+        let mut outcomes: Vec<(String, Option<(String, RefusalKind)>)> = Vec::new();
         match published {
             Ok(report) => {
                 outcomes.extend(report.accepted.iter().map(|r| (r.clone(), None)));
@@ -213,12 +239,19 @@ impl PublicationLog {
                     report
                         .failed
                         .iter()
-                        .map(|(r, why)| (r.clone(), Some(why.clone()))),
+                        .map(|(r, why)| (r.clone(), Some((why.clone(), RefusalKind::Refused)))),
                 );
             }
             Err(e) => {
+                // The write never reached a relay at all — not a relay's
+                // refusal, so every relay of the Relay Set gets the SAME
+                // outcome, `NotSent` (TOON_Network#178).
                 let why = format!("not attempted: {e:#}");
-                outcomes.extend(relay_set.iter().map(|r| (r.clone(), Some(why.clone()))));
+                outcomes.extend(
+                    relay_set
+                        .iter()
+                        .map(|r| (r.clone(), Some((why.clone(), RefusalKind::NotSent)))),
+                );
             }
         }
 
@@ -231,11 +264,18 @@ impl PublicationLog {
                 DirectoryEntry::Liveness => entries.liveness.get_or_insert_with(Default::default),
             };
             slot.last_attempt_at = now;
-            if refusal.is_none() {
-                slot.last_accepted_at = Some(now);
-                slot.expires_at = expires_at;
+            match refusal {
+                None => {
+                    slot.last_accepted_at = Some(now);
+                    slot.expires_at = expires_at;
+                    slot.refusal = None;
+                    slot.kind = None;
+                }
+                Some((why, kind)) => {
+                    slot.refusal = Some(why);
+                    slot.kind = Some(kind);
+                }
             }
-            slot.refusal = refusal;
         }
     }
 
