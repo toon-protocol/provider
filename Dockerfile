@@ -30,6 +30,9 @@ COPY --from=builder /app/target/release/toon-provider /usr/local/bin/toon-provid
 
 WORKDIR /var/lib/toon-provider
 ENV RUST_LOG=info
+# So `docker exec … toon-provider <command>` (`status`, `topup`, `evict`) finds
+# the config the compose service mounts without `--config`.
+ENV TOON_PROVIDER_CONFIG=/etc/toon-provider/provider.toml
 
 # The provider's own TOON connector is the only thing that should reach this.
 EXPOSE 8080
