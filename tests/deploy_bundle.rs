@@ -33,7 +33,10 @@
 //!   * the firewall opens exactly the workload ports the config hands out,
 //!     because a mismatch is a workload nobody can reach on a lease that was
 //!     still paid for;
-//!   * the connector pin, in exactly one place.
+//!   * the connector pin, in exactly one place;
+//!   * a HIDDEN=1 render (TOON_Network#159) passes the same loader, whose
+//!     hiding gate refuses any missing condition, publishes no host, and
+//!     names the same addresses as the anon daemon and the compose overlay.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -1083,5 +1086,505 @@ fn the_publisher_pays_over_a_carriage_the_relay_will_accept() {
     assert!(
         set.is_empty(),
         "docker-compose.yml sets something `auto` cannot carry: {set:?}"
+    );
+}
+
+// ── A Hidden Provider from the same bundle (TOON_Network#159) ───────────────
+//
+// HIDDEN=1 renders a provider that publishes no host and is reached only at
+// `.anyone` addresses. The config loader already refuses every missing hiding
+// condition by name (spec §10, ADR 0008), so the strongest check here is the
+// same one the public render gets: the REAL render.sh, then the REAL loader.
+// If the render left any condition out, `load_rendered` fails naming it.
+
+/// This box's `.anyone` address, the shape `anon` v0.4.10.2 writes: 56
+/// characters of base32, then the TLD. bootstrap.sh copies the real one into
+/// .env; this one resolves nowhere.
+const HIDDEN_ADDRESS: &str = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.anyone";
+
+/// The operator's own settlement nodes, on a private network the connector's
+/// container routes to.
+const HIDDEN_EVM_RPC: &str = "http://10.8.0.1:8545";
+const HIDDEN_SOLANA_RPC: &str = "http://10.8.0.1:8899";
+
+/// Another operator, hidden: `acme_env` plus the switch, the overlay, the
+/// address bootstrap.sh would have written and the two self-hosted RPCs.
+/// PUBLIC_IP and DOMAIN are still set (fixture_env carries them), which is
+/// the point: a hidden render must not publish them even when .env has them.
+fn hidden_env() -> BTreeMap<&'static str, &'static str> {
+    let mut env = acme_env();
+    env.insert("HIDDEN", "1");
+    env.insert(
+        "COMPOSE_FILE",
+        "docker-compose.yml:docker-compose.hidden.yml",
+    );
+    env.insert("HIDDEN_ADDRESS", HIDDEN_ADDRESS);
+    env.insert("HIDDEN_SETTLEMENT_EVM_RPC_URL", HIDDEN_EVM_RPC);
+    env.insert("HIDDEN_SETTLEMENT_SOLANA_RPC_URL", HIDDEN_SOLANA_RPC);
+    env
+}
+
+fn hidden_render() -> &'static (String, String) {
+    static RENDERED: OnceLock<(String, String)> = OnceLock::new();
+    RENDERED.get_or_init(|| {
+        let render = run_render(&hidden_env(), Some(ACME_LISTINGS), None, &[]);
+        assert!(
+            render.ok,
+            "render.sh refused a hidden box:\n{}",
+            render.stderr
+        );
+        assert!(
+            !render.wrote("nginx/conf.d/node.conf"),
+            "a hidden box has no nginx, and render.sh wrote it a config"
+        );
+        (render.read("provider.toml"), render.read("connector.toml"))
+    })
+}
+
+/// The `[anon]` value of what the loader made of the hidden render.
+fn hidden_config() -> (ProviderConfig, tempfile::TempDir) {
+    load_rendered(&hidden_render().0)
+}
+
+#[test]
+fn a_hidden_render_passes_the_real_loader_and_publishes_no_host() {
+    let (provider, connector) = hidden_render();
+    let (config, _dir) = hidden_config();
+
+    assert!(
+        config.hidden,
+        "HIDDEN=1 rendered a provider that is not hidden"
+    );
+    assert_eq!(
+        config.public_ip, None,
+        "a Hidden Provider published an address"
+    );
+    assert_eq!(
+        config.connector_url,
+        format!("http://{HIDDEN_ADDRESS}/ilp"),
+        "the Profile does not name the connector at this box's .anyone address"
+    );
+
+    // What .env still carries for a public box never reaches a hidden one's
+    // settings: not the key, not the address, not the domain.
+    let set = settings(provider);
+    for leaked in ["public_ip", "203.0.113.7", "proxy.provider", "acme.example"] {
+        assert!(
+            !set.contains(leaked),
+            "the hidden provider.toml carries {leaked} outside a comment"
+        );
+    }
+    // Both kinds of block marker are consumed, whichever was kept.
+    for text in [provider, &devnet_render().0] {
+        assert!(
+            !text.contains("-only:begin") && !text.contains("-only:end"),
+            "a rendered provider.toml still carries a block marker"
+        );
+    }
+
+    // Every hiding condition, as rendered. Literals, not read back out of the
+    // template: a changed address fails here, and the consistency test below
+    // says which other file it has to change in too.
+    let anon = &config.anon;
+    assert_eq!(
+        anon.socks_proxy.as_deref(),
+        Some("socks5h://172.30.2.2:9050")
+    );
+    assert_eq!(anon.settlement_rpc_url.as_deref(), Some(HIDDEN_SOLANA_RPC));
+    assert_eq!(anon.forward_host, "172.30.2.1");
+    let control = anon.control.as_ref().expect("[anon.control]");
+    assert_eq!(control.addr, "172.30.2.2:9051");
+    assert_eq!(
+        control.cookie_file.as_deref(),
+        Some("/var/lib/anon/control/control_auth_cookie")
+    );
+    assert_eq!(control.password, None);
+    let egress = anon.egress.as_ref().expect("[anon.egress]");
+    assert_eq!(egress.network, "toon-provider-hidden-egress");
+    assert_eq!(egress.gateway, "10.204.0.2");
+
+    // The routes are generated for a hidden provider exactly as for a public
+    // one: the hiding is in who can reach the connector, not in what it sells.
+    assert_eq!(
+        route_rows(connector),
+        route_rows(&render_routes(&config, &[]))
+    );
+}
+
+#[test]
+fn a_hidden_render_is_what_satisfies_each_hiding_condition() {
+    // The loader refuses a hidden provider that lacks any one condition, by
+    // name. Take each one the render wrote back out again: if the loader
+    // still accepted the file, the render would not be what met it.
+    let provider = &hidden_render().0;
+    let without = |needle: &str, lines: usize| -> String {
+        let all: Vec<&str> = provider.lines().collect();
+        let at = all
+            .iter()
+            .position(|l| l.starts_with(needle))
+            .unwrap_or_else(|| panic!("the hidden render has no line starting {needle:?}"));
+        let mut kept = all.clone();
+        kept.drain(at..at + lines);
+        kept.join("\n")
+    };
+    let refused = |text: &str, names: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider.toml");
+        fs::write(&path, text).unwrap();
+        let err = load_config(path.to_str().unwrap())
+            .err()
+            .unwrap_or_else(|| panic!("the loader accepted a hidden provider without {names}"));
+        assert!(
+            format!("{err:#}").contains(names),
+            "refused, but not by naming {names}: {err:#}"
+        );
+    };
+
+    refused(&without("socks_proxy = ", 1), "anon.socks_proxy");
+    refused(
+        &without("settlement_rpc_url = ", 1),
+        "anon.settlement_rpc_url",
+    );
+    refused(&without("[anon.control]", 3), "[anon.control]");
+    refused(&without("[anon.egress]", 3), "[anon.egress]");
+    refused(
+        &provider.replace(
+            &format!("connector_url = \"http://{HIDDEN_ADDRESS}/ilp\""),
+            "connector_url = \"https://proxy.provider.acme.example/ilp\"",
+        ),
+        "connector_url",
+    );
+    refused(
+        &format!("public_ip = \"203.0.113.7\"\n{provider}"),
+        "public_ip",
+    );
+}
+
+#[test]
+fn a_hidden_connector_publishes_the_circuit_and_settles_on_the_operators_own_nodes() {
+    let connector = &hidden_render().1;
+    let value: toml::Value = toml::from_str(connector).expect("connector.toml parses");
+
+    // A client dials what a node PUBLISHES, so the endpoints are the circuit,
+    // on the plaintext schemes an `.anyone` host takes (connector ADR 0070).
+    assert_eq!(
+        value["node"]["http_endpoint"].as_str().unwrap(),
+        format!("http://{HIDDEN_ADDRESS}/ilp")
+    );
+    assert_eq!(
+        value["node"]["btp_endpoint"].as_str().unwrap(),
+        format!("ws://{HIDDEN_ADDRESS}/ilp/btp")
+    );
+    assert_eq!(
+        value["node"]["addresses"].as_array().unwrap(),
+        &vec![toml::Value::from("g.acme.provider")]
+    );
+
+    // The connector dials its settlement RPCs DIRECTLY — its socks_proxy
+    // covers the ILP wire to `.anyone` peers only (ADR 0070 decision 4) — so
+    // both are the operator's own, and the preset's public ones are gone.
+    assert_eq!(
+        value["settlement"]["evm"]["rpc_url"].as_str().unwrap(),
+        HIDDEN_EVM_RPC
+    );
+    assert_eq!(
+        value["settlement"]["solana"]["rpc_url"].as_str().unwrap(),
+        HIDDEN_SOLANA_RPC
+    );
+    let set = settings(connector);
+    for public in [
+        "publicnode.com",
+        "api.devnet.solana.com",
+        "proxy.provider",
+        "https://",
+        "wss://",
+    ] {
+        assert!(
+            !set.contains(public),
+            "the hidden connector.toml carries {public} outside a comment"
+        );
+    }
+    // The rest of the preset is untouched: the same chains, the same tokens.
+    assert_eq!(
+        value["settlement"]["evm"]["token_address"]
+            .as_str()
+            .unwrap(),
+        "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+    );
+    assert_eq!(
+        value["settlement"]["solana"]["program_id"]
+            .as_str()
+            .unwrap(),
+        "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+    );
+
+    // bootstrap.sh's first render: the connector's config must be the one
+    // the full render writes, or the full render restarts it.
+    let mut env = hidden_env();
+    env.remove("CONNECTOR_SEAL_KEY");
+    let render = run_render(&env, Some(ACME_LISTINGS), None, &["--connector-only"]);
+    assert!(render.ok, "{}", render.stderr);
+    assert!(!render.wrote("provider.toml"));
+    assert_eq!(&render.read("connector.toml"), connector);
+}
+
+#[test]
+fn a_public_render_carries_nothing_of_the_hidden_one() {
+    let (provider, connector) = devnet_render();
+    let set = settings(provider);
+    for hidden in ["[anon", "hidden = true", "172.30.2", "10.204.0"] {
+        assert!(
+            !set.contains(hidden),
+            "the public provider.toml carries {hidden} outside a comment"
+        );
+    }
+    assert!(!settings(connector).contains(".anyone"));
+}
+
+#[test]
+fn a_hidden_render_refuses_what_it_cannot_hide() {
+    // Each is refused before anything is written, naming what is wrong.
+    let refused = |env: BTreeMap<&str, &str>, says: &str| {
+        let render = run_render(&env, Some(ACME_LISTINGS), None, &[]);
+        assert!(
+            !render.ok,
+            "render.sh rendered a hidden box it should refuse ({says})"
+        );
+        assert!(
+            render.stderr.contains(says),
+            "refused, but without saying {says}:\n{}",
+            render.stderr
+        );
+        assert!(
+            !render.wrote("provider.toml") && !render.wrote("connector.toml"),
+            "a refused render still wrote a config"
+        );
+    };
+
+    // No address yet: it is a copy of what the daemon generated, never
+    // invented here.
+    let mut env = hidden_env();
+    env.remove("HIDDEN_ADDRESS");
+    refused(env, "HIDDEN_ADDRESS");
+    // An address of the old release, whose TLD no TOON client accepts.
+    let mut env = hidden_env();
+    env.insert(
+        "HIDDEN_ADDRESS",
+        "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion",
+    );
+    refused(env, "not an anon address");
+
+    // No self-hosted RPC, for either chain: the connector would dial the
+    // preset's public ones from this box's address.
+    for missing in [
+        "HIDDEN_SETTLEMENT_EVM_RPC_URL",
+        "HIDDEN_SETTLEMENT_SOLANA_RPC_URL",
+    ] {
+        let mut env = hidden_env();
+        env.remove(missing);
+        refused(env, missing);
+    }
+    // A PUBLIC RPC, for either chain, refused by the provider's own rule in
+    // the real loader, not by a copy of it in shell. IP literals, so the
+    // verdict does not depend on this machine's resolver.
+    let mut env = hidden_env();
+    env.insert("HIDDEN_SETTLEMENT_SOLANA_RPC_URL", "http://8.8.8.8:8899");
+    refused(env, "public address");
+    let mut env = hidden_env();
+    env.insert("HIDDEN_SETTLEMENT_EVM_RPC_URL", "http://8.8.8.8:8545");
+    refused(
+        env,
+        "HIDDEN_SETTLEMENT_EVM_RPC_URL=http://8.8.8.8:8545 was refused",
+    );
+    // Loopback passes the app's rule and reaches nothing from a container.
+    for loopback in [
+        "http://127.0.0.1:8899",
+        "http://localhost:8899",
+        "http://[::1]:8899",
+    ] {
+        let mut env = hidden_env();
+        env.insert("HIDDEN_SETTLEMENT_SOLANA_RPC_URL", loopback);
+        refused(env, "is loopback");
+    }
+
+    // The switch and the overlay disagree, either way round.
+    let mut env = hidden_env();
+    env.remove("COMPOSE_FILE");
+    refused(env, "docker-compose.hidden.yml");
+    let mut env = acme_env();
+    env.insert(
+        "COMPOSE_FILE",
+        "docker-compose.yml:docker-compose.hidden.yml",
+    );
+    refused(env, "HIDDEN is not 1");
+    let mut env = hidden_env();
+    env.insert("HIDDEN", "yes");
+    refused(env, "HIDDEN=yes");
+}
+
+/// The value after `key` on the first line of `text` that starts with it,
+/// leading whitespace ignored.
+fn line_value<'a>(text: &'a str, key: &str) -> &'a str {
+    text.lines()
+        .map(str::trim_start)
+        .find_map(|l| l.strip_prefix(key))
+        .unwrap_or_else(|| panic!("no line starting {key:?}"))
+        .trim()
+}
+
+#[test]
+fn the_daemon_the_overlay_and_the_config_name_the_same_addresses() {
+    // Three files spell every address of the hidden box — anon/anonrc binds
+    // it, docker-compose.hidden.yml pins it, provider.toml dials it — and
+    // none can read the others. A drift is a daemon listening where nobody
+    // dials, which fails at startup at best and at the first lease at worst.
+    let anonrc = deploy("anon/anonrc");
+    let overlay = deploy("docker-compose.hidden.yml");
+    let (config, _dir) = hidden_config();
+    let anon = &config.anon;
+    let control = anon.control.as_ref().unwrap();
+    let egress = anon.egress.as_ref().unwrap();
+
+    // SOCKS and control: bound on the daemon's pinned address on the hidden
+    // network, where the provider and the publisher dial them.
+    let socks = anon
+        .socks_proxy
+        .as_deref()
+        .unwrap()
+        .trim_start_matches("socks5h://");
+    assert_eq!(line_value(&anonrc, "SocksPort "), socks);
+    assert_eq!(line_value(&anonrc, "ControlPort "), control.addr);
+    let daemon_ip = control.addr.split(':').next().unwrap();
+    assert!(socks.starts_with(&format!("{daemon_ip}:")));
+    assert!(overlay.contains(&format!("ipv4_address: {daemon_ip}\n")));
+    assert!(
+        overlay.contains(&format!(
+            "TOON_SOCKS_PROXY: {}",
+            anon.socks_proxy.as_deref().unwrap()
+        )),
+        "the publisher does not dial out through the provider's own proxy"
+    );
+
+    // The cookie: written where the provider reads it, on the volume the
+    // provider mounts.
+    assert_eq!(
+        line_value(&anonrc, "CookieAuthFile "),
+        control.cookie_file.as_deref().unwrap()
+    );
+    assert!(overlay.contains("- anon_control:/var/lib/anon/control:ro"));
+    assert_eq!(line_value(&anonrc, "CookieAuthentication "), "1");
+
+    // The egress: an INTERNAL network Docker knows by the configured name,
+    // with the daemon at the gateway running the transparent proxy there.
+    assert!(overlay.contains(&format!("name: {}\n", egress.network)));
+    assert!(overlay.contains("internal: true"));
+    assert!(overlay.contains(&format!("ipv4_address: {}\n", egress.gateway)));
+    assert!(line_value(&anonrc, "TransPort ").starts_with(&format!("{}:", egress.gateway)));
+    assert!(line_value(&anonrc, "DNSPort ").starts_with(&format!("{}:", egress.gateway)));
+    assert!(overlay.contains("- subnet: 10.204.0.0/24"));
+    assert!(egress.gateway.starts_with("10.204.0."));
+    assert!(overlay.contains(
+        "nat -s 10.204.0.0/24 ! -d 10.204.0.0/24 -p tcp --syn -j REDIRECT --to-ports 9040"
+    ));
+    assert!(anonrc.contains("SocksPolicy accept 10.204.0.0/24"));
+
+    // The connector's address: the daemon's hidden service forwards port 80
+    // to the connector's pinned address and its client edge's port.
+    let connector: toml::Value = toml::from_str(&hidden_render().1).unwrap();
+    let edge_port = connector["client_edge_addr"]
+        .as_str()
+        .unwrap()
+        .rsplit(':')
+        .next()
+        .unwrap();
+    let target = line_value(&anonrc, "HiddenServicePort 80 ");
+    assert_eq!(target, format!("172.30.2.3:{edge_port}"));
+    assert!(overlay.contains("ipv4_address: 172.30.2.3\n"));
+
+    // A lease's address forwards to the host at the hidden network's
+    // gateway, which the overlay fixes rather than leaves to Docker.
+    assert!(overlay.contains(&format!("gateway: {}\n", anon.forward_host)));
+}
+
+#[test]
+fn the_hidden_overlay_publishes_nothing_and_switches_the_tls_edge_off() {
+    let overlay = deploy("docker-compose.hidden.yml");
+    assert_eq!(
+        published_ports(&overlay),
+        Vec::<String>::new(),
+        "docker-compose.hidden.yml publishes a port"
+    );
+    for service in ["nginx:", "certbot:"] {
+        let at = overlay
+            .find(&format!("\n  {service}\n"))
+            .unwrap_or_else(|| panic!("the overlay does not name {service}"));
+        assert!(
+            overlay[at..].trim_start()[service.len()..]
+                .trim_start()
+                .starts_with("profiles: ['public']"),
+            "the overlay leaves {service} running"
+        );
+    }
+    // The publisher: hidden, proxied, and on the one carriage that rides the
+    // proxy. `btp` or `auto` beside a proxy is a refusal to start.
+    assert!(overlay.contains("TOON_HIDDEN: 'true'"));
+    assert!(overlay.contains("TOON_TRANSPORT: http"));
+}
+
+#[test]
+fn the_hidden_firewall_closes_exactly_the_ports_the_config_hands_out() {
+    // The same ranges the public box opens in ufw, closed here: a hidden
+    // lease's ports are still published on the host, and a tenant reaching
+    // its own workload at this box's IP would have found the box.
+    let (config, _dir) = hidden_config();
+    let firewall = deploy("hidden-firewall.sh");
+    let bootstrap = deploy("bootstrap.sh");
+
+    let ids = config.workload_id_range_end - config.workload_id_range_start;
+    let ssh_start = config.ssh_port_start.expect("ssh_port_start is pinned");
+    let ssh = format!("{ssh_start}:{}", ssh_start as u32 + ids);
+    let start = config.workload_port_start as u32;
+    let ports = format!("{start}:{}", start + 16 * ids + 15);
+
+    assert!(firewall.contains(&format!("SSH_RANGE={ssh}\n")));
+    assert!(firewall.contains(&format!("PORT_RANGE={ports}\n")));
+    // And from inside, the daemon alone: it dials the lease at the hidden
+    // network's gateway, which arrives on INPUT, where ufw decides.
+    for range in [&ssh, &ports] {
+        let rule = format!("ufw allow proto tcp from 172.30.2.2 to any port {range}");
+        assert!(
+            bootstrap.contains(&rule),
+            "bootstrap.sh does not say `{rule}`"
+        );
+    }
+    assert_eq!(line_value(&firewall, "EGRESS_BRIDGE="), "toon-hegress");
+    assert!(deploy("docker-compose.hidden.yml")
+        .contains("com.docker.network.bridge.name: toon-hegress"));
+}
+
+#[test]
+fn the_hidden_images_are_pinned() {
+    // The anon image is BUILT on the box (no registry publishes the release a
+    // `.anyone` address needs), so what pins it is its Dockerfile: the base by
+    // digest, and the release binary by sha256, checked before it runs.
+    let dockerfile = deploy("anon/Dockerfile");
+    let from = line_value(&dockerfile, "FROM ");
+    assert!(
+        from.contains("@sha256:") && from.len() > from.find("@sha256:").unwrap() + 8 + 63,
+        "the anon image's base is not pinned by digest: {from}"
+    );
+    let sha = line_value(&dockerfile, "ARG ANON_SHA256=");
+    assert_eq!(sha.len(), 64, "ANON_SHA256 is not a sha256: {sha}");
+    assert!(dockerfile.contains("sha256sum -c -"));
+    assert!(dockerfile.contains("ARG ANON_VERSION=v0.4.10.2"));
+
+    // The sidecar every hidden lease runs is pre-pulled by exactly the pin the
+    // app runs, so the first lease does not pull it from this box's address.
+    assert!(
+        deploy("bootstrap.sh").contains(&format!(
+            "docker pull {}",
+            toon_provider::docker::HIDDEN_SIDECAR_IMAGE
+        )),
+        "bootstrap.sh does not pre-pull the app's pinned hidden-lease sidecar"
     );
 }

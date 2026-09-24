@@ -29,6 +29,9 @@ One host, five containers, and the workloads it sells.
 | `pull-images.sh` | Gets the pinned images onto the box: pulls them, or builds one from the checkout while its pin is still the `sha-0000000` placeholder. |
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
 | `auto-apply.sh` + the two units | The box half of GitOps: follow the branch, apply what merged. |
+| `docker-compose.hidden.yml` | The overlay a **hidden** box adds (`HIDDEN=1`): the anon daemon, its two pinned networks, and no nginx. § "Running hidden". |
+| `anon/Dockerfile`, `anon/anonrc` | The hidden box's anon daemon, built here from a digest-pinned base and a checksummed release, and its config. Committed, not rendered. |
+| `hidden-firewall.sh` + `toon-hidden-firewall.service` | A hidden box's DOCKER-USER rules: no lease port reachable from outside. |
 | `.env.example` | Every variable, with what it is and how to generate it, and the devnet's relay and settlement values as a preset. |
 
 The guard is `../tests/deploy_bundle.rs`, and it runs under the ordinary
@@ -464,6 +467,225 @@ answering for `g.toon.provider` would take payment for another box's routes.
 Only the fleet's own boxes set the flag.
 
 `../provider.example.toml` documents every configuration key there is,
-including the `[anon]` tables this box does not use — a **Hidden Provider**
-(spec §10, ADR 0008) publishes no host at all and is reached only at an
-`.anyone` address, which is a different deployment and not this one.
+including the `[anon]` tables a public box does not use. A **Hidden
+Provider** (spec §10, ADR 0008) publishes no host at all and is reached only
+at `.anyone` addresses; the same bundle stands one up with `HIDDEN=1`, next.
+
+## Running hidden
+
+A Hidden Provider's Profile says `hidden: true` and carries no `host`, every
+Listing it publishes is labelled `["l", "hidden:true", "toon.network"]`, and
+nothing of it is reachable except over Anyone: the connector at the box's own
+`.anyone` address, and each lease at an `.anyone` address of its own. The
+provider README's § "Hidden Provider" is the reference for what that means;
+this section is how the bundle does it, and what it costs.
+
+**Read the settlement RPC part before anything else.** It is the one
+requirement that decides whether hidden is for you.
+
+### What changes
+
+| | Public box | Hidden box (`HIDDEN=1`) |
+|---|---|---|
+| The connector is reached at | `https://proxy.provider.<DOMAIN>/ilp`, through nginx | `http://<HIDDEN_ADDRESS>/ilp`, through the anon daemon's hidden service |
+| A lease is reached at | `PUBLIC_IP:<port>` | its own `.anyone` address, made per lease over the daemon's control port |
+| A workload's own traffic | the host's network | an internal network whose only way out is the daemon's transparent proxy |
+| The provider's and publisher's outbound | direct | through the daemon's SOCKS port (`socks5h`) |
+| Settlement RPCs | the preset's public ones | **your own nodes**, on a private address |
+| DNS, nginx, Let's Encrypt | yes | none: `DOMAIN` and `PUBLIC_IP` are never rendered |
+| ufw | 22, 80, 443 and both workload ranges | 22, and the workload ranges from the daemon's address only |
+| Extra services | none | `anon` |
+
+It is one bundle, not two. `HIDDEN=1` in `.env` is the switch and
+`COMPOSE_FILE=docker-compose.yml:docker-compose.hidden.yml` beside it adds the
+overlay (docker compose reads that line itself, so every `docker compose`
+command in this directory, auto-apply's included, sees the hidden stack);
+`render.sh` refuses a `.env` where the two disagree. `provider.toml.template`
+carries both shapes, and `render.sh` keeps the `@hidden-only` blocks
+(`hidden = true` and the `[anon]` tables) and drops the `@public-only` one
+(`public_ip`). The listings, the routes, the keys and `auto-apply.sh` work the
+same way on both.
+
+### The settlement RPCs: you run them
+
+The connector reads chain state and submits transactions, on both chains, at
+boot and for every settlement. **It dials its settlement RPC directly.** Its
+`socks_proxy` key covers the ILP wire to `.anyone` peers and nothing else, by
+decision (connector ADR 0070, decision 4: "Settlement RPC and `handler_url`
+dial direct"), and this box has no peers. So a public RPC on a hidden box
+would see every query and every transaction of this box's settlement keys
+arrive from this box's real address, which undoes the hiding for anyone who
+can read that RPC's logs. This is also the provider's own rule:
+`anon.settlement_rpc_url` must be loopback, private, or a name resolving only
+to private addresses, and the app refuses to load otherwise.
+
+So `.env` names your own nodes, one per chain, and `render.sh` refuses to
+render without both:
+
+```bash
+HIDDEN_SETTLEMENT_EVM_RPC_URL=http://10.0.0.5:8545     # Base Sepolia
+HIDDEN_SETTLEMENT_SOLANA_RPC_URL=http://10.0.0.5:8899  # Solana devnet
+```
+
+They replace the preset's `SETTLEMENT_*_RPC_URL` in the connector's config;
+the rest of the preset (chain id, registry, program, tokens) is unchanged.
+`render.sh` puts **both** through the app's own rule, in the real loader, and
+refuses a public one before the connector reads a byte from it. It also
+refuses loopback: the connector is a container, and its `127.0.0.1` is
+itself. Use an address the container can route to: this host's address on a
+private network, or another machine of yours over a private link.
+
+**What that costs, as far as we can state it.** Neither figure below was
+measured for this bundle, and neither is specific to the devnets; they are the
+chains' own published requirements, read on 2026-09-24:
+
+- **Solana** (Anza, [validator requirements](https://docs.anza.xyz/operations/requirements)):
+  an RPC node wants 12 cores / 24 threads or more, **256 GB of RAM or more**,
+  and separate NVMe disks for accounts (1 TB or more), ledger (1 TB or more)
+  and account indexes (512 GB or more). That is for the chain Anza documents;
+  whether a devnet-only RPC can run smaller is unverified.
+- **Base Sepolia** (Base, [node README](https://github.com/base/node)): a
+  multi-core CPU, **32 GB of RAM (64 GB recommended)**, NVMe storage sized at
+  twice the chain plus a snapshot, **and an Ethereum L1 (Sepolia) RPC and
+  beacon endpoint** of your own (`BASE_NODE_L1_ETH_RPC`, `BASE_NODE_L1_BEACON`).
+  Whether that L1 node must itself be private is your threat model: it serves
+  the rollup node, not this box's settlement keys.
+
+That is heavy on purpose, and it is the honest price of the claim. Two things
+are **not** a way round it:
+
+- **A local forwarder to a public RPC through anon** (a private address that
+  relays to `api.devnet.solana.com` over a circuit) would pass the app's
+  check and hide the address, but it is a *proxied* settlement RPC, which is
+  not what spec §10 asks a Hidden Provider to run, and connector ADR 0070
+  deliberately leaves circuits out of settlement ("circuit latency interacts
+  with confirmation semantics and nonce handling on both backends"). Allowing
+  it is a spec decision, not a bundle setting, and this bundle does not ship
+  one.
+- **A private address that forwards in the clear to a public RPC** from
+  another machine of yours moves the linkage to that machine. It hides this
+  box only as well as that machine is unlinkable to you.
+
+### What the connector's own outbound is, on a hidden box
+
+Checked against the pinned connector (`rust-2026.09.11.1`), loading the config
+this bundle renders: it accepts the `http://`/`ws://` `.anyone` endpoints,
+and the first thing it dials is `[settlement.evm].rpc_url`, directly
+("failed to construct the configured settlement backend … tcp connect error"
+against an unreachable private RPC). Its other outbound is the provider app,
+on the compose network. There is no setting that sends the settlement RPC
+through anon (see above), which is why the bundle makes both RPCs yours
+rather than setting `socks_proxy`, which would change nothing here.
+
+### Known gap: directory writes on the devnet
+
+The directory publisher pays the relay over **HTTP** on a hidden box, and has
+to: its SOCKS carriage is its `fetch`, a BTP websocket never passes through
+it, and it refuses to start with a proxy beside `btp` or `auto`
+(tools/publisher/README.md). The devnet relay **pins `g.toon.relay` to BTP**
+and refuses an HTTP write. So on the devnet today, a hidden box runs, its
+connector is reachable and its leases work, but its Profile, Listings and
+Liveness are refused by the relay, and it does not appear in the directory.
+
+Two things close it, either one: the publisher carrying BTP through the proxy
+too (`@toon-protocol/client`'s hidden-service transport already has a
+`createWebSocket`; the publisher passes only `fetch`), or the relay unpinning
+its write route. Whether the pin still stands:
+
+```bash
+curl -s https://proxy.relay.devnet.toonprotocol.dev/ilp \
+  | jq '.routes[] | select(.prefix == "g.toon.relay")'
+```
+
+### Standing one up hidden
+
+As § "Standing one up", with these differences.
+
+1. **In `.env`**: `PROVIDER_NAME`, `ILP_ADDRESS` and the keys as usual; leave
+   `DOMAIN` and `PUBLIC_IP` empty (they are never rendered); and uncomment
+   the "Running hidden" block: `HIDDEN=1`, the `COMPOSE_FILE` line and your
+   two RPCs. No DNS records.
+2. **Bring the RPC nodes up first and let them sync.** The connector submits a
+   Solana transaction at boot through yours.
+3. **`./bootstrap.sh`.** Before the sealing-key handshake it builds the anon
+   image (`pull-images.sh anon`; there is no published image of the release
+   that writes `.anyone` addresses, and `anon/Dockerfile` pins what it builds
+   from), starts the daemon alone, reads the address it generated and appends
+   `HIDDEN_ADDRESS=<56 characters>.anyone` to `.env`: a copy of a fact, like
+   `CONNECTOR_SEAL_KEY`. It opens only SSH in ufw, pre-pulls the pinned
+   `alpine:3.20` sidecar every hidden lease runs, installs
+   `toon-hidden-firewall.service`, and skips Let's Encrypt.
+4. **Back up the `anon_data` volume with the key files.** It holds the
+   private key of `HIDDEN_ADDRESS`. Lose it and the address changes under
+   every tenant that read the old one; `bootstrap.sh` then refuses until you
+   restore the volume or delete the `HIDDEN_ADDRESS` line to move.
+
+The address answers only once the daemon has bootstrapped and published its
+descriptor (`docker compose logs anon | grep Bootstrapped`). From any machine
+with an anon client:
+
+```bash
+curl --socks5-hostname 127.0.0.1:9050 http://<HIDDEN_ADDRESS>/ilp/identity
+```
+
+### The host
+
+- **The lease ports.** A hidden lease's ports are still published on the host
+  (its ingress forwarder holds them, and the daemon forwards the lease's
+  address to them), and docker's rules run ahead of ufw. A tenant who found
+  its own workload answering at this box's IP would have found the box. So
+  `hidden-firewall.sh` drops, in DOCKER-USER, every connection to both ranges
+  forwarded in from outside, and ufw lets the daemon's pinned address, and
+  nothing else, reach them from inside. The unit re-applies it after every
+  boot and docker restart, which leave DOCKER-USER empty.
+- **`br_netfilter`.** With it loaded (`net.bridge.bridge-nf-call-iptables =
+  1`), Docker's isolation of the internal egress network drops every
+  transparently proxied packet; `hidden-firewall.sh` then accepts
+  bridge-to-bridge traffic on that network's bridge, `toon-hegress`. It
+  prints when it does.
+- **SSH stays on port 22 of the real address.** That is the operator's way
+  in, and it is not in anything a tenant is told. Moving it behind an anon
+  address of its own is possible and not done here.
+- **The two pinned networks**, `172.30.2.0/24` and `10.204.0.0/24`. A
+  collision shows up at `up` as "Pool overlaps"; moving one means changing
+  it in `docker-compose.hidden.yml`, `anon/anonrc` and
+  `provider.toml.template` together, and `tests/deploy_bundle.rs` checks the
+  three agree.
+- **amd64 only**, for now: `anon/Dockerfile` carries the amd64 release's
+  checksum.
+
+### Other limits, stated plainly
+
+- **Workloads on musl cannot resolve names.** The daemon's DNSPort answers an
+  `AAAA` query with NXDOMAIN, and musl's resolver (Alpine, BusyBox) takes
+  that as "no such name" for the `A` answer too. glibc images resolve and
+  connect normally. Connecting by IP works on both. Observed with this
+  bundle's daemon; fixing it is a provider or anon change, not a bundle one.
+- **The IP-to-chain linkage is public either way.** Hiding hides where the
+  box is, not that it was paid: every claim names an on-chain channel.
+
+### What has been run, and what has not
+
+Run locally against the real Anyone network, with this bundle's files: the
+anon image builds and reports `0.4.10.2`; the daemon bootstraps to 100%,
+installs its redirects and publishes an address; that address, dialled from a
+separate anon client, reaches `172.30.2.3:4000` (a stand-in for the
+connector); the SOCKS port carries a fetch of the devnet relay's `GET /ilp`
+from an exit address that is not the host's; a container on the egress
+network, routed at the daemon, reaches the internet by IP through the
+TransPort (and by name on glibc); the provider's own `ADD_ONION` test
+(`cargo test --test anon_control -- --ignored`) passes against the daemon's
+control port; an address added with `forward_host = 172.30.2.1` reaches a
+port published on the host; the provider starts hidden in this stack,
+authenticates to the control port and hands directory events to the
+publisher, which opens its channel through the proxy (and stops there,
+unfunded). The DOCKER-USER rule and the ufw allowance were checked in an
+isolated dind. The rendered `connector.toml` loads in the pinned connector.
+
+**Not run end to end:** a connector booted against real self-hosted RPCs, a
+paid spawn of a hidden lease, a tenant paying over the circuit, and
+`make smoke-m4`. The sandbox's `hs` profile (infra/sandbox), which this
+overlay is built from, is where that suite runs, against its own chains; the
+bundle differs from it in its addresses, in running one daemon rather than
+the sandbox's three, and in settling against the operator's RPCs rather than
+the sandbox's `anvil`.

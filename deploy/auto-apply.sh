@@ -124,7 +124,11 @@ PROVIDER_SUM_BEFORE=$(fingerprint_provider_inputs)
 CONNECTOR_SUM_AFTER=$(fingerprint_connector_inputs)
 PROVIDER_SUM_AFTER=$(fingerprint_provider_inputs)
 
-COMPOSE=(-f docker-compose.yml)
+# No `-f`: compose reads COMPOSE_FILE from .env, which is how a hidden box
+# (HIDDEN=1) adds docker-compose.hidden.yml, and with no COMPOSE_FILE it is
+# docker-compose.yml alone, exactly as before. An explicit `-f` here would
+# silently apply the public stack to a hidden box.
+COMPOSE=()
 
 # Captured before `up -d` so a recreation is distinguishable: a recreated
 # container already booted on the just-rendered files and must not be bounced a
@@ -259,7 +263,9 @@ fi
 # change either. It is never restarted -- restarting the TLS front is what the
 # other bundles go out of their way to avoid -- so tell it to reload instead,
 # which re-reads conf.d and the certificate without dropping a connection.
-if ! cmp -s nginx/conf.d/node.conf nginx/conf.d/.node.conf.applied 2>/dev/null; then
+# A hidden box has no nginx and render.sh writes it no config, so there is
+# nothing to reload.
+if [ -f nginx/conf.d/node.conf ] && ! cmp -s nginx/conf.d/node.conf nginx/conf.d/.node.conf.applied 2>/dev/null; then
   docker compose "${COMPOSE[@]}" exec -T nginx nginx -s reload \
     && cp nginx/conf.d/node.conf nginx/conf.d/.node.conf.applied \
     || echo "::warning:: nginx would not reload; check its logs."

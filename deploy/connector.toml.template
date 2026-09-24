@@ -95,6 +95,14 @@ key_file = "/app/data/signer.key"
 # publishes. .env.example ships the TOON devnet's as a preset (Base Sepolia and
 # Solana devnet mock USDC); read them back from any devnet node's `GET /ilp`
 # rather than trusting a second copy of them.
+#
+# ON A HIDDEN BOX THE TWO rpc_url LINES ARE THE OPERATOR'S OWN NODES:
+# render.sh puts HIDDEN_SETTLEMENT_EVM_RPC_URL and
+# HIDDEN_SETTLEMENT_SOLANA_RPC_URL here in place of the preset's public ones,
+# and refuses to render without them. This connector dials its settlement RPC
+# DIRECTLY: its `socks_proxy` key covers the ILP wire to `.anyone` peers and
+# nothing else (connector ADR 0070 decision 4), so a public RPC here would be
+# read, and transacted on, from this box's real address.
 
 [settlement.evm]
 rpc_url          = "${SETTLEMENT_EVM_RPC_URL}"
@@ -145,7 +153,14 @@ write_keys_file   = "/app/data/operator-write.keys"
 # on. A tenant reads these back from `GET /ilp` to discover the node, and
 # `auto-apply.sh` compares them against what the running process actually
 # serves on every apply.
+#
+# render.sh writes the two endpoints: `https://` and `wss://` on
+# proxy.provider.<DOMAIN> on a public box, and `http://` and `ws://` on the
+# box's `.anyone` address on a hidden one (HIDDEN=1). A client dials what a
+# node PUBLISHES, so on a hidden box the endpoint has to be the circuit; the
+# plaintext schemes are what an `.anyone` host takes (connector ADR 0070),
+# because the address is itself the key it is reached by.
 [node]
 addresses     = ["${ILP_ADDRESS}"]
-http_endpoint = "https://proxy.provider.${DOMAIN}/ilp"
-btp_endpoint  = "wss://proxy.provider.${DOMAIN}/ilp/btp"
+http_endpoint = "${NODE_HTTP_ENDPOINT}"
+btp_endpoint  = "${NODE_BTP_ENDPOINT}"
