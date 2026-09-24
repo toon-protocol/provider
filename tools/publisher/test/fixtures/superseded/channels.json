@@ -1,0 +1,12 @@
+{
+  "chan-old": {
+    "nonce": 5,
+    "cumulativeAmount": "900000"
+  },
+  "chan-new": {
+    "nonce": 3,
+    "cumulativeAmount": "200000",
+    "signedCeiling": "250000",
+    "watermarkUncertain": true
+  }
+}

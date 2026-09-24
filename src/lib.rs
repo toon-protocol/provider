@@ -18,6 +18,7 @@ pub mod outbound_proxy;
 pub mod provider;
 pub mod provider_http;
 pub mod reputation;
+pub mod topup;
 
 pub use anon_control::AnonControlService;
 pub use clock::{system_clock, Clock, SystemClock};

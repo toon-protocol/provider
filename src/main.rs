@@ -4,6 +4,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use toon_provider::nostr::wire::{EvictRequest, EvictionReason};
+use toon_provider::topup::{confirmed, publisher_origin, validate_amount};
 use toon_provider::{load_config, persisted_leases, render_routes, ProviderService};
 
 #[derive(Parser)]
@@ -48,6 +49,24 @@ enum Command {
         /// A human-readable explanation, published in the Eviction Notice.
         #[arg(long)]
         message: Option<String>,
+    },
+
+    /// Add collateral to the directory publisher's payment channel.
+    ///
+    /// This talks to the RUNNING publisher sidecar (`tools/publisher`), on
+    /// the same origin `publish_url` already names — `/topup` beside
+    /// `/publish` — never to the provider app's own `operator_url`: the
+    /// publisher holds the channel, and the provider app holds no money.
+    /// Run it from inside the provider container, or
+    /// `docker compose exec provider toon-provider topup …`, the same way
+    /// `evict` is run.
+    Topup {
+        /// Amount to add, in the token's smallest unit (e.g. `5000000` = 5
+        /// mock USDC at 6dp).
+        amount: String,
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -143,6 +162,48 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&body)?);
             if !status.is_success() {
                 anyhow::bail!("eviction refused: {}", status);
+            }
+            Ok(())
+        }
+        Some(Command::Topup { amount, yes }) => {
+            validate_amount(&amount)?;
+            let publish_url = config.publish_url.as_deref().with_context(|| {
+                "no publish_url is configured; this provider has no directory publisher to top up"
+            })?;
+            let origin = publisher_origin(publish_url)?;
+            if !confirmed(yes, &amount, |question| {
+                eprint!("{question}");
+                use std::io::Write;
+                std::io::stderr().flush().ok();
+                let mut line = String::new();
+                std::io::stdin()
+                    .read_line(&mut line)
+                    .context("reading the confirmation from stdin")?;
+                Ok(line)
+            })? {
+                println!("Not confirmed; nothing was topped up.");
+                return Ok(());
+            }
+            let url = format!("{}/topup", origin.trim_end_matches('/'));
+            let response = reqwest::Client::new()
+                .post(&url)
+                .json(&serde_json::json!({ "amount": amount }))
+                .send()
+                .await
+                .with_context(|| {
+                    format!(
+                        "reaching the publisher at {} — is directory-publisher running?",
+                        url
+                    )
+                })?;
+            let status = response.status();
+            let body: serde_json::Value = response
+                .json()
+                .await
+                .context("reading the publisher's answer")?;
+            println!("{}", serde_json::to_string_pretty(&body)?);
+            if !status.is_success() {
+                anyhow::bail!("top-up refused: {}", status);
             }
             Ok(())
         }

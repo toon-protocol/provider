@@ -1,0 +1,12 @@
+{
+  "peer-key-1": {
+    "channelId": "chan-basic-1",
+    "context": {
+      "chainType": "solana",
+      "chainId": 0,
+      "tokenNetworkAddress": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    },
+    "depositTotal": "10000000",
+    "openedAt": "2026-09-01T00:00:00.000Z"
+  }
+}

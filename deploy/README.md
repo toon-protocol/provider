@@ -331,6 +331,24 @@ To prove the paid path, spawn against `<ILP_ADDRESS>.<tier>.v1.spawn` at this
 edge (`g.toon.provider.basic.v1.spawn` on the devnet box). The infra
 repository's sandbox tooling drives exactly that.
 
+## Topping up the publisher
+
+The directory publisher pays for every Profile, Listing and Liveness this box
+writes, out of its own payment channel (`PUBLISHER_MNEMONIC`), and a channel
+that runs dry drops the provider out of the directory with no warning
+(ADR 0029). Check it, and fund it, from the box:
+
+```bash
+curl http://directory-publisher:8081/status                # from inside the compose network
+docker compose exec provider toon-provider topup 5000000   # 5 mock USDC at 6dp; confirms unless --yes
+```
+
+`toon-provider topup` reaches the publisher's `/topup` the same way the
+provider app reaches `/publish` — `publish_url`'s origin — never through
+nginx and never on a published port; see `tools/publisher/README.md` §
+"`GET /status` and `POST /topup`" for the response shapes and what the
+runway figure assumes.
+
 ## Changing a listing's price
 
 A price or resource change is a **new version** — bump `version`, keep the old
@@ -471,6 +489,12 @@ charged for the packet.
 `GET /operator/status` carry no signature and no payment: reaching the port at
 all is what authorises an eviction or a status read.
 The config validator refuses a non-loopback bind, and it is in no `ports:` row.
+
+**Neither is the publisher's `/status` or `/topup`.** Same rule as
+`/publish`: `directory-publisher` is `expose:` only, never `ports:`, so only
+another container on this compose network — in practice, `provider` — can
+read a balance or add collateral. `docker compose exec provider toon-provider
+topup …` is the way in from outside (`tools/publisher/README.md`).
 
 **`ports:` bypasses ufw.** Docker manages its own iptables rules ahead of
 ufw's, so a container published with `ports:` is reachable from the internet

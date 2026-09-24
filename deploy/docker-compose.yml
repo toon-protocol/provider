@@ -164,6 +164,12 @@ services:
       # it once.
       TOON_DEPOSIT: '10000000'
       TOON_CHANNEL_STORE: /var/lib/toon-publisher/channels.json
+      # How often this box writes a Liveness — matches the "one per Liveness
+      # (60s)" this file's own comment above budgets the deposit against.
+      # `GET /status` (TOON_Network#171, ADR 0029 §3) uses it, with the
+      # connector's currently advertised write price, to report a runway;
+      # left unset, `/status` says so rather than assuming a cadence.
+      TOON_LIVENESS_CADENCE_S: '60'
       # Relay READ url (what provider.toml publishes) -> the PAID ILP
       # destination that writes to it.
       RELAY_WRITE_ROUTES: ${RELAY_WRITE_ROUTES:?set RELAY_WRITE_ROUTES in .env}

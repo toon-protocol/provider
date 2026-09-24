@@ -36,6 +36,61 @@ because a relay was down would take its paid workloads with it.
 The provider's Nostr secret key never reaches this process. It holds money,
 not identity — it cannot forge a directory event, only decline to pay for one.
 
+## `GET /status` and `POST /topup`: the operator's view of the channel
+
+(TOON_Network#171, ADR 0029 §3 "Publisher" and "Money": top-up.) Two more
+routes on the same private listener as `/publish` — same host, same port,
+same rule that reaching this process at all is what the deploy shape treats
+as authorization. Neither is ever in `docker-compose.yml`'s `ports:`.
+
+```
+GET /status
+-> 200  { "channelId": "…", "chain": "solana",
+          "deposit": "10000000", "spent": "1500000", "remaining": "8500000",
+          "signedCeiling": null, "watermarkUncertain": false,
+          "runway_s": 5400,
+          "assumptions": [ "runway = remaining ÷ (price per write × writes per cadence): …" ] }
+
+POST /topup  { "amount": "5000000" }
+-> 200       { "channelId": "…", "chain": "solana",
+               "deposit": "15000000", "spent": "1500000", "remaining": "13500000" }
+-> 400       { "error": "…" }   amount is not a positive integer
+-> 502       { "error": "…" }   the deposit could not be made (no channel, chain error, …)
+```
+
+`GET /status` never builds a client and never dials the connector on its own
+— it reads exactly the two files `@toon-protocol/client`'s
+`JsonFileChannelStore` already writes for the channel this process pays on:
+
+- `TOON_CHANNEL_STORE` (default `channels.json`) — the watermark: `spent`
+  (`cumulativeAmount`), `signedCeiling` and `watermarkUncertain`.
+- its sibling `channels.peers.json` — the binding: `deposit` (`depositTotal`,
+  kept current on every deposit) and which chain it is on.
+
+`remaining` is `deposit - spent`, floored at zero. `runway_s` is
+`remaining ÷ (price per write × writes per cadence)`: the cadence comes from
+`TOON_LIVENESS_CADENCE_S`, and the price is the connector's **currently
+advertised** price for every configured `RELAY_WRITE_ROUTES` destination,
+summed — asked live (`ToonClient.price`), but only when this process has
+already talked to that connector (i.e. it has already published something).
+Either input missing — no cadence configured, or nothing published yet —
+means `runway_s: null`, and `assumptions` always says exactly what the figure
+does or does not rest on, rather than leaving a number to be trusted blind or
+a `null` to be guessed at.
+
+`POST /topup` calls the client's own `channel.deposit(amount)` on the channel
+already open with this connector — `amount` is validated (a positive integer,
+in the token's smallest unit, same units as `TOON_DEPOSIT`) **before** this
+process builds or reuses a client, so a bad request never dials the connector
+(or, beside a hidden provider, opens a hidden-service circuit) only to be
+refused. It shares `/publish`'s serialization queue: a deposit and a claim
+both touch this channel's tracked state, and the client is not safe to use
+from two calls at once.
+
+`toon-provider topup <amount>` (the provider CLI) is the guided way to call
+this from the box: `docker compose exec provider toon-provider topup 5000000`,
+the same way `evict` is run, confirming first unless `--yes` is given.
+
 ## Configuration
 
 Environment only; there is no config file.
@@ -51,6 +106,7 @@ Environment only; there is no config file.
 | `TOON_CHANNEL_STORE` | `/var/lib/toon-publisher/channels.json` | The channel watermark. Must outlive a restart and die with the chain. |
 | `TOON_DEPOSIT` | `10000000` | Channel deposit in the token's smallest unit (10 USDC at 6 dp). |
 | `TOON_TIMEOUT_MS` | `60000` | Per-packet timeout. |
+| `TOON_LIVENESS_CADENCE_S` | — | Seconds between this provider's Liveness writes, used by `GET /status` to estimate a runway. Optional: unset means `/status` reports `runway_s: null` and says why. |
 | `TOON_TRANSPORT` | `http` | The ILP carriage the packets are paid over: `http`, `auto` or `btp`. See below. |
 | `RELAY_WRITE_ROUTES` | `{}` | JSON map of relay READ url -> the PAID ILP destination that writes to it, e.g. `{"ws://relay:7100":"g.toon.relay"}`. |
 | `TOON_ENDPOINT_REWRITE` | `{}` | JSON map of advertised URL prefix -> the address this process can actually reach it at. |
@@ -146,8 +202,10 @@ exactly as it did before the field existed — absent means direct.
 ## Tests
 
 `npm test` (`node --test`) covers `proxy.mjs` — which proxy a publication
-rides, what is refused at startup, and what stays direct — and `blob.mjs`
-below. Neither needs network, a chain or a mnemonic.
+rides, what is refused at startup, and what stays direct — `blob.mjs` below,
+`status.mjs` (`status.test.mjs`, against real fixture channel files in
+`test/fixtures/`) and `topup.mjs` (`topup.test.mjs`, against a stubbed
+client). None of these needs network, a chain or a mnemonic.
 
 ## Deciding a Blob Record's shape: `blob.mjs`
 
