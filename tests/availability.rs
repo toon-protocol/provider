@@ -216,6 +216,7 @@ fn lease(id: u32, listing: &str, version: u32) -> LeaseRecord {
         ssh_port: 40000,
         ports: vec![],
         hidden_address: None,
+        paid_intervals: None,
     }
 }
 

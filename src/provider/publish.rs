@@ -16,19 +16,25 @@
 // is an event that cannot be BUILT — a config the provider should not have
 // started with, and one no amount of retrying fixes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
 use tracing::{error, info, warn};
 
-use super::persistence::count_live;
+use super::persistence::{count_live, LeaseRecord};
 use super::ProviderService;
-use crate::directory::PublishReport;
+use crate::directory::{DirectoryEntry, PublishReport};
 use crate::nostr::directory_events::{listing_event, liveness_event, profile_event};
 use crate::provider_http::AppState;
 
 impl AppState {
     /// Publish one event, and say which relays of the Relay Set took it.
+    ///
+    /// The outcome of a Profile, a Listing or a Liveness is also kept,
+    /// relay by relay, in `publications` — the latest per relay per event,
+    /// which `GET /operator/status` answers from (ADR 0029). It is the only
+    /// place that sees every publication, so it is the one place that
+    /// notes them.
     ///
     /// `what` names the event in the log, because the caller is a loop and
     /// "published" on its own says nothing. A relay that refused is in the
@@ -47,7 +53,22 @@ impl AppState {
         what: &str,
         event: nostr_sdk::Event,
     ) -> Result<PublishReport> {
-        let report = self.directory.publish(event).await?;
+        // Read before the event is handed over: which standing entry it is
+        // and when it stops being true, for the operator's status.
+        let entry = DirectoryEntry::of(&event);
+        let expires_at = event.tags.expiration().map(|t| t.as_u64());
+
+        let published = self.directory.publish(event).await;
+        if let Some(entry) = entry {
+            self.publications.record(
+                &entry,
+                expires_at,
+                &published,
+                &self.config.relay_set,
+                self.clock.now(),
+            );
+        }
+        let report = published?;
         info!("{what} published: {}", report.summary());
         Ok(report)
     }
@@ -65,10 +86,16 @@ impl AppState {
     /// spawn will actually accept cannot drift apart.
     pub async fn available(&self) -> BTreeMap<String, u32> {
         let leases = self.leases.lock().await;
+        self.available_in(&leases)
+    }
 
+    /// `available` over a lease table the caller already holds locked, so a
+    /// reader that needs these numbers AND the leases behind them (the
+    /// operator's status) sees one consistent table.
+    pub(crate) fn available_in(&self, leases: &HashMap<u32, LeaseRecord>) -> BTreeMap<String, u32> {
         let mut available = BTreeMap::new();
         for listing in &self.config.listings {
-            let live = count_live(&leases, &listing.name);
+            let live = count_live(leases, &listing.name);
             let live = u32::try_from(live).unwrap_or(u32::MAX);
             available.insert(
                 listing.name.clone(),

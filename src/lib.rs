@@ -36,7 +36,7 @@ pub use outbound_proxy::{guarded_http_client, http_client, is_private_url, Outbo
 pub use provider::persisted_leases;
 pub use provider::{
     load_config, render_routes, AnonConfig, AnonControl, BackendKind, LeaseEnd, LeaseRecord,
-    LeaseState, Listing, ProviderConfig, ProviderService, SWEEP_INTERVAL_SECS,
+    LeaseState, Listing, PaidIntervals, ProviderConfig, ProviderService, SWEEP_INTERVAL_SECS,
     WATCHDOG_INTERVAL_SECS,
 };
 pub use provider_http::{operator_router, router, AppState};

@@ -44,7 +44,7 @@ use super::config::{Listing, MAX_PORTS_PER_WORKLOAD};
 use super::image_policy::{self, ResolvedImage};
 use super::lease_address;
 use super::oci_layout::write_layout_tar;
-use super::persistence::{count_live, persist_leases, LeaseRecord, LeaseState};
+use super::persistence::{count_live, persist_leases, LeaseRecord, LeaseState, PaidIntervals};
 use super::standby::{self, SpawnRoute};
 use crate::compute::{container_name, ContainerConfig, EgressPolicy, PortMapping};
 use crate::hidden_service::HiddenAddress;
@@ -268,6 +268,9 @@ async fn serve(
                 // Made below, with the workload, and only on a Hidden
                 // Provider: there is nothing to reach until then.
                 hidden_address: None,
+                // The one interval this spawn paid for, at the standby
+                // price on `.standby` and the listing's price otherwise.
+                paid_intervals: Some(PaidIntervals::spawned(reserving)),
             },
         );
         persist_leases(&leases, &state.config.lease_state_path);

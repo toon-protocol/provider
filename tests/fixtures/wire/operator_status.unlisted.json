@@ -1,0 +1,80 @@
+{
+  "fixture": {
+    "case": "unlisted",
+    "description": "The same document from a provider with no `publish_url` and no `connector_url`, before anything was published: every relay of the Relay Set is listed with `null` outcomes (never published to since start, which is not a refusal), `liveness_expires_at` is `null`, and the connector probe is reported as failed — a failed probe is part of the answer, never an error status.",
+    "generated_by": "toon-provider tests/wire_fixtures.rs",
+    "surface": "operator_status"
+  },
+  "http_method": "GET",
+  "http_path": "/operator/status",
+  "listener": "operator (operator_bind_addr, loopback only)",
+  "response_body": {
+    "directory": {
+      "liveness_cadence_s": 60,
+      "liveness_expires_at": null,
+      "publishing": false,
+      "relays": {
+        "ws://relay.fixture.example:7100": {
+          "listings": {
+            "basic": null,
+            "gpu": null,
+            "warm": null
+          },
+          "liveness": null,
+          "profile": null
+        }
+      }
+    },
+    "generated_at": 1700000000,
+    "identity": {
+      "connector_identity": {
+        "error": "connector_url is not set, so there is no connector to ask",
+        "live_seal_key": null,
+        "matches": null,
+        "reachable": false,
+        "via_proxy": false
+      },
+      "connector_seal_key": "0x04325b06f4bcb438204ab86a36a715fdf409552da5cdc7cd28301b08088ce7c3a1bf4289f62ba89a707ed8d7db66b03cb2881ea5934e35f2d600c4cd7067ed0188",
+      "hidden": false,
+      "ilp_address": "g.fixture",
+      "npub": "npub1gekhljh9v0jukzdq6xrshdvqx3yqgctc0xs5jjw0yg597xaw8uns47vduw",
+      "provider_name": "Fixture Provider",
+      "pubkey": "466d7fcae563e5cb09a0d1870bb580344804617879a14949cf22285f1bae3f27"
+    },
+    "leases": {
+      "leases": [],
+      "listings": {
+        "basic": {
+          "available": 2,
+          "capacity": 2,
+          "lease_interval_s": 3600,
+          "live": 0,
+          "price": 1000,
+          "standby_price": null,
+          "version": 1
+        },
+        "gpu": {
+          "available": 1,
+          "capacity": 1,
+          "lease_interval_s": 3600,
+          "live": 0,
+          "price": 1000,
+          "standby_price": null,
+          "version": 1
+        },
+        "warm": {
+          "available": 1,
+          "capacity": 1,
+          "lease_interval_s": 3600,
+          "live": 0,
+          "price": 1000,
+          "standby_price": 400,
+          "version": 1
+        }
+      }
+    },
+    "service": "provider",
+    "version": 1
+  },
+  "response_status": 200
+}

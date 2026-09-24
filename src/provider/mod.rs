@@ -36,6 +36,7 @@ mod lease_address;
 mod lifecycle;
 pub mod oci;
 pub mod oci_layout;
+pub mod operator_status;
 mod persistence;
 mod publish;
 pub mod routes;
@@ -55,8 +56,9 @@ pub use config::{
 pub use fetcher::BlobFetcher;
 pub use image_policy::{ImagePolicy, ResolvedImage};
 pub use lifecycle::{evict, extend, rotate, standby_extend, status, terminate};
+pub use operator_status::{operator_status, OperatorStatus, OPERATOR_STATUS_VERSION};
 pub use persistence::persisted_leases;
-pub use persistence::{LeaseEnd, LeaseRecord, LeaseState};
+pub use persistence::{LeaseEnd, LeaseRecord, LeaseState, PaidIntervals};
 pub use routes::{render_routes, route_table, RouteRow};
 pub use self_stop::{reached_a_majority, SELF_STOP_CADENCES};
 pub use settle::{pick_winner, Claim, TakeoverSettlement, SETTLE_CADENCES};

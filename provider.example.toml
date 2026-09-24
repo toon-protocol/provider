@@ -83,8 +83,9 @@ http_bind_addr = "127.0.0.1:8080"
 handler_base_url = "http://127.0.0.1:8080"
 
 # Where the loopback-only operator endpoint listens (`POST /operator/evict`,
-# used by `toon-provider evict`). It carries no signature and no payment, so
-# reaching it at all is what authorises an eviction — it MUST be loopback
+# used by `toon-provider evict`, and `GET /operator/status`). It carries no
+# signature and no payment, so reaching it at all is what authorises an
+# eviction or a status read — it MUST be loopback
 # (validation refuses anything else) and MUST NEVER be exposed off this host:
 # not through the connector, not through a published compose port.
 operator_bind_addr = "127.0.0.1:8090"

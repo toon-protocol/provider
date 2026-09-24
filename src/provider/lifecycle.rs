@@ -228,6 +228,10 @@ async fn extend_lease(
         .lease_interval_s;
 
     lease.expires_at = lease.expires_at.saturating_add(interval);
+    // One more interval bought, at the price of the route it was bought
+    // on: `.standby.extend` only ever extends a reservation, `.extend`
+    // everything else (spec §6.3).
+    lease.note_paid_interval(route == ExtendRoute::StandbyExtend);
     let expires_at = lease.expires_at;
     persist_leases(&leases, &state.config.lease_state_path);
 

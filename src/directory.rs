@@ -49,7 +49,7 @@ use nostr_sdk::{
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::nostr::kinds::{K_BLOB, K_LIVENESS, K_PROFILE, K_TAKEOVER};
+use crate::nostr::kinds::{K_BLOB, K_LISTING, K_LIVENESS, K_PROFILE, K_TAKEOVER};
 use crate::outbound_guard::OutboundGuard;
 use crate::outbound_proxy::{http_client, is_private_url, OutboundProxy};
 
@@ -114,6 +114,137 @@ impl PublishReport {
             self.failed.len(),
             failures.join("; ")
         )
+    }
+}
+
+/// Which of this provider's own directory events a publication was: the
+/// three an operator asks "am I listed?" about (ADR 0029). An Eviction
+/// Notice or a Takeover is a one-off announcement, not a standing entry in
+/// the directory, so it has no key here and is not kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DirectoryEntry {
+    Profile,
+    /// One Listing, by its `d` — the listing NAME, since a new version
+    /// replaces the old one on the relay (spec §4.2).
+    Listing(String),
+    Liveness,
+}
+
+impl DirectoryEntry {
+    /// The entry `event` is, or `None` for an event that is not one of the
+    /// three.
+    pub fn of(event: &Event) -> Option<Self> {
+        match event.kind.as_u16() {
+            K_PROFILE => Some(Self::Profile),
+            K_LISTING => event
+                .tags
+                .identifier()
+                .map(|d| Self::Listing(d.to_string())),
+            K_LIVENESS => Some(Self::Liveness),
+            _ => None,
+        }
+    }
+}
+
+/// What one relay last said to one of this provider's directory events.
+///
+/// Keeps the last ACCEPTED instant across a later refusal: "took it an hour
+/// ago, refusing now" is what an operator needs to see, and a relay that has
+/// refused the latest Liveness still serves the previous one until it
+/// expires.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayOutcome {
+    /// When this relay last took a publication of this event.
+    pub last_accepted_at: Option<u64>,
+    /// When the latest publication was offered to it.
+    pub last_attempt_at: u64,
+    /// Why the latest publication did not land here; `None` when it did.
+    pub refusal: Option<String>,
+    /// The `expiration` of the publication this relay last took, for an
+    /// event that carries one (Liveness, spec §4.3). What this relay serves
+    /// until then, whatever it has refused since.
+    pub expires_at: Option<u64>,
+}
+
+/// One relay's view of this provider's standing directory entries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayEntries {
+    pub profile: Option<RelayOutcome>,
+    /// Listing name -> outcome.
+    pub listings: BTreeMap<String, RelayOutcome>,
+    pub liveness: Option<RelayOutcome>,
+}
+
+/// The latest `PublishReport` per relay per directory event, in memory
+/// (ADR 0029). Not persisted: a restart republishes everything anyway, and a
+/// report from before the restart would describe a process that is gone.
+///
+/// A plain `std` mutex: nothing is awaited while it is held.
+#[derive(Debug, Default)]
+pub struct PublicationLog {
+    relays: std::sync::Mutex<BTreeMap<String, RelayEntries>>,
+}
+
+impl PublicationLog {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Note what the Relay Set said to one publication of `entry` at `now`.
+    ///
+    /// `Err` — a publication that could not be attempted, a directory
+    /// publisher that is down — is a refusal on every relay of `relay_set`,
+    /// in the error's words: none of them took it. A relay the report does
+    /// not name at all (a provider with no publisher reports nothing) is
+    /// left as it was.
+    pub fn record(
+        &self,
+        entry: &DirectoryEntry,
+        expires_at: Option<u64>,
+        published: &Result<PublishReport>,
+        relay_set: &[String],
+        now: u64,
+    ) {
+        let mut outcomes: Vec<(String, Option<String>)> = Vec::new();
+        match published {
+            Ok(report) => {
+                outcomes.extend(report.accepted.iter().map(|r| (r.clone(), None)));
+                outcomes.extend(
+                    report
+                        .failed
+                        .iter()
+                        .map(|(r, why)| (r.clone(), Some(why.clone()))),
+                );
+            }
+            Err(e) => {
+                let why = format!("not attempted: {e:#}");
+                outcomes.extend(relay_set.iter().map(|r| (r.clone(), Some(why.clone()))));
+            }
+        }
+
+        let mut relays = self.relays.lock().unwrap_or_else(|p| p.into_inner());
+        for (relay, refusal) in outcomes {
+            let entries = relays.entry(relay).or_default();
+            let slot = match entry {
+                DirectoryEntry::Profile => entries.profile.get_or_insert_with(Default::default),
+                DirectoryEntry::Listing(name) => entries.listings.entry(name.clone()).or_default(),
+                DirectoryEntry::Liveness => entries.liveness.get_or_insert_with(Default::default),
+            };
+            slot.last_attempt_at = now;
+            if refusal.is_none() {
+                slot.last_accepted_at = Some(now);
+                slot.expires_at = expires_at;
+            }
+            slot.refusal = refusal;
+        }
+    }
+
+    /// Everything noted so far, relay by relay.
+    pub fn snapshot(&self) -> BTreeMap<String, RelayEntries> {
+        self.relays
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 

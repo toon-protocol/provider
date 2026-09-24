@@ -163,9 +163,95 @@ pub struct LeaseRecord {
     /// (`cleanup::destroy_workload`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_address: Option<HiddenAddress>,
+
+    /// How many Lease Intervals this lease has been paid for, and at which
+    /// of the listing's two prices (ADR 0029): the spawn's one, and one per
+    /// extension. What the operator's status multiplies by the price to say
+    /// what the lease has been BILLED — a stored fact, not an inference
+    /// from `expires_at`.
+    ///
+    /// `None` on a record written before the count existed. Such a lease is
+    /// never given a count part-way through — the intervals it bought before
+    /// would be missing from it — so its billing stays an estimate from its
+    /// expiry for the rest of its life (`paid_intervals_or_estimate`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paid_intervals: Option<PaidIntervals>,
+}
+
+/// The Lease Intervals one lease has been paid for, by price (spec §6.3): a
+/// lease is billed at the price for what it is doing, so a Warm Standby's
+/// reservation intervals are at `standby_price` and every other interval —
+/// a standby's after its Takeover included — is at `price`.
+///
+/// Only intervals actually bought: a refused request is billed by the
+/// connector (ADR 0003) but buys no interval, and is not counted here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaidIntervals {
+    /// At the listing's `price`: a spawn on `.spawn`, an extension on
+    /// `.extend`.
+    #[serde(default)]
+    pub running: u32,
+    /// At the listing's `standby_price`: a reservation on `.standby`, an
+    /// extension on `.standby.extend`.
+    #[serde(default)]
+    pub standby: u32,
+}
+
+impl PaidIntervals {
+    /// The count a fresh spawn starts with: the one interval it paid for.
+    pub fn spawned(reserving: bool) -> Self {
+        let mut paid = Self::default();
+        paid.add(reserving);
+        paid
+    }
+
+    /// One more interval, at the standby price or the running one.
+    pub fn add(&mut self, standby: bool) {
+        let count = if standby {
+            &mut self.standby
+        } else {
+            &mut self.running
+        };
+        *count = count.saturating_add(1);
+    }
 }
 
 impl LeaseRecord {
+    /// Count one more paid interval, at the standby price when `standby`.
+    /// A record from before the count existed stays without one.
+    pub fn note_paid_interval(&mut self, standby: bool) {
+        if let Some(paid) = &mut self.paid_intervals {
+            paid.add(standby);
+        }
+    }
+
+    /// The intervals this lease has been paid for, and whether that is an
+    /// ESTIMATE: exact from the stored count, and otherwise derived from
+    /// how long the lease runs — `expires_at - created_at` in whole
+    /// intervals of `lease_interval_s`, rounded up — all at the price for
+    /// what the lease is doing now. The estimate cannot tell a standby's
+    /// reservation intervals from its running ones once it has taken over.
+    pub fn paid_intervals_or_estimate(&self, lease_interval_s: u64) -> (PaidIntervals, bool) {
+        if let Some(paid) = self.paid_intervals {
+            return (paid, false);
+        }
+        let span = self.expires_at.saturating_sub(self.created_at);
+        let intervals = span.div_ceil(lease_interval_s.max(1));
+        let intervals = u32::try_from(intervals).unwrap_or(u32::MAX);
+        let paid = if self.state == LeaseState::Reserved {
+            PaidIntervals {
+                running: 0,
+                standby: intervals,
+            }
+        } else {
+            PaidIntervals {
+                running: intervals,
+                standby: 0,
+            }
+        };
+        (paid, true)
+    }
+
     /// The access details a tenant reaches this workload at.
     pub fn access(&self, host: &str) -> Access {
         Access {
@@ -302,6 +388,7 @@ mod tests {
                 host_port: 41000,
             }],
             hidden_address: None,
+            paid_intervals: Some(PaidIntervals::spawned(false)),
         }
     }
 
@@ -392,6 +479,112 @@ mod tests {
         assert_eq!(loaded[&2000].settled, None);
         assert!(!loaded[&2000].taken_over);
         assert_eq!(loaded[&2000].hidden_address, None);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_table_written_before_paid_intervals_loads_with_an_estimate() {
+        // A leases.json exactly as a provider before ADR 0029 wrote it:
+        // every field it had, and no `paid_intervals`. It must load — one
+        // unreadable record empties the whole table — and its billing is
+        // an estimate from its expiry, said to be one.
+        let p = temp_path("pre-paid-intervals");
+        std::fs::write(
+            &p,
+            serde_json::json!({
+                "2000": {
+                    "id": 2000,
+                    "workload_id": "aa".repeat(32),
+                    "continuation": "ee".repeat(32),
+                    "listing": "basic",
+                    "listing_version": 1,
+                    "role": "standalone",
+                    "state": "running",
+                    "taken_over": false,
+                    "created_at": 1000,
+                    "expires_at": 1000 + 3 * 3600,
+                    "destroyed": false,
+                    "ssh_port": 40000,
+                    "ports": [{ "container_port": 443, "host_port": 41000 }],
+                },
+                "2001": {
+                    "id": 2001,
+                    "workload_id": "bb".repeat(32),
+                    "continuation": "ee".repeat(32),
+                    "listing": "warm",
+                    "listing_version": 1,
+                    "role": "standby",
+                    "state": "reserved",
+                    "standby_set": { "members": ["aa".repeat(32), "bb".repeat(32)], "index": 1 },
+                    "taken_over": false,
+                    "created_at": 1000,
+                    "expires_at": 1000 + 3600,
+                    "destroyed": false,
+                    "ssh_port": 40001,
+                    "ports": [],
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let loaded = load_leases(&p);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[&2000].paid_intervals, None);
+        assert_eq!(
+            loaded[&2000].paid_intervals_or_estimate(3600),
+            (
+                PaidIntervals {
+                    running: 3,
+                    standby: 0
+                },
+                true
+            )
+        );
+        assert_eq!(
+            loaded[&2001].paid_intervals_or_estimate(3600),
+            (
+                PaidIntervals {
+                    running: 0,
+                    standby: 1
+                },
+                true
+            )
+        );
+
+        // An extension of such a lease adds nothing to a count it never
+        // had: its estimate grows with its expiry instead.
+        let mut old = loaded[&2000].clone();
+        old.note_paid_interval(false);
+        assert_eq!(old.paid_intervals, None);
+
+        // And writing it back does not invent the field.
+        persist_leases(&loaded, &p);
+        let raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        assert!(raw["2000"].get("paid_intervals").is_none());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_counted_lease_round_trips_its_paid_intervals() {
+        let p = temp_path("paid-intervals");
+        let mut counted = lease(2000, 9999);
+        counted.note_paid_interval(false);
+        counted.note_paid_interval(true);
+        persist_leases(&HashMap::from([(2000, counted.clone())]), &p);
+
+        let loaded = load_leases(&p);
+        assert_eq!(
+            loaded[&2000].paid_intervals,
+            Some(PaidIntervals {
+                running: 2,
+                standby: 1
+            })
+        );
+        assert_eq!(
+            loaded[&2000].paid_intervals_or_estimate(3600),
+            (loaded[&2000].paid_intervals.unwrap(), false)
+        );
         let _ = std::fs::remove_file(&p);
     }
 

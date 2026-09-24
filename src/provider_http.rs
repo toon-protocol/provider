@@ -36,18 +36,19 @@ use tracing::info;
 use crate::anon_control::AnonControlService;
 use crate::clock::Clock;
 use crate::compute::ComputeBackend;
-use crate::directory::{ConnectorDirectory, Directory, NullDirectory};
+use crate::directory::{ConnectorDirectory, Directory, NullDirectory, PublicationLog};
 use crate::hidden_service::HiddenService;
 use crate::nostr::lease_request::AcceptedRequests;
 use crate::nostr::wire::{ErrorCode, ErrorResponse, EvictRequest};
-use crate::outbound_proxy::OutboundProxy;
+use crate::outbound_proxy::{http_client, OutboundProxy};
+use crate::provider::operator_status::CONNECTOR_PROBE_TIMEOUT;
 use crate::provider::routes::{
     AVAILABILITY_PATH, EXTEND_PATTERN, ROTATE_PATH, SPAWN_PATTERN, STANDBY_EXTEND_PATTERN,
     STANDBY_PATTERN, STATUS_PATH, TERMINATE_PATH,
 };
 use crate::provider::{
-    availability, evict, extend, rotate, spawn, standby_extend, standby_spawn, status, terminate,
-    BlobCache, BlobFetcher, ImagePolicy, LeaseRecord, ProviderConfig,
+    availability, evict, extend, operator_status, rotate, spawn, standby_extend, standby_spawn,
+    status, terminate, BlobCache, BlobFetcher, ImagePolicy, LeaseRecord, ProviderConfig,
 };
 
 /// Everything a handler may touch. Arc-cloned from `ProviderService`, so the
@@ -84,6 +85,16 @@ pub struct AppState {
     /// registry. One instance over the one on-disk blob cache, so a blob
     /// verified for any lease serves every later one.
     pub fetcher: Arc<BlobFetcher>,
+    /// The latest outcome, relay by relay, of every Profile, Listing and
+    /// Liveness this provider has published since it started — what
+    /// `GET /operator/status` reports as "am I listed?" (ADR 0029). In
+    /// memory only: a restart republishes everything.
+    pub publications: Arc<PublicationLog>,
+    /// The client `GET /operator/status` asks the connector's own
+    /// `/identity` with: over `anon.socks_proxy` on a Hidden Provider, like
+    /// every other outbound request of this process (spec §10), and direct
+    /// otherwise.
+    pub connector_probe: reqwest::Client,
 }
 
 impl AppState {
@@ -114,6 +125,11 @@ impl AppState {
             Some(proxy) => fetcher.with_proxy(proxy)?,
             None => fetcher,
         });
+        let connector_probe = http_client(
+            proxy.as_ref(),
+            CONNECTOR_PROBE_TIMEOUT,
+            "the connector identity probe",
+        )?;
         Ok(Self {
             config: Arc::new(config),
             backend,
@@ -125,6 +141,8 @@ impl AppState {
             accepted_requests: Arc::new(AcceptedRequests::new()),
             image_policy,
             fetcher,
+            publications: Arc::new(PublicationLog::new()),
+            connector_probe,
         })
     }
 
@@ -256,12 +274,13 @@ pub async fn serve(state: AppState, bind_addr: &str) -> Result<()> {
     Ok(())
 }
 
-/// The operator surface: `POST /operator/evict`, and nothing else. Deliberately
-/// a SEPARATE router from `router` above rather than one more route on it —
-/// `router` is what the TOON connector forwards tenant traffic to, and
-/// eviction takes no signature and no payment because it is not a tenant
-/// operation: it is the operator of this box telling its own provider process
-/// to stop a lease. Keeping it a separate `Router` means it can never be
+/// The operator surface: `POST /operator/evict` and `GET /operator/status`,
+/// and nothing else. Deliberately a SEPARATE router from `router` above
+/// rather than more routes on it — `router` is what the TOON connector
+/// forwards tenant traffic to, and neither route takes a signature or a
+/// payment because neither is a tenant operation: it is the operator of this
+/// box telling its own provider process to stop a lease, or asking it what it
+/// is doing (ADR 0029). Keeping it a separate `Router` means it can never be
 /// reached through the connector's route table by a future change that adds
 /// routes to `router`, and a test can drive it exactly like `router` — an
 /// HTTP request in, JSON out — without needing a real loopback socket to
@@ -272,6 +291,7 @@ pub async fn serve(state: AppState, bind_addr: &str) -> Result<()> {
 pub fn operator_router(state: AppState) -> Router {
     Router::new()
         .route("/operator/evict", post(evict_route))
+        .route("/operator/status", get(operator_status_route))
         .with_state(state)
 }
 
@@ -427,6 +447,17 @@ async fn evict_route(State(state): State<AppState>, body: Bytes) -> Response {
         Ok(answer) => (StatusCode::OK, Json(answer)).into_response(),
         Err(e) => refuse(e),
     }
+}
+
+/// `GET /operator/status` on the OPERATOR router, never on `router`: what
+/// this provider is, whether the directory has it, and what it is running
+/// (ADR 0029). Read-only and without a body; reaching the loopback port is
+/// the authorisation, exactly as for an eviction, and the answer carries no
+/// secret (`provider::operator_status`). Always 200 — a connector that did
+/// not answer or a relay that refused is part of the report, not a failure
+/// of it.
+async fn operator_status_route(State(state): State<AppState>) -> Response {
+    (StatusCode::OK, Json(operator_status(&state).await)).into_response()
 }
 
 /// `POST /availability`: free, unsigned, and answers 200 either way — the
