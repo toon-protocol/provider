@@ -156,6 +156,9 @@ async fn status_answers_every_section_with_a_version() {
     assert_eq!(status["version"], 1);
     assert_eq!(status["service"], "provider");
     assert_eq!(status["generated_at"], NOW);
+    // When the process started, so `status --check` can tell "not published
+    // yet" from "not landing" (TOON_Network#172).
+    assert_eq!(status["started_at"], NOW);
     for section in ["identity", "directory", "leases"] {
         assert!(status[section].is_object(), "{section} missing: {status:#}");
     }
