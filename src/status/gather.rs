@@ -71,25 +71,8 @@ impl Sources {
             },
         };
 
-        let connector_operator_url = match &args.connector_operator_url {
-            Some(url) if !url.trim().is_empty() => near(
-                "the connector's operator API",
-                url.trim().trim_end_matches('/').to_string(),
-            ),
-            _ if hidden => Err(
-                "not asked: a hidden provider's connector_url is an .anyone address; set \
-                 TOON_CONNECTOR_OPERATOR_URL to its compose-internal address (the deploy \
-                 bundle sets http://provider-connector:4000)"
-                    .to_string(),
-            ),
-            _ => match origin(&config.connector_url) {
-                Some(origin) => Ok(origin),
-                None => Err(
-                    "no connector_url is configured and TOON_CONNECTOR_OPERATOR_URL is not set"
-                        .to_string(),
-                ),
-            },
-        };
+        let connector_operator_url =
+            connector_operator_url(config, args.connector_operator_url.as_deref());
 
         let dashboard_url = origin(&config.connector_url).map(|o| format!("{o}/dashboard"));
 
@@ -143,9 +126,45 @@ impl Sources {
     }
 }
 
+/// The connector's operator API base URL: `explicit` when given (on a
+/// Hidden Provider only if it is on this box's private network), else a
+/// public provider's `connector_url` origin. Shared by `status` and
+/// `redeem`, which must ask the same connector.
+pub(crate) fn connector_operator_url(
+    config: &ProviderConfig,
+    explicit: Option<&str>,
+) -> Result<String, String> {
+    match explicit {
+        Some(url) if !url.trim().is_empty() => {
+            let url = url.trim().trim_end_matches('/').to_string();
+            if config.hidden && !is_private_url(&url) {
+                Err(format!(
+                    "not asked: {url} is not on this box's private network, and a hidden \
+                     provider dials nothing else directly (the connector's operator API)"
+                ))
+            } else {
+                Ok(url)
+            }
+        }
+        _ if config.hidden => Err(
+            "not asked: a hidden provider's connector_url is an .anyone address; set \
+             TOON_CONNECTOR_OPERATOR_URL to its compose-internal address (the deploy \
+             bundle sets http://provider-connector:4000)"
+                .to_string(),
+        ),
+        _ => match origin(&config.connector_url) {
+            Some(origin) => Ok(origin),
+            None => Err(
+                "no connector_url is configured and TOON_CONNECTOR_OPERATOR_URL is not set"
+                    .to_string(),
+            ),
+        },
+    }
+}
+
 /// `scheme://host[:port]` of `url`, or `None` for an empty or unparseable
 /// one.
-fn origin(url: &str) -> Option<String> {
+pub(crate) fn origin(url: &str) -> Option<String> {
     let parsed = Url::parse(url).ok()?;
     let host = parsed.host_str()?;
     Some(match parsed.port() {
@@ -312,7 +331,7 @@ pub async fn gather(sources: &Sources, now: u64) -> Report {
 
 /// An error and its causes on one line: reqwest's own `Display` stops at
 /// "error sending request", which says nothing an operator can act on.
-fn error_chain(error: &dyn std::error::Error) -> String {
+pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
     let mut out = error.to_string();
     let mut source = error.source();
     while let Some(cause) = source {
@@ -459,7 +478,7 @@ struct AuditRecord {
 /// One channel id however the connector spells it: `GET /channels` answers
 /// the bare id and a client-edge claim row the chain-prefixed key
 /// (`evm:0x…`, `solana:…`), and an EVM id's hex case is not significant.
-fn channel_key(id: &str) -> String {
+pub(crate) fn channel_key(id: &str) -> String {
     let bare = id
         .strip_prefix("evm:")
         .or_else(|| id.strip_prefix("solana:"))
@@ -473,11 +492,30 @@ fn channel_key(id: &str) -> String {
 }
 
 async fn read_earnings(client: &reqwest::Client, sources: &Sources) -> EarningsSection {
+    read_earnings_from(
+        client,
+        &sources.connector_operator_url,
+        sources.bearer_token_file.as_deref(),
+        sources.dashboard_url.clone(),
+    )
+    .await
+}
+
+/// The connector's inbound claims joined to its channels (and the audit
+/// log's last redeem), from the operator API at `connector_operator_url`
+/// with the bearer token in `bearer_token_file`. What `status` prints as
+/// earnings and what `redeem` offers to collect.
+pub(crate) async fn read_earnings_from(
+    client: &reqwest::Client,
+    connector_operator_url: &Result<String, String>,
+    bearer_token_file: Option<&std::path::Path>,
+    dashboard_url: Option<String>,
+) -> EarningsSection {
     let mut section = EarningsSection {
-        dashboard_url: sources.dashboard_url.clone(),
+        dashboard_url,
         ..Default::default()
     };
-    let base = match &sources.connector_operator_url {
+    let base = match connector_operator_url {
         Ok(base) => base.clone(),
         Err(e) => {
             section.error = Some(e.clone());
@@ -485,7 +523,7 @@ async fn read_earnings(client: &reqwest::Client, sources: &Sources) -> EarningsS
         }
     };
     section.url = Some(base.clone());
-    let token = match &sources.bearer_token_file {
+    let token = match bearer_token_file {
         None => {
             section.error = Some(
                 "no bearer token: set TOON_CONNECTOR_BEARER_TOKEN_FILE to the rendered \
