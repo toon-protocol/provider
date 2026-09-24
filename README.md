@@ -39,13 +39,17 @@ and the publisher's wallet, which also needs mock USDC.
    `PUBLIC_IP`, `PROVIDER_NAME` and an `ILP_ADDRESS` of your own such as
    `g.<your-name>.provider`, and leave the relay and settlement block as the
    devnet preset. Size `listings.toml` to your box.
-2. Generate the keys: `openssl rand -hex 32 > <file>` for `signer.key`,
-   `settlement.key` and `settlement-solana.key`, and `NOSTR_PRIVATE_KEY`,
-   `OPERATOR_BEARER_TOKEN`, `OPERATOR_WRITE_KEY` and `PUBLISHER_MNEMONIC` in
-   `.env` as it describes. Keep `NOSTR_PRIVATE_KEY` off the box too: it is
-   your provider.
-3. [Fund the two identities](deploy/README.md#the-two-funded-identities), the
-   Solana settlement key first: the connector will not start without SOL.
+2. Run `./keys.sh init`. It generates every key file and `.env` secret that
+   is missing and never replaces one that exists. It prints the operator
+   write key's private half once: save it on the machine you administer
+   from. Back up the key files, `NOSTR_PRIVATE_KEY` and `PUBLISHER_MNEMONIC`
+   off the box. `NOSTR_PRIVATE_KEY` *is* your provider.
+3. Fund what `./keys.sh addresses` prints: the connector's Solana settlement
+   address and the publisher's wallet, each in base58 with its faucet
+   command, and the connector's EVM address, which needs Base Sepolia ETH
+   only to redeem ([why each](deploy/README.md#the-two-funded-identities)).
+   `bootstrap.sh` checks both Solana balances first and stops with the same
+   list if either is short.
 4. Run `./bootstrap.sh`. It installs Docker, learns the connector's sealing
    key, renders the config, starts the five services on a Let's Encrypt
    *staging* certificate — warning first if either A-record does not resolve

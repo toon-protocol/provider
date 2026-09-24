@@ -25,6 +25,7 @@ One host, five containers, and the workloads it sells.
 | `connector.toml.template` | The connector's config. Its `[[routes]]` are *generated* at render time, not written. |
 | `nginx/node.conf.template` | Two server blocks: the paid edge, and `GET /health`. Rendered. |
 | `render.sh` | Renders the above from `.env` and the listings file. Idempotent. |
+| `keys.sh` + `keys.py` | Generates every missing key and prints every address to fund, before anything boots. Needs only `python3`. |
 | `bootstrap.sh` | Fresh host → running box, including the sealing-key handshake. Idempotent. |
 | `pull-images.sh` | Gets the pinned images onto the box: pulls them, or builds one from the checkout while its pin is still the `sha-0000000` placeholder. |
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
@@ -150,7 +151,8 @@ reason. A tenant filters on that tag, so it has to be true.
 
 **Before you start** you need a host, two DNS A-records pointing at it —
 `proxy.provider.<your-domain>` and `provider.<your-domain>` — an ILP address of
-your own, three key files, and two funded identities.
+your own, and devnet SOL and mock USDC for two identities that `keys.sh`
+generates and names in step 2.
 
 **1. Clone and configure.** Two files are yours, both gitignored: `.env` and
 the listings file. Nothing else in the checkout is edited, ever.
@@ -181,35 +183,58 @@ branch stops it. So does a dirty one: if `git status` in `/root/provider` is
 ever not clean, something was edited that belongs in `.env` or the listings
 file instead.
 
-**2. Generate the key material.** Four secrets, none of them ever committed.
+**2. Generate the key material.** One command, on the box, before anything
+else runs on it. It needs only `python3`, which every Ubuntu release ships:
 
 ```bash
-# The connector's three. 32 bytes as 64 hex characters is the only format it
-# reads — never base58, never a Solana CLI JSON array.
-openssl rand -hex 32 > signer.key             # THE SEALING KEY
-openssl rand -hex 32 > settlement.key         # the EVM settlement key
-openssl rand -hex 32 > settlement-solana.key  # the Solana settlement key
-
-# The provider's own identity, into .env as NOSTR_PRIVATE_KEY.
-openssl rand -hex 32
+./keys.sh init
 ```
 
-`render.sh` sets each key's mode and hands the connector's three to uid 10001,
-which is what it runs as. That used to be a step in a runbook, and a step a
-human has to remember is a step a human forgets — the failure is a container
+It writes whatever is missing and never replaces what exists, so it is safe to
+re-run and safe to run over keys you brought yourself. Put your own in place
+first if you have them.
+
+| What | Where | What it is |
+|---|---|---|
+| `signer.key` | file | The connector's sealing key: what a tenant seals to. |
+| `settlement.key` | file | The connector's EVM settlement key. |
+| `settlement-solana.key` | file | The connector's Solana settlement key. |
+| `NOSTR_PRIVATE_KEY` | `.env` | The provider's own identity. It signs the Profile, every Listing and every Liveness. |
+| `PUBLISHER_MNEMONIC` | `.env` | A 12-word BIP-39 phrase of its own for the publisher's wallet, shared with nothing else: two payers on one channel share one nonce watermark, and the loser of that race has every later claim refused. |
+| `OPERATOR_BEARER_TOKEN` | `.env` | Gates the connector's `/metrics` and redeem endpoints. |
+| `OPERATOR_WRITE_KEY` | `.env` | The **public** half of a fresh ed25519 key for signing operator writes. |
+
+The three files are 32 bytes as 64 hex characters, the only format the
+connector reads, and `0600`. `render.sh` later hands them to uid 10001, which
+is what the connector runs as. That used to be a step in a runbook, and a step
+a human has to remember is a step a human forgets. The failure is a container
 that restarts forever with `failed to read signer key_file at
 /app/data/signer.key: Permission denied` while everything around it looks fine.
 
-You also need a BIP-39 phrase of its own for `PUBLISHER_MNEMONIC`, shared with
-nothing else: two payers on one channel share one nonce watermark, and the loser of
-that race has every later claim refused.
+The operator write key's **private** half is printed once and stored nowhere
+on the box. Save it as a file on the machine you administer from: it is what
+`connector send --operator-key <file>` signs with. To use a key you already
+hold instead, set `OPERATOR_WRITE_KEY` to what `connector send --operator-key
+<file> --print-keyid` prints for it before you run `init`.
 
-Record how each was derived, somewhere off this box. A lost `NOSTR_PRIVATE_KEY`
-is a lost provider — new pubkey, empty directory entry, and every tenant
-holding a lease addressed to the old one left talking to nobody.
+Back the rest up somewhere off this box, as `init` reminds you. A lost
+`NOSTR_PRIVATE_KEY` is a lost provider: a new pubkey, an empty directory
+entry, and every tenant holding a lease addressed to the old one left talking
+to nobody.
 
-**3. Fund the two identities.** See § "The two funded identities", below. Do
-the Solana settlement key **before** the first `up -d`.
+**3. Fund what `./keys.sh addresses` prints.**
+
+```bash
+./keys.sh addresses
+```
+
+It lists every address to fund in the form a faucet takes (base58 for Solana,
+`0x` for EVM), what each needs, and the faucet command or URL for it. It also
+prints this provider's `npub`. § "The two funded identities" says why each
+needs what it does. Fund the connector's Solana settlement address **before**
+the first `up -d`. `bootstrap.sh` checks both Solana balances with a free
+`getBalance` before it touches the host, and stops with the same list if
+either is short, rather than letting the connector restart-loop.
 
 **4. Bring it up.**
 
@@ -259,26 +284,29 @@ curl -X POST https://faucet.devnet.toonprotocol.dev/api/solana/usdc-request \
   -H 'content-type: application/json' -d '{"address":"<the publisher address>"}'
 ```
 
+`./keys.sh addresses` prints this command with the address already filled in.
+
 At 1 µUSDC a write and a 60-second Liveness cadence this provider spends about
 **1,500 µUSDC a day** — 0.0015 USDC. The 10 USDC deposit is three orders of
 magnitude more than a year of that, because topping a channel up is the fiddly
 part, not funding it once.
 
-Print the connector's two addresses from the key files:
+`./keys.sh addresses` prints all three addresses from the key files and
+`PUBLISHER_MNEMONIC`, before anything has booted. Each is derived the way its
+component derives it, and `../tests/deploy_keys.rs` holds each derivation to
+the component's own on fixed keys:
 
-```bash
-cast wallet address --private-key "0x$(cat settlement.key)"          # EVM
+- the connector's Solana address is the ed25519 public key of
+  `settlement-solana.key`, in base58: the same bytes `connector send
+  --operator-key settlement-solana.key --print-keyid` prints in hex;
+- its EVM address comes from `settlement.key`, printed with EIP-55 casing.
+  `GET /ilp` prints the same address in lowercase;
+- the publisher's address is `PUBLISHER_MNEMONIC` at `m/44'/501'/0'/0'`,
+  which is what `@toon-protocol/client` derives and what Phantom and the
+  Solana CLI derive from the same phrase.
 
-# --print-keyid gives the raw ed25519 public key in hex; Solana spells the
-# same bytes in base58.
-docker run --rm -v "$PWD:/d:ro" ghcr.io/toon-protocol/connector:rust-2026.09.11.1 \
-  send --operator-key /d/settlement-solana.key --print-keyid
-```
-
-Both are also served, already derived, by `GET /ilp` once the node is up —
-which is the copy to trust, because the connector proved each of them against a
-live chain when it booted. The publisher prints its own address on its first
-successful channel open.
+Once the node is up, `GET /ilp` serves the connector's two addresses as well,
+after the connector has proved each of them against a live chain.
 
 ## Checking it works
 
