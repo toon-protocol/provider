@@ -95,11 +95,11 @@ services:
     # (TOON_Network#151) and bumped here by a reviewed commit — never a
     # floating tag, same regime as the connector's pin below.
     #
-    # `sha-c4f1262` is the build from the merge of #34 (`toon-provider status`,
-    # #172), on top of operator status (#170) and the publisher's top-up (#171).
+    # `sha-3a868ee` is the build from the merge of #37 (`toon-provider redeem`,
+    # #173, and the startup-publish retry, #178), on top of status (#170-#172).
     # tests/deploy_bundle.rs::the_provider_pin_is_immutable_and_written_once
     # checks the SHAPE of this pin, not its value.
-    image: ghcr.io/toon-protocol/provider:sha-c4f1262
+    image: ghcr.io/toon-protocol/provider:sha-3a868ee
     volumes:
       - ./provider.toml:/etc/toon-provider/provider.toml:ro
       # THE DOCKER SOCKET, and that is the whole deployment shape: the provider
@@ -206,7 +206,7 @@ services:
     # Same scheme as the provider pin above: immutable, published by the same
     # workflow run, and bumped by a reviewed commit. README § "Bumping the
     # connector pin".
-    image: ghcr.io/toon-protocol/provider-publisher:sha-c4f1262
+    image: ghcr.io/toon-protocol/provider-publisher:sha-3a868ee
     environment:
       # The devnet relay's own client edge. This process pays it directly, as a
       # client with a channel — there is no hub on this devnet and no peering.
