@@ -1028,3 +1028,63 @@ async fn an_inline_records_part_count_disagreeing_with_size_and_part_size_is_ref
     );
     assert!(h.backend.calls().is_empty());
 }
+
+// ── TOON_Network#104: a manifest's own digests are checked too ──────────────
+
+#[tokio::test]
+async fn a_manifests_config_digest_naming_a_traversal_is_refused_and_touches_nothing_beside_the_cache(
+) {
+    // A manifest a tenant's own registry, entry or Blob Record controls can
+    // say anything for its config digest. Before this ticket, that string
+    // went straight into `BlobCache::path_of`, which joined it onto the
+    // cache directory without checking its shape — so a digest of
+    // `sha256:` followed by `..` segments could walk the cache's own
+    // directory read (and, on a hash mismatch, DELETE) a file nowhere near
+    // it. It never reaches that far now: the manifest read itself refuses
+    // the malformed digest.
+    //
+    // The cache lives at `<dir>/blobs`, one blob per file at
+    // `<dir>/blobs/sha256/<hex>` — so `../../canary.txt`, stripped of its
+    // `sha256:` prefix and joined there, walks back up through `sha256/`
+    // and `blobs/` to `<dir>/canary.txt` exactly: not a made-up path, the
+    // real one `BlobCache::path_of` used to build unchecked.
+    let mut w = World::new().await;
+    let traversal = "sha256:../../canary.txt";
+    let manifest = manifest_bytes((traversal, 4), &[]);
+    let manifest_digest = w.store(&manifest, MANIFEST, 100).await;
+    let h = harness(&w, vec![listing("basic", 1, 2)]).await;
+    seed_blob_records(&w, &h.directory);
+
+    // The file the traversal digest above resolves to: beside the cache
+    // directory itself, not inside it.
+    let canary = h
+        .config
+        .blob_cache_dir()
+        .parent()
+        .unwrap()
+        .join("canary.txt")
+        .to_path_buf();
+    std::fs::write(&canary, b"do not touch me").unwrap();
+
+    let availability_body = availability(&h, bare_image(&manifest_digest)).await;
+    assert_refused(&availability_body, "sha256:<64 lowercase hex>");
+
+    let (status, body, _) = spawn(&h, 0xd1, ImageRef::by_digest(manifest_digest)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", body);
+    assert_eq!(body["error"], "refused_image", "{}", body);
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("sha256:<64 lowercase hex>"),
+        "{}",
+        body
+    );
+    assert!(h.backend.calls().is_empty());
+
+    assert_eq!(
+        std::fs::read(&canary).unwrap(),
+        b"do not touch me",
+        "the file beside the cache directory was never read, probed or deleted"
+    );
+}

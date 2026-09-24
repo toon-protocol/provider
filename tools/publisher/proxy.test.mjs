@@ -11,6 +11,8 @@ import {
   isTrue,
   proxyFor,
   startupRefusal,
+  TRANSPORTS,
+  transportRefusal,
   validateProxy,
 } from './proxy.mjs';
 
@@ -67,6 +69,54 @@ describe('startupRefusal', () => {
   it('lets a hidden publisher with a proxy start, and a plain one with none', () => {
     assert.equal(startupRefusal({ hidden: true, socksProxy: 'socks5h://anon:9050' }), null);
     assert.equal(startupRefusal({ hidden: false, socksProxy: undefined }), null);
+  });
+
+  it('carries the transport refusal, so one call is the whole of "may this start"', () => {
+    assert.match(
+      startupRefusal({ hidden: true, socksProxy: 'socks5h://anon:9050', transport: 'auto' }),
+      /cannot be used with a proxy/,
+    );
+  });
+});
+
+describe('transportRefusal', () => {
+  it('lets the default through, and the absent case with it', () => {
+    assert.equal(transportRefusal({}), null);
+    assert.equal(transportRefusal({ transport: '' }), null);
+    assert.equal(transportRefusal({ transport: 'http' }), null);
+  });
+
+  it('names what it will take when given something else', () => {
+    assert.match(transportRefusal({ transport: 'websocket' }), /must be one of http, auto, btp/);
+    assert.deepEqual(TRANSPORTS, ['http', 'auto', 'btp']);
+  });
+
+  it('lets a clearnet publisher ask the node which carriage it wants', () => {
+    // What a deployment against the devnet relay needs: that node pins
+    // `g.toon.relay` to BTP, and an HTTP one-shot there is refused outright.
+    assert.equal(transportRefusal({ transport: 'auto' }), null);
+    assert.equal(transportRefusal({ transport: 'btp', endpointRewrite: {} }), null);
+  });
+
+  it('refuses a websocket beside a proxy, because the proxy IS a fetch', () => {
+    // The SOCKS5h carriage is installed as this process's `fetch`; BTP opens a
+    // websocket that never passes through it. Refusing beats reaching the
+    // connector from this host's real address while the logs say otherwise.
+    assert.match(
+      transportRefusal({ transport: 'auto', socksProxy: 'socks5h://anon:9050' }),
+      /cannot be used with a proxy/,
+    );
+    assert.match(transportRefusal({ transport: 'btp', hidden: true }), /ADR 0008/);
+  });
+
+  it('refuses a websocket beside an endpoint rewrite, for the same reason', () => {
+    assert.match(
+      transportRefusal({
+        transport: 'auto',
+        endpointRewrite: { 'http://127.0.0.1:3200': 'http://relay-connector:3000' },
+      }),
+      /TOON_ENDPOINT_REWRITE/,
+    );
   });
 });
 

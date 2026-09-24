@@ -1,0 +1,29 @@
+# The build context is the repository ROOT — both images are built from here
+# (`docker build .` for the provider, `docker build -f tools/publisher/Dockerfile .`
+# for its directory publisher), and deploy/docker-compose.yml builds both from
+# `..`.
+#
+# Without this file that context is tens of gigabytes: `target/` alone is a
+# full Rust build tree, and `tools/grant/node_modules/` is committed. Every
+# byte of it is tarred and handed to the daemon on every build, and neither
+# Dockerfile COPYs any of it.
+target
+**/node_modules
+.git
+.github
+
+# The deploy bundle. On a box this directory holds the .env, the connector's
+# key files and the RENDERED provider.toml — which carries this provider's
+# Nostr private key inline. Nothing COPYs it, and nothing should hand it to
+# the daemon either.
+deploy
+
+# Neither image runs the tests or reads the fixtures.
+tests
+blobs
+
+# The tenant-side handover tool. It ships with no image: a tenant runs it,
+# not a provider.
+tools/grant
+
+*.log

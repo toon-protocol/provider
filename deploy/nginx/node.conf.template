@@ -1,0 +1,112 @@
+# Rendered by ../render.sh -> ./conf.d/node.conf. Edit the template, not the
+# rendered file.
+#
+# Two virtual hosts on one certificate:
+#   proxy.provider.${DOMAIN}  the paid ILP edge   -> provider-connector:4000
+#   provider.${DOMAIN}        health, GET /health -> provider:8080
+#
+# ── The provider app is NOT behind this edge ─────────────────────────────────
+# The store box fronts its whole backend on a second hostname, because that
+# backend serves its health surface on a PORT OF ITS OWN and nothing else
+# answers there. `toon-provider` has one listener: /health, /availability,
+# /status, /terminate, /rotate and every /listings/<tier>/v<n>/spawn all share
+# port 8080. Proxying `/` at it would put the spawn handler on the public
+# internet with the payment skipped — the connector is the only thing that may
+# reach that listener (spec §6, ADR 0003: the route's price is charged by the
+# connector, and the app trusts that it was).
+#
+# So exactly ONE path is proxied to the app, by exact match, GET only. Every
+# other path on that host is a 404 from nginx, before anything is dialled.
+# The operator endpoint (`POST /operator/evict`, port 8090) is loopback-inside-
+# the-container and appears nowhere here, deliberately.
+#
+# Workload ports are NOT here either. A tenant reaches its workload at
+# `public_ip:<host port>` — raw TCP published by the host's Docker daemon on
+# the SSH-forward and workload-port ranges `provider.toml` commits to. They
+# never pass through nginx and must never be given a name here: a workload is
+# not this node's service to front.
+
+limit_req_zone $binary_remote_addr zone=provider:10m rate=200r/s;
+
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name proxy.provider.${DOMAIN} provider.${DOMAIN};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# ── The paid ILP edge ────────────────────────────────────────────────────────
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name proxy.provider.${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${CERT_NAME}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${CERT_NAME}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    # Docker's embedded DNS, re-resolved every 10s. This is load-bearing:
+    # nginx resolves a literal upstream hostname ONCE at config-parse time, so
+    # a recreated connector would 502 until someone reloaded nginx. Going
+    # through a variable forces a runtime lookup instead.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    location ^~ /admin { return 404; }
+
+    location / {
+        limit_req zone=provider burst=400 nodelay;
+        set $upstream provider-connector;
+        proxy_pass http://$upstream:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        # BTP is a websocket; a spawn is a long POST while an image is pulled.
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_read_timeout 1h;
+        client_max_body_size 1m;
+    }
+}
+
+# ── Health, and nothing else ─────────────────────────────────────────────────
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name provider.${DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${CERT_NAME}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${CERT_NAME}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    # Default-deny. `location /` is what would otherwise inherit a proxy from
+    # nowhere; stating the 404 keeps the file honest about the one exception
+    # below being the only one.
+    location / { return 404; }
+
+    location = /health {
+        limit_except GET { deny all; }
+        limit_req zone=provider burst=20 nodelay;
+        set $upstream provider;
+        proxy_pass http://$upstream:8080/health;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+}

@@ -31,7 +31,16 @@ pub fn write_layout_tar(cache: &BlobCache, image: &ResolvedImage, out: &Path) ->
         .with_context(|| format!("could not create the image layout at {}", out.display()))?;
     let mut tar = tar::Builder::new(file);
 
-    let manifest_path = cache.path_of(&image.manifest_digest);
+    // Every digest here already went down §8.4's chain — resolution fetched
+    // and verified each one before this ran — so `path_of` refusing it
+    // would mean a digest reached this far without that, which is a bug
+    // upstream, not something this layout can route around.
+    let manifest_path = cache.path_of(&image.manifest_digest).with_context(|| {
+        format!(
+            "manifest digest {:?} is not `sha256:<64 lowercase hex>`",
+            image.manifest_digest
+        )
+    })?;
     let manifest_size = std::fs::metadata(&manifest_path)
         .with_context(|| {
             format!(
@@ -58,7 +67,12 @@ pub fn write_layout_tar(cache: &BlobCache, image: &ResolvedImage, out: &Path) ->
     blobs.extend(image.config_digest());
     blobs.extend(image.layer_digests());
     for digest in blobs {
-        let path = cache.path_of(digest);
+        let path = cache.path_of(digest).with_context(|| {
+            format!(
+                "blob digest {:?} is not `sha256:<64 lowercase hex>`",
+                digest
+            )
+        })?;
         tar.append_path_with_name(&path, format!("blobs/sha256/{}", hex_of(digest)))
             .with_context(|| format!("blob {} is not in the blob cache", digest))?;
     }
