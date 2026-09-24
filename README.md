@@ -48,9 +48,11 @@ and the publisher's wallet, which also needs mock USDC.
    Solana settlement key first: the connector will not start without SOL.
 4. Run `./bootstrap.sh`. It installs Docker, learns the connector's sealing
    key, renders the config, starts the five services on a Let's Encrypt
-   *staging* certificate and installs the timer that keeps the box on `main`.
-5. Once `https://provider.<domain>/health` answers, set
-   `LETSENCRYPT_STAGING=0` in `.env` and run `./init-letsencrypt.sh`.
+   *staging* certificate — warning first if either A-record does not resolve
+   here yet, and stopping with the cause and the command to re-run if
+   issuance fails — and installs the timer that keeps the box on `main`.
+5. Once step 4 succeeds, set `LETSENCRYPT_STAGING=0` in `.env` and run
+   `./init-letsencrypt.sh`.
 
 Then [check it works](deploy/README.md#checking-it-works): `/health` answers
 `{"status":"ok"}`, `https://proxy.provider.<domain>/ilp/identity` answers the
