@@ -109,11 +109,17 @@ asserts the 2560 MiB ceiling so a capacity bump has to move this table with it.
 If `dmesg` ever shows the OOM killer, the two knobs are a `capacity` and the
 plan — raise them together.
 
-**A nanode cannot do this job.** 1 GiB runs the five containers and has nothing
-left to sell, and it cannot compile the provider: this is the one box in the
-fleet that builds its own app, and a Rust release build of this crate wants
-more memory than a nanode has. If the `ci` tier gets real use, `g6-standard-4`
-(8 GiB, 4 vCPU) is the next honest step.
+**A nanode cannot do this job.** 1 GiB runs the five containers — themselves
+≈600 MiB — and has nothing left to sell: the `basic`/`ci` capacity this table
+sells is 2560 MiB on its own, before the host's own overhead. If the `ci` tier
+gets real use, `g6-standard-4` (8 GiB, 4 vCPU) is the next honest step.
+
+(Before TOON_Network#151, this box also had to *compile* the provider — this
+is the one box in the fleet that built its own app — and a Rust release build
+of this crate needed more memory than a nanode has on top of everything above.
+`provider` and `directory-publisher` are published images now, pulled like the
+connector already was, so that floor is gone; the sold-capacity arithmetic
+above is what actually sizes this box.)
 
 **Disk.** 20 GiB of the 80 GB is the verified-blob cache
 (`blob_cache_max_bytes`). There is no eviction yet: a blob that would cross the
@@ -290,26 +296,31 @@ rows, which is the signal that its last lease has ended.
 The box follows a branch, `main` unless `TRACK_BRANCH` in `.env` names
 another. Every five minutes `toon-auto-apply.timer` runs
 `auto-apply.sh`, which fast-forwards the checkout, re-renders both configs,
-rebuilds the two images, brings the stack up, waits for the provider, the
-connector and the publisher to report healthy, and then **verifies**: the
-running connector's `GET /ilp` must advertise exactly what the rendered config
-says it should.
+**pulls** the provider, publisher and connector images, brings the stack up,
+waits for the provider, the connector and the publisher to report healthy, and
+then **verifies**: the running connector's `GET /ilp` must advertise exactly
+what the rendered config says it should.
 
 It refuses rather than guesses: a dirty working tree stops it loudly, only a
-fast-forward is ever applied, and a box that comes back unhealthy exits
+fast-forward is ever applied, a failed pull fails the apply rather than
+running on a stale container, and a box that comes back unhealthy exits
 non-zero so `systemctl status` and the journal show it.
 
 A `restart provider` does **not** end a lease. The lease table is on a named
 volume and is reloaded, and a running workload is a sibling container on the
 host daemon that the app never stopped.
 
-This bundle has **no Watchtower**, unlike the store and relay boxes. Those run
-a published image on a moving `:release` tag; this repository publishes no
-image yet, so the provider and its publisher are built from the checkout and
-the update path is the git one — app and config together, in one reviewed
-commit. Adding a `publish-provider-image.yml` and switching to a pinned image
-is a clean follow-up; nothing else here would change, except that the box would
-stop needing to compile Rust.
+This bundle has **no Watchtower**, same as the store and relay boxes' own
+reason for having none of the connector: every image here — `provider`,
+`directory-publisher` and `provider-connector` — is an **immutable** pin, not
+a moving `:release` tag, so there is nothing for a Watchtower to follow. A pin
+moves only by a reviewed commit to `docker-compose.yml` — the same discipline
+as § "Bumping the connector pin", below, now covering all three images —
+and the box picks it up on its next fast-forward like any other file change:
+pull, then `up -d`. `.github/workflows/publish-provider-image.yml` is what
+publishes the provider and publisher candidates a pin bump chooses between.
+Nothing here compiles anything any more (TOON_Network#151); the checkout this
+script fast-forwards is config, not a build input.
 
 ```bash
 systemctl status toon-auto-apply.timer
