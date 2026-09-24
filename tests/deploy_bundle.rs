@@ -1588,3 +1588,234 @@ fn the_hidden_images_are_pinned() {
         "bootstrap.sh does not pre-pull the app's pinned hidden-lease sidecar"
     );
 }
+
+// ── `toon-provider status` and its check timer (TOON_Network#172) ───────────
+
+/// One service's block of a compose file: its `  name:` line up to the next
+/// line at the same two-space indent (or the end of `services:`).
+fn service_block<'a>(compose: &'a str, service: &str) -> &'a str {
+    let header = format!("\n  {service}:\n");
+    let start = compose
+        .find(&header)
+        .unwrap_or_else(|| panic!("no service {service} in the compose file"))
+        + 1;
+    let body = &compose[start + header.len() - 1..];
+    let end = body
+        .lines()
+        .scan(0usize, |offset, line| {
+            let at = *offset;
+            *offset += line.len() + 1;
+            Some((at, line))
+        })
+        .find(|(_, line)| {
+            let indent = line.len() - line.trim_start().len();
+            !line.trim().is_empty() && !line.trim_start().starts_with('#') && indent <= 2
+        })
+        .map(|(at, _)| at)
+        .unwrap_or(body.len());
+    &compose[start..start + header.len() - 1 + end]
+}
+
+/// `KEY: value` under a block's `environment:`, as written.
+fn env_value<'a>(block: &'a str, key: &str) -> Option<&'a str> {
+    block
+        .lines()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix(&format!("{key}: ")))
+}
+
+/// Every environment variable `toon-provider status` reads, from the flags
+/// themselves, so a renamed flag cannot leave the compose file pointing at
+/// nothing.
+fn status_env_vars() -> Vec<String> {
+    use clap::Args;
+    toon_provider::status::StatusArgs::augment_args(clap::Command::new("status"))
+        .get_arguments()
+        .filter_map(|a| a.get_env().map(|e| e.to_string_lossy().into_owned()))
+        .collect()
+}
+
+#[test]
+fn the_provider_container_is_pointed_at_every_status_source() {
+    let compose = deploy("docker-compose.yml");
+    let provider = service_block(&compose, "provider");
+    let known = status_env_vars();
+
+    // Every TOON_* the service sets for `status` is one it reads.
+    for line in provider.lines().map(str::trim) {
+        let Some((key, _)) = line.split_once(": ") else {
+            continue;
+        };
+        if key.starts_with("TOON_") && key != "TOON_PROVIDER_CONFIG" {
+            assert!(
+                known.iter().any(|k| k == key),
+                "docker-compose.yml sets {key} on the provider, which `status` does not read \
+                 (it reads {known:?})"
+            );
+        }
+    }
+
+    // The connector by its compose name and the port its client edge binds —
+    // the operator surface is merged into that one listener.
+    assert_eq!(
+        env_value(provider, "TOON_CONNECTOR_OPERATOR_URL"),
+        Some("http://provider-connector:4000")
+    );
+    assert!(deploy("connector.toml.template").contains("client_edge_addr = \"0.0.0.0:4000\""));
+    assert!(compose.contains("\n  provider-connector:\n"));
+
+    // The two files it reads are mounted read-only, from files render.sh
+    // writes, at the paths the environment names.
+    for (var, file) in [
+        ("TOON_CONNECTOR_BEARER_TOKEN_FILE", "operator-bearer.token"),
+        (
+            "TOON_SETTLEMENT_SOLANA_ADDRESS_FILE",
+            "settlement-solana.address",
+        ),
+    ] {
+        let target = format!("/etc/toon-provider/{file}");
+        assert_eq!(env_value(provider, var), Some(target.as_str()), "{var}");
+        assert!(
+            provider.contains(&format!("- ./{file}:{target}:ro")),
+            "the provider does not mount {file} read-only at {target}"
+        );
+        assert!(
+            deploy("render.sh").contains(&format!("> {file}")),
+            "render.sh does not write {file}, and docker would create a directory there"
+        );
+    }
+
+    // The settlement RPC: the connector's own on a public box, the box's own
+    // node on a hidden one.
+    assert_eq!(
+        env_value(provider, "TOON_SETTLEMENT_SOLANA_RPC_URL"),
+        Some("${SETTLEMENT_SOLANA_RPC_URL:-}")
+    );
+    let hidden = deploy("docker-compose.hidden.yml");
+    assert_eq!(
+        env_value(
+            service_block(&hidden, "provider"),
+            "TOON_SETTLEMENT_SOLANA_RPC_URL"
+        ),
+        Some("${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-}")
+    );
+
+    // No key file is mounted into the provider.
+    for line in provider.lines().map(str::trim) {
+        assert!(
+            !(line.starts_with("- ") && line.contains(".key")),
+            "the provider mounts a key file: {line}"
+        );
+    }
+}
+
+#[test]
+fn render_writes_the_settlement_address_keys_py_derives() {
+    // No key file (the test bundle carries none): an EMPTY file, so the
+    // bind mount finds a file and `status` says the address is unknown.
+    let render = run_render(&devnet_env(), None, None, &[]);
+    assert!(render.ok, "{}", render.stderr);
+    assert!(render.wrote("settlement-solana.address"));
+    assert_eq!(render.read("settlement-solana.address"), "");
+
+    // With the key and keys.py beside it, the address keys.py derives —
+    // the derivation tests/deploy_keys.rs pins against the connector's.
+    let dir = render.dir.path();
+    fs::copy(deploy_dir().join("keys.py"), dir.join("keys.py")).unwrap();
+    fs::write(dir.join("settlement-solana.key"), "44".repeat(32)).unwrap();
+    let out = Command::new("bash")
+        .arg(dir.join("render.sh"))
+        .current_dir(dir)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("TOON_PROVIDER_BIN", env!("CARGO_BIN_EXE_toon-provider"))
+        .env("PROC_MEMINFO", dir.join("meminfo"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let derive = Command::new("python3")
+        .args(["keys.py", "provider", "solana-address"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(derive.status.success());
+    let address = String::from_utf8(derive.stdout).unwrap();
+    assert_eq!(address.trim().len(), 44, "a base58 ed25519 key: {address}");
+    assert_eq!(render.read("settlement-solana.address"), address);
+
+    let ignore = deploy(".gitignore");
+    assert!(ignore
+        .lines()
+        .any(|l| l.trim() == "settlement-solana.address"));
+}
+
+#[test]
+fn the_check_timer_runs_status_check_inside_the_provider_every_five_minutes() {
+    let service = deploy("toon-provider-check.service");
+    let exec = service
+        .lines()
+        .find_map(|l| l.strip_prefix("ExecStart="))
+        .expect("an ExecStart");
+    assert!(
+        exec.contains("docker compose exec -T provider toon-provider"),
+        "{exec}"
+    );
+    assert!(exec.ends_with("status --check"), "{exec}");
+    assert!(
+        exec.contains("--config /etc/toon-provider/provider.toml"),
+        "the path the provider service mounts its config at: {exec}"
+    );
+    assert!(deploy("docker-compose.yml")
+        .contains("- ./provider.toml:/etc/toon-provider/provider.toml:ro"));
+    assert!(service.contains("Type=oneshot"));
+
+    // From the checkout the auto-apply unit runs from, so compose reads the
+    // same .env (and COMPOSE_FILE, on a hidden box).
+    let apply = deploy("toon-auto-apply.service");
+    let apply_dir = apply
+        .lines()
+        .find_map(|l| l.strip_prefix("ExecStart="))
+        .and_then(|e| e.strip_suffix("/auto-apply.sh"))
+        .unwrap();
+    assert!(
+        service.contains(&format!("WorkingDirectory={apply_dir}\n")),
+        "the check does not run from {apply_dir}"
+    );
+
+    let timer = deploy("toon-provider-check.timer");
+    assert!(timer.contains("OnUnitActiveSec=5min"));
+    assert!(timer.contains("Unit=toon-provider-check.service"));
+    assert!(timer.contains("WantedBy=timers.target"));
+}
+
+#[test]
+fn bootstrap_installs_and_starts_the_check_timer() {
+    let bootstrap = deploy("bootstrap.sh");
+    let words: Vec<String> = bootstrap
+        .lines()
+        .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect();
+    for unit in ["toon-provider-check.service", "toon-provider-check.timer"] {
+        assert!(
+            words.contains(&format!("install -m 644 {unit} /etc/systemd/system/{unit}")),
+            "bootstrap.sh does not install {unit}"
+        );
+    }
+    assert!(bootstrap.contains("systemctl enable --now toon-provider-check.timer"));
+    // After the stack is up: the check runs inside the provider container.
+    let up = bootstrap.find("docker compose up -d\n").unwrap();
+    let enable = bootstrap
+        .find("systemctl enable --now toon-provider-check.timer")
+        .unwrap();
+    assert!(up < enable);
+    assert!(bootstrap.contains("toon-provider status"));
+
+    // auto-apply.sh keeps them current on a box bootstrapped before them.
+    let apply = deploy("auto-apply.sh");
+    assert!(apply.contains("toon-provider-check.service toon-provider-check.timer"));
+    assert!(apply.contains("systemctl enable --now toon-provider-check.timer"));
+}

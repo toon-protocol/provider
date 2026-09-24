@@ -10,8 +10,17 @@ use toon_provider::{load_config, persisted_leases, render_routes, ProviderServic
 #[derive(Parser)]
 #[command(name = "toon-provider", version, about = "Sell leases on workloads over the TOON Network", long_about = None)]
 struct Cli {
-    /// Path to the provider's TOML config file.
-    #[arg(short, long, global = true, default_value = "provider.toml")]
+    /// Path to the provider's TOML config file. Defaults to
+    /// `TOON_PROVIDER_CONFIG` when that is set, which the image sets to the
+    /// path its compose service mounts, so `docker compose exec provider
+    /// toon-provider <command>` finds the config without `--config`.
+    #[arg(
+        short,
+        long,
+        global = true,
+        env = "TOON_PROVIDER_CONFIG",
+        default_value = "provider.toml"
+    )]
     config: String,
 
     #[command(subcommand)]
@@ -68,6 +77,17 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+
+    /// What an operator asks of this box: identity, directory, publisher,
+    /// leases, earnings and funding, in that order (ADR 0029).
+    ///
+    /// Reads the RUNNING provider's `GET /operator/status`, the publisher's
+    /// `GET /status`, the connector's claims and channels (with its operator
+    /// bearer token) and the connector's Solana settlement balance. A source
+    /// that does not answer is shown as such; the rest still print. With
+    /// `--check`, exits 1 naming each problem that needs a person — what
+    /// `toon-provider-check.timer` runs every five minutes.
+    Status(toon_provider::status::StatusArgs),
 }
 
 /// `EvictionReason` as a `clap` value: `toon_provider::nostr::wire` stays
@@ -206,6 +226,10 @@ async fn main() -> Result<()> {
                 anyhow::bail!("top-up refused: {}", status);
             }
             Ok(())
+        }
+        Some(Command::Status(args)) => {
+            let code = toon_provider::status::run(&config, &args).await?;
+            std::process::exit(code)
         }
         None => ProviderService::new(config)?.run().await,
     }

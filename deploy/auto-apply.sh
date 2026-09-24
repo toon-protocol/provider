@@ -320,6 +320,34 @@ if [ -f nginx/conf.d/node.conf ] && ! cmp -s nginx/conf.d/node.conf nginx/conf.d
     || echo "::warning:: nginx would not reload; check its logs."
 fi
 
+# ── The check timer (TOON_Network#172) ───────────────────────────────────────
+# bootstrap.sh installs toon-provider-check.{service,timer}; a box bootstrapped
+# before they existed, or one whose committed units have changed since, gets
+# them here. Only on a box bootstrap.sh set up — its own auto-apply timer is
+# installed — and never fatal: a unit that will not install is a warning, not
+# a reason to leave the box on the old commit. The path is overridable only
+# for tests (TOON_SYSTEMD_DIR).
+SYSTEMD_DIR=${TOON_SYSTEMD_DIR:-/etc/systemd/system}
+if [ -f "$SYSTEMD_DIR/toon-auto-apply.timer" ]; then
+  units_changed=0
+  for unit in toon-provider-check.service toon-provider-check.timer; do
+    if ! cmp -s "$unit" "$SYSTEMD_DIR/$unit"; then
+      if install -m 644 "$unit" "$SYSTEMD_DIR/$unit"; then
+        units_changed=1
+      else
+        echo "::warning:: could not install $unit into $SYSTEMD_DIR."
+      fi
+    fi
+  done
+  if [ "$units_changed" = 1 ]; then
+    if systemctl daemon-reload && systemctl enable --now toon-provider-check.timer; then
+      echo "installed the toon-provider-check timer (toon-provider status --check, every 5 minutes)"
+    else
+      echo "::warning:: could not enable toon-provider-check.timer; run bootstrap.sh's step 9 by hand."
+    fi
+  fi
+fi
+
 # Written only now, after render, the pulls, `up -d`, all three health waits
 # and the activation check have all succeeded -- the one thing this file is
 # allowed to claim. Gitignored (deploy/.gitignore).

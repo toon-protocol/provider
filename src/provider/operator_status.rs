@@ -49,6 +49,13 @@ pub struct OperatorStatus {
     pub service: String,
     /// The instant the document describes, on the provider's clock.
     pub generated_at: u64,
+    /// When the process answering started, on the same clock. The directory
+    /// section's outcomes are all from since then (they are kept in memory
+    /// only), so a reader can tell "not published yet, just restarted" from
+    /// "not landing". Optional to a reader: a provider from before this
+    /// field answers without it.
+    #[serde(default)]
+    pub started_at: Option<u64>,
     pub identity: IdentitySection,
     pub directory: DirectorySection,
     pub leases: LeasesSection,
@@ -186,6 +193,7 @@ pub async fn operator_status(state: &AppState) -> OperatorStatus {
         version: OPERATOR_STATUS_VERSION,
         service: "provider".to_string(),
         generated_at: state.clock.now(),
+        started_at: Some(state.started_at),
         identity,
         directory,
         leases,

@@ -58,7 +58,11 @@ and the publisher's wallet, which also needs mock USDC.
 5. Once step 4 succeeds, set `LETSENCRYPT_STAGING=0` in `.env` and run
    `./init-letsencrypt.sh`.
 
-Then [check it works](deploy/README.md#checking-it-works): `/health` answers
+Then check it works: `docker compose exec provider toon-provider status`
+answers identity, directory, publisher, leases, earnings and funding in one
+report, and the timer `bootstrap.sh` installs runs `status --check` every five
+minutes ([Is it working?](deploy/README.md#is-it-working-toon-provider-status)).
+By hand: `/health` answers
 `{"status":"ok"}`, `https://proxy.provider.<domain>/ilp/identity` answers the
 `CONNECTOR_SEAL_KEY` in `.env`, and the relay holds your Profile, Listings and
 Liveness:
@@ -1096,7 +1100,23 @@ sections (`publisher`, `earnings`, `funding`) beside these:
 
 The answer carries no secret: no Continuation Token, no reserved spawn, no
 `.anyone` key, no private key. Fixtures: `operator_status.listed.json` and
-`operator_status.unlisted.json` under `tests/fixtures/wire/`.
+`operator_status.unlisted.json` under `tests/fixtures/wire/`. It also carries
+`started_at`, when the process started, so a reader can tell a publication
+that has not landed *yet* from one that keeps failing.
+
+**`toon-provider status`** prints that document with the three sections only a
+command on the box can add — the publisher's channel and runway, the
+connector's earnings (read with its operator bearer token) and the settlement
+key's SOL balance — in ADR 0029's order: identity, directory, publisher,
+leases, earnings, funding. Each source is read on its own and one that does
+not answer is shown as such. `--json` prints one document, the one above with
+`publisher`, `earnings` and `funding` added at the same `version`; `--check`
+exits 1 naming each problem that needs a person (Liveness under two cadences
+from expiry, a relay refusing the latest write after the first cadence since
+start, runway under `--min-runway` (7d), a sealing-key mismatch, the
+settlement key under `--min-sol` (0.005 SOL)). Where it finds each source, and
+the timer that runs the check, are in
+[deploy/README.md](deploy/README.md#is-it-working-toon-provider-status).
 
 ## Availability and image policy
 

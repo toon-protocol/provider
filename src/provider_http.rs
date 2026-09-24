@@ -95,6 +95,11 @@ pub struct AppState {
     /// every other outbound request of this process (spec §10), and direct
     /// otherwise.
     pub connector_probe: reqwest::Client,
+    /// When this process started, on its own clock. `GET /operator/status`
+    /// reports it so `toon-provider status --check` can tell a publication
+    /// that has not landed YET, in the first cadence after a restart, from
+    /// one that keeps failing (TOON_Network#172).
+    pub started_at: u64,
 }
 
 impl AppState {
@@ -130,6 +135,7 @@ impl AppState {
             CONNECTOR_PROBE_TIMEOUT,
             "the connector identity probe",
         )?;
+        let started_at = clock.now();
         Ok(Self {
             config: Arc::new(config),
             backend,
@@ -143,6 +149,7 @@ impl AppState {
             fetcher,
             publications: Arc::new(PublicationLog::new()),
             connector_probe,
+            started_at,
         })
     }
 

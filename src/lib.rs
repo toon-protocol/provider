@@ -18,6 +18,7 @@ pub mod outbound_proxy;
 pub mod provider;
 pub mod provider_http;
 pub mod reputation;
+pub mod status;
 pub mod topup;
 
 pub use anon_control::AnonControlService;

@@ -1,0 +1,22 @@
+[Unit]
+Description=Check this TOON provider box needs nobody (toon-provider status --check)
+Documentation=https://github.com/toon-protocol/provider/blob/main/deploy/README.md
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Compose reads COMPOSE_FILE out of .env here, so a hidden box's overlay is
+# included exactly as it is for every other command run in this directory.
+WorkingDirectory=/root/provider/deploy
+# The check runs INSIDE the provider container, where every source it reads is
+# reachable: the loopback operator port, the publisher and the connector by
+# their compose names, the bearer token and the settlement address as the
+# read-only mounts docker-compose.yml gives it. It prints one line per problem
+# and exits 1 when there is one, which is this unit failing: the lines are in
+# `journalctl -u toon-provider-check`, and the failure in `systemctl --failed`.
+ExecStart=/usr/bin/env docker compose exec -T provider toon-provider --config /etc/toon-provider/provider.toml status --check
+SyslogIdentifier=toon-provider-check
+# Four sources at up to 10s each, read concurrently; a hung exec must not
+# stack runs.
+TimeoutStartSec=120
