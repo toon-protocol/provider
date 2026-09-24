@@ -48,7 +48,9 @@ fi
 
 pull=()
 for service in "${services[@]}"; do
-  image=$(docker compose config --images "$service")
+  # The service's own image only: `config --images <service>` also lists the
+  # images of whatever the service depends_on (provider -> directory-publisher).
+  image=$(docker compose config --format json | jq -r --arg s "$service" '.services[$s].image')
   if docker compose config --format json | jq -e --arg s "$service" '.services[$s].build' >/dev/null; then
     docker compose build --quiet "$service" >&2
   elif [ "${image##*:}" = "$PLACEHOLDER" ] && dockerfile=$(dockerfile_for "$service"); then

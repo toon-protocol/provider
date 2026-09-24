@@ -295,7 +295,9 @@ fn auto_apply_with_units(
     let dir = box_dir(handle);
     let log = dir.join(format!("stub-log-{run_id}"));
     fs::write(&log, "").unwrap();
-    let config_json = r#"{"services":{"provider":{},"provider-connector":{},"directory-publisher":{},"nginx":{}}}"#;
+    // The images the scripts read, from the resolved model, the way
+    // `docker compose config --format json` answers them.
+    let config_json = r#"{"services":{"provider":{"image":"ghcr.io/toon-protocol/provider:sha-0000000"},"provider-connector":{"image":"ghcr.io/toon-protocol/connector:rust-2026.09.11.1"},"directory-publisher":{"image":"ghcr.io/toon-protocol/directory-publisher:sha-0000000"},"nginx":{"image":"nginx:alpine"}}}"#;
     let out = Command::new("bash")
         .arg(dir.join("deploy/auto-apply.sh"))
         .env_clear()
@@ -317,9 +319,13 @@ fn auto_apply_with_units(
             "provider provider-connector directory-publisher nginx",
         )
         .env("STUB_CONFIG_JSON", config_json)
+        // What real compose answers for `config --images provider` once
+        // provider depends_on the publisher: BOTH images, one per line. A
+        // script that still asks it this way hands `docker` two references
+        // (the live box's render failed exactly so after TOON_Network#178).
         .env(
             "STUB_IMAGE_provider",
-            "ghcr.io/toon-protocol/provider:sha-0000000",
+            "ghcr.io/toon-protocol/provider:sha-0000000\nghcr.io/toon-protocol/directory-publisher:sha-0000000",
         )
         .env(
             "STUB_IMAGE_provider_connector",
