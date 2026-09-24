@@ -16,7 +16,11 @@
 #   * only a fast-forward is applied, never a merge or a reset, so a box can
 #     never end up on a tree nobody reviewed;
 #   * after `up -d` every service must reach `healthy`, or this exits non-zero
-#     so `systemctl status` and the journal show it.
+#     so `systemctl status` and the journal show it;
+#   * a render or apply failure is retried, and reported, on every run until
+#     it is fixed -- never silently sat on with the box left on the new
+#     commit and the old config (TOON_Network#160; see `deploy/.applied`,
+#     below the fetch, for how).
 #
 # ── One deliberate difference from the store and relay copies ────────────────
 # IT TRACKS A NAMED BRANCH. `TRACK_BRANCH` in .env, defaulting to `main`,
@@ -82,8 +86,10 @@ fingerprint_provider_inputs() {
   { sha256sum provider.toml 2>/dev/null || true; } | sha256sum | awk '{print $1}'
 }
 
-# One apply at a time, and never one racing a human.
-exec 9>/var/lock/toon-auto-apply.lock
+# One apply at a time, and never one racing a human. The path is overridable
+# only for tests (TOON_AUTOAPPLY_LOCK) -- a box always takes the real one.
+LOCK_FILE=${TOON_AUTOAPPLY_LOCK:-/var/lock/toon-auto-apply.lock}
+exec 9>"$LOCK_FILE"
 flock -n 9 || { echo "another apply is already running; leaving it alone"; exit 0; }
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -98,12 +104,40 @@ if ! git fetch -q origin "$TRACK_BRANCH"; then
 fi
 LOCAL=$(git rev-parse HEAD)
 REMOTE=$(git rev-parse FETCH_HEAD)
-if [ "$LOCAL" = "$REMOTE" ]; then
-  exit 0   # nothing merged since last time; the quiet, common case
+
+# The commit the LAST run applied AND VERIFIED, held separately from HEAD
+# (TOON_Network#160). Without it, "LOCAL = REMOTE" alone reads as "nothing to
+# do" even when the PREVIOUS run fast-forwarded here and then failed partway
+# through -- render.sh, pull-images.sh, `up -d`, or a health or activation
+# check below -- which leaves the box sitting on the new commit with the OLD
+# rendered config and the OLD containers, reporting success on every run
+# after. Comparing HEAD to `.applied` instead of to what was just fetched
+# means a fetch that brings back nothing new is still retried as work when
+# the two disagree.
+#
+# Missing entirely -- an existing box's first run under this check, or one
+# whose `deploy/.applied` was lost -- is read the SAFER of the two ways: as
+# needing an apply, not as "must already be applied". Re-running the full
+# apply against a box already on the right commit with healthy containers is
+# a harmless no-op (the fingerprints and the `GET /ilp` comparison below find
+# nothing to change), where guessing the other way would paper over a first
+# apply that had in fact failed before this file ever existed. bootstrap.sh
+# deliberately does not write it either: the box's first-ever apply IS this
+# script's first run, and it should prove itself exactly like every later
+# one does.
+APPLIED_FILE="$DEPLOY_DIR/.applied"
+APPLIED=$(cat "$APPLIED_FILE" 2>/dev/null || true)
+
+if [ "$LOCAL" = "$REMOTE" ] && [ "$LOCAL" = "$APPLIED" ]; then
+  exit 0   # nothing merged since last time, and it is already applied
 fi
 
-echo "applying ${LOCAL:0:7} -> ${REMOTE:0:7} (origin/$TRACK_BRANCH)"
-git merge --ff-only FETCH_HEAD
+if [ "$LOCAL" != "$REMOTE" ]; then
+  echo "applying ${LOCAL:0:7} -> ${REMOTE:0:7} (origin/$TRACK_BRANCH)"
+  git merge --ff-only FETCH_HEAD
+else
+  echo "retrying ${LOCAL:0:7}: the last apply did not finish (deploy/.applied is '${APPLIED:-<none>}')"
+fi
 
 cd "$DEPLOY_DIR"
 # Both configs are RENDERED, so a pulled template change is not live until
@@ -120,7 +154,14 @@ cd "$DEPLOY_DIR"
 # config self-heals on the next apply even when no file byte moved.
 CONNECTOR_SUM_BEFORE=$(fingerprint_connector_inputs)
 PROVIDER_SUM_BEFORE=$(fingerprint_provider_inputs)
-./render.sh
+if ! ./render.sh; then
+  echo "FAILED: render.sh could not render the config for ${REMOTE:0:7} (its message is" >&2
+  echo "above). If it names a missing .env variable, add it -- deploy/.env.example lists" >&2
+  echo "every required one, with the devnet preset for settlement. deploy/.applied is" >&2
+  echo "left naming the last commit that DID apply, so this is retried, and reported the" >&2
+  echo "same way, on every run, until it is fixed." >&2
+  exit 1
+fi
 CONNECTOR_SUM_AFTER=$(fingerprint_connector_inputs)
 PROVIDER_SUM_AFTER=$(fingerprint_provider_inputs)
 
@@ -143,8 +184,16 @@ PROVIDER_BEFORE_UP=$(docker compose "${COMPOSE[@]}" ps -q provider || true)
 # fails loudly on it rather than bring up a stale container. The one
 # exception is pull-images.sh's: while a pin is still the sha-0000000
 # placeholder, that image is built from the checkout just fast-forwarded.
-./pull-images.sh
-docker compose "${COMPOSE[@]}" up -d
+if ! ./pull-images.sh; then
+  echo "FAILED: pull-images.sh could not get the images for ${REMOTE:0:7} (its message is" >&2
+  echo "above). deploy/.applied is left naming the last commit that DID apply, so this is" >&2
+  echo "retried, and reported the same way, on every run, until it is fixed." >&2
+  exit 1
+fi
+if ! docker compose "${COMPOSE[@]}" up -d; then
+  echo "FAILED: 'docker compose up -d' failed for ${REMOTE:0:7} (its message is above)." >&2
+  exit 1
+fi
 
 # A service must reach `healthy`. Docker resets Health.Status to `starting` on
 # restart, so calling this right after a restart cannot read a stale `healthy`.
@@ -270,5 +319,10 @@ if [ -f nginx/conf.d/node.conf ] && ! cmp -s nginx/conf.d/node.conf nginx/conf.d
     && cp nginx/conf.d/node.conf nginx/conf.d/.node.conf.applied \
     || echo "::warning:: nginx would not reload; check its logs."
 fi
+
+# Written only now, after render, the pulls, `up -d`, all three health waits
+# and the activation check have all succeeded -- the one thing this file is
+# allowed to claim. Gitignored (deploy/.gitignore).
+printf '%s\n' "$REMOTE" > "$APPLIED_FILE"
 
 echo "applied ${REMOTE:0:7}; provider, connector and publisher healthy, rendered config verified live."

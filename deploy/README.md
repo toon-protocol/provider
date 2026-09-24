@@ -349,6 +349,30 @@ fast-forward is ever applied, a failed pull fails the apply rather than
 running on a stale container, and a box that comes back unhealthy exits
 non-zero so `systemctl status` and the journal show it.
 
+**A render or apply failure is retried, and reported, forever — never
+silently sat on (TOON_Network#160).** Once everything above succeeds, this
+script records the commit it just applied in `deploy/.applied` (gitignored).
+The *next* run compares `HEAD` to `.applied`, not to whatever `git fetch`
+just brought back — so if `render.sh`, `pull-images.sh` or anything after it
+fails partway through, the box is left on the new commit with the OLD
+rendered config and containers, but `.applied` still names the OLD one, and
+the very next timer tick treats that as work to do even though the fetch
+brings back nothing new. It fails the same way, by the same name, on every
+run — `systemctl status` and the journal keep showing it — until whatever
+`render.sh` named (most often a newly-required `.env` variable;
+`.env.example` lists every one, with the devnet preset for settlement) is
+fixed and a run finally succeeds and rewrites `.applied`.
+
+On a box with no `deploy/.applied` yet — an existing box's first run under
+this check, or one where the file was lost — that absence is read as
+*needing* an apply, not as "must already be applied": the run re-renders,
+re-verifies and writes `.applied` once everything reports healthy. That run
+is a harmless no-op if the box was already caught up (nothing on disk or in
+the running containers has anything to change), which is why treating a
+missing file this way, rather than having `bootstrap.sh` write it, is the
+safer of the two: the box's first-ever apply IS this script's first run, and
+it proves itself exactly like every later one does.
+
 A `restart provider` does **not** end a lease. The lease table is on a named
 volume and is reloaded, and a running workload is a sibling container on the
 host daemon that the app never stopped.
