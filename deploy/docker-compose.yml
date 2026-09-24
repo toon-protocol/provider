@@ -144,6 +144,12 @@ services:
       # replaces it with the box's own node, and `status` on a hidden
       # provider reads anon.settlement_rpc_url and nothing else anyway.
       TOON_SETTLEMENT_SOLANA_RPC_URL: ${SETTLEMENT_SOLANA_RPC_URL:-}
+      # `toon-provider redeem` (TOON_Network#173) reads the EVM gas price
+      # here for its per-channel estimate, from the RPC the connector redeems
+      # through. Unset, the EVM estimate says "unknown" and nothing else
+      # changes. The operator key is NOT mounted or set: `redeem` reads it
+      # from stdin.
+      TOON_SETTLEMENT_EVM_RPC_URL: ${SETTLEMENT_EVM_RPC_URL:-}
     expose: ['8080']
     healthcheck:
       # Free and unauthenticated; it says the process is up and nothing more.

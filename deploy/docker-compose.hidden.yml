@@ -154,6 +154,9 @@ services:
       # anon.settlement_rpc_url on a hidden provider regardless; this keeps
       # the public URL out of the container altogether.
       TOON_SETTLEMENT_SOLANA_RPC_URL: ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-}
+      # The same rule for `toon-provider redeem`'s EVM gas price: this box's
+      # own node, which it also refuses to ask unless it is private.
+      TOON_SETTLEMENT_EVM_RPC_URL: ${HIDDEN_SETTLEMENT_EVM_RPC_URL:-}
     networks:
       default: {}
       # Where the daemon's control and SOCKS ports are. No fixed address: it
