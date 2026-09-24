@@ -36,6 +36,12 @@ provider_name = "${PROVIDER_NAME}"
 # says this box is one of the fleet's (TOON_DEVNET_BOX=1).
 ilp_address = "${ILP_ADDRESS}"
 
+# ── Public or hidden: exactly one of the next two blocks is rendered ────────
+# render.sh keeps the block for this box and drops the other, by HIDDEN in
+# .env (README § "Running hidden"). Each is written out whole rather than
+# patched line by line, so the rendered file reads as what it is.
+#
+# @public-only:begin
 # Where tenants reach their workloads: this box's public address, and the
 # host ports the daemon publishes there. No hostnames, no TLS — a workload
 # behind a hostname is what the Workload Gateway is for.
@@ -43,6 +49,16 @@ public_ip = "${PUBLIC_IP}"
 
 # Not a Hidden Provider. This box publishes a host and is found at it.
 hidden = false
+# @public-only:end
+# @hidden-only:begin
+# A HIDDEN PROVIDER (spec §10, ADR 0008): the Profile says `hidden: true` and
+# carries no host, and every Listing is labelled `hidden:true`. There is
+# deliberately no `public_ip`: setting one beside this is a refusal to start.
+# The claim is checked by nobody outside, so the app refuses to load unless
+# every hiding condition is configured: the connector at an `.anyone` address
+# (below) and the [anon] tables at the end of this file.
+hidden = true
+# @hidden-only:end
 
 # THIS IS THE SECRET. 64 hex characters, from .env.
 nostr_private_key = "${NOSTR_PRIVATE_KEY}"
@@ -63,7 +79,13 @@ relay_set = ["${RELAY_WS}"]
 # answers with, including the `0x`. bootstrap.sh reads it off
 # `GET /ilp/identity` and writes it into .env rather than asking anyone to
 # copy it by hand; two copies of a key is how they come to disagree.
-connector_url = "https://proxy.provider.${DOMAIN}/ilp"
+#
+# render.sh writes the URL: `https://proxy.provider.<DOMAIN>/ilp` on a public
+# box, and `http://<HIDDEN_ADDRESS>/ilp` on a hidden one, where the address is
+# the one the box's own anon daemon publishes (bootstrap.sh copies it into
+# .env the way it copies the sealing key). Plain http there is not a
+# downgrade: the address IS the key it is reached by.
+connector_url = "${CONNECTOR_URL}"
 connector_seal_key = "${CONNECTOR_SEAL_KEY}"
 
 # Containers on a shared host kernel, and it says so. `dedicated-host` would
@@ -113,10 +135,18 @@ operator_url = "http://127.0.0.1:8090"
 # published ports (41000 + 16i), so the two ranges are 40000-40099 and
 # 41000-42599 and they do not overlap — which the app checks at load.
 #
-# THESE ARE PUBLIC. The daemon publishes them on this host's address because
-# that is how a tenant reaches its workload, and bootstrap.sh opens them in
-# ufw so `ufw status` tells the truth about a box that is already reachable
-# there (docker's iptables rules run ahead of ufw either way).
+# ON A PUBLIC BOX THESE ARE PUBLIC. The daemon publishes them on this host's
+# address because that is how a tenant reaches its workload, and bootstrap.sh
+# opens them in ufw so `ufw status` tells the truth about a box that is already
+# reachable there (docker's iptables rules run ahead of ufw either way).
+#
+# ON A HIDDEN BOX THEY ARE STILL PUBLISHED ON THE HOST, by each lease's ingress
+# forwarder, because that is where the anon daemon forwards the lease's
+# `.anyone` address to. A tenant who found its own workload answering on
+# <this box's IP>:<its port> would have found the box, so hidden-firewall.sh
+# drops every connection to these ranges that docker would forward in from
+# outside (DOCKER-USER, which ufw cannot reach), and bootstrap.sh's ufw lets
+# the daemon's own address, and nothing else, reach them from inside.
 workload_id_range_start = 1000
 workload_id_range_end = 1099
 ssh_port_start = 40000
@@ -170,3 +200,51 @@ decimals = ${SETTLEMENT_SOLANA_DECIMALS}
 deny_digests = []
 deny_references = []
 max_image_bytes = 5000000000
+
+# @hidden-only:begin
+# ═════════════════════════════════════════════════════════════════════════════
+# What a Hidden Provider needs from its anon daemon (spec §10, ADR 0008)
+# ═════════════════════════════════════════════════════════════════════════════
+# Each key is a HIDING CONDITION: a missing one is a refusal to load, naming
+# it. Every address is fixed, and is the same one anon/anonrc binds and
+# docker-compose.hidden.yml pins; tests/deploy_bundle.rs checks the three
+# files still agree. `../provider.example.toml` documents each key at length.
+[anon]
+# This provider's OWN outbound: relay reads, image fetches, the publish
+# request. `socks5h`, so the daemon resolves every name and no lookup leaves
+# this box.
+socks_proxy = "socks5h://172.30.2.2:9050"
+
+# THE SETTLEMENT RPC THIS BOX RUNS ITSELF, and the one line here that is the
+# operator's. It must be loopback, private, or a name resolving only to such
+# addresses: an unproxied read of a public RPC links this box's network
+# location to its on-chain identity, and the app refuses one at load. The
+# connector's own two RPCs are the same self-hosted endpoints (render.sh puts
+# HIDDEN_SETTLEMENT_EVM_RPC_URL and HIDDEN_SETTLEMENT_SOLANA_RPC_URL into its
+# [settlement.*] tables), because the connector is what actually reads the
+# chain. This field holds one URL, so it names the Solana one, the RPC the
+# connector transacts on at boot; render.sh puts the EVM one through the same
+# loader check before it writes anything.
+settlement_rpc_url = "${HIDDEN_SETTLEMENT_SOLANA_RPC_URL}"
+
+# The host as the daemon sees it: the gateway of `toon-provider-hidden`. A
+# hidden lease's ports are published on the host by its ingress forwarder,
+# and the daemon forwards the lease's `.anyone` address to them here. An IP,
+# because anon resolves an ADD_ONION target when it parses the command.
+forward_host = "172.30.2.1"
+
+# The control port, over which each lease's `.anyone` address is made and
+# destroyed. Cookie authentication: the daemon writes the cookie onto a
+# volume this container mounts read-only.
+[anon.control]
+addr = "172.30.2.2:9051"
+cookie_file = "/var/lib/anon/control/control_auth_cookie"
+
+# EVERY HIDDEN WORKLOAD'S ONLY ROUTE OUT. The network is internal, the daemon
+# is its gateway and its DNS, and direct egress is dropped by the kernel, not
+# by anything an image could ignore. `network` is the name Docker knows it by
+# (docker-compose.hidden.yml gives it that `name:`).
+[anon.egress]
+network = "toon-provider-hidden-egress"
+gateway = "10.204.0.2"
+# @hidden-only:end

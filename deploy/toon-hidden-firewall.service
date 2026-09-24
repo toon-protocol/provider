@@ -1,0 +1,18 @@
+[Unit]
+Description=A hidden TOON provider's DOCKER-USER rules (lease ports reachable through anon only)
+Documentation=https://github.com/toon-protocol/provider/blob/main/deploy/README.md
+# After docker, because docker creates DOCKER-USER at start and the rules go
+# into it; PartOf, so a docker restart, which recreates the chain empty,
+# re-runs this too. Installed and enabled by bootstrap.sh on a HIDDEN=1 box
+# only.
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/root/provider/deploy/hidden-firewall.sh
+
+[Install]
+WantedBy=multi-user.target docker.service

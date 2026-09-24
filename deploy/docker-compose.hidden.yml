@@ -1,0 +1,245 @@
+# =============================================================================
+# The HIDDEN provider box — an overlay on docker-compose.yml (HIDDEN=1)
+# =============================================================================
+# A Hidden Provider (spec §10, ADR 0008) publishes no host. Its Profile says
+# `hidden: true` and carries no `host`, every Listing is labelled
+# `hidden:true`, and it is reached only at `.anyone` addresses: its connector
+# at one, and each lease at one of its own. This file adds what that takes to
+# the ordinary box and takes away what it must not have:
+#
+#   anon                 NEW. The Anyone daemon: the connector's address, the
+#                        control port that makes one address per lease, the
+#                        SOCKS port the provider and the publisher dial out
+#                        through, and the transparent egress of every hidden
+#                        workload. anon/anonrc explains each.
+#   provider-connector   pinned on the hidden network, where the daemon's
+#                        hidden service points. Still on 127.0.0.1:4000 for
+#                        bootstrap.sh and auto-apply.sh; never public.
+#   provider             on the hidden network, with the daemon's control
+#                        cookie mounted read-only.
+#   directory-publisher  on the hidden network, and refusing to start unless
+#                        it dials out through the daemon.
+#   nginx, certbot       DISABLED. No public DNS, no TLS edge, no certificate.
+#
+#   tenant ──socks5h──▶ Anyone ──▶ anon ──▶ provider-connector :4000 ──▶ provider
+#                                   ▲                                       │
+#                  per-lease .anyone │ ADD_ONION (control port)  ◀───────────┘
+#                                   │
+#   toon-<id> (internal egress network only) ── default route ──▶ anon :9040
+#
+# It is used by naming it in .env, beside the switch:
+#
+#   HIDDEN=1
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.hidden.yml
+#
+# docker compose reads COMPOSE_FILE out of .env for every command run in this
+# directory, so bootstrap.sh, pull-images.sh, auto-apply.sh and an operator's
+# own `docker compose ps` all see the same stack; render.sh refuses a .env
+# where the two lines disagree. README § "Running hidden".
+#
+# ── The two networks, and why both are pinned ────────────────────────────────
+# The rest of the bundle leaves addresses to Docker. Here a fixed address is
+# the mechanism: anon resolves a HiddenServicePort target when it PARSES its
+# config, before the connector it names exists, so the target must be an IP
+# literal; and a workload's gateway must be an IP the provider can write into
+# its config. anon/anonrc, the rendered provider.toml and this file name the
+# same addresses, and tests/deploy_bundle.rs checks that they still do.
+# A collision with another network on the host shows up at `up` as "Pool
+# overlaps with other one on this address space"; the fix is to move a subnet
+# and every address that names it, in all three places, in one commit.
+# =============================================================================
+
+services:
+  # ── The Anyone daemon ──────────────────────────────────────────────────────
+  # ON THREE NETWORKS, one job each:
+  #   default   its own way out to the Anyone network, and nothing is bound
+  #             there;
+  #   hidden    pinned at .2, where every surface it offers the provider is
+  #             bound: the ControlPort and the SocksPort. Binding them here and
+  #             not on 0.0.0.0 is the point: a workload shares the egress
+  #             network with this daemon, and a control port it could dial
+  #             would be one a tenant could dial;
+  #   egress    internal, pinned at .2: the gateway, the resolver and the only
+  #             way out for every hidden workload.
+  #
+  # NET_ADMIN AND AN ENTRYPOINT OF ITS OWN. A TransPort is reachable only
+  # through nat PREROUTING REDIRECT rules, which must exist before the daemon
+  # drops to `anond` and before any workload runs, so the container installs
+  # them as root in its OWN network namespace and then execs the image's own
+  # entrypoint unchanged. They match the SOURCE SUBNET, not an interface name,
+  # because the interface a network lands on inside the container is not
+  # stable.
+  #
+  # NO `ports:`. Nothing of this daemon is reachable from outside the box.
+  anon:
+    # Built here from anon/Dockerfile, which pins its base by digest and the
+    # release binary by sha256: there is no published image of the release
+    # this needs (anon/Dockerfile says why). pull-images.sh builds it.
+    build:
+      context: ./anon
+    image: toon-provider-anon:v0.4.10.2
+    init: true
+    cap_add:
+      - NET_ADMIN
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -e
+        nat() { iptables -t nat -C PREROUTING "$$@" 2>/dev/null || iptables -t nat -A PREROUTING "$$@"; }
+        inp() { iptables -C INPUT "$$@" 2>/dev/null || iptables -A INPUT "$$@"; }
+        # DNS first, then the catch-all: a tcp/53 packet must reach the
+        # DNSPort, not the TransPort, and -A appends in order. The catch-all
+        # leaves traffic INSIDE the egress subnet alone, so two workloads on
+        # it still reach each other directly.
+        nat -s 10.204.0.0/24 -p udp --dport 53 -j REDIRECT --to-ports 5353
+        nat -s 10.204.0.0/24 -p tcp --dport 53 -j REDIRECT --to-ports 5353
+        nat -s 10.204.0.0/24 ! -d 10.204.0.0/24 -p tcp --syn -j REDIRECT --to-ports 9040
+        # AND THEN ONLY THOSE TWO PORTS. Without the DROP a workload could dial
+        # anything this daemon listens on. Redirected packets arrive already
+        # rewritten to 9040/5353, which is why the ACCEPTs come first.
+        inp -s 10.204.0.0/24 -p tcp --dport 9040 -j ACCEPT
+        inp -s 10.204.0.0/24 -p tcp --dport 5353 -j ACCEPT
+        inp -s 10.204.0.0/24 -p udp --dport 5353 -j ACCEPT
+        inp -s 10.204.0.0/24 -j DROP
+        exec docker-entrypoint anon -f /etc/anon/anonrc
+    volumes:
+      - ./anon/anonrc:/etc/anon/anonrc:ro
+      # THIS BOX'S ADDRESS and the private key behind it. A named volume, and
+      # it must outlive everything: lose it and the connector's address
+      # changes under every tenant that read the old one. Back it up.
+      - anon_data:/var/lib/anon
+      # The control cookie, on a volume of its own so the provider can be
+      # given the cookie WITHOUT the key beside it.
+      - anon_control:/var/lib/anon/control
+    networks:
+      default: {}
+      hidden:
+        ipv4_address: 172.30.2.2
+      hidden-egress:
+        ipv4_address: 10.204.0.2
+    healthcheck:
+      # THREE halves, and none is enough alone. The hostname file appears at
+      # key generation, seconds in; `Bootstrapped 100%` says the descriptor
+      # can actually be published; the cookie is written when the control
+      # port opens, which is what the provider needs.
+      test:
+        - 'CMD-SHELL'
+        - "test -s /var/lib/anon/hidden_service/hostname && grep -q 'Bootstrapped 100%' /var/lib/anon/notice.log && test -s /var/lib/anon/control/control_auth_cookie"
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+    restart: unless-stopped
+
+  # PINNED AT .3, because anon/anonrc forwards the address's port 80 here by IP
+  # literal. The loopback publish in docker-compose.yml stays: it is how
+  # bootstrap.sh reads the sealing key and auto-apply.sh verifies GET /ilp, and
+  # 127.0.0.1 is not a public door.
+  provider-connector:
+    networks:
+      default: {}
+      hidden:
+        ipv4_address: 172.30.2.3
+
+  provider:
+    volumes:
+      # READ-ONLY, and the cookie alone: how the provider authenticates to
+      # 172.30.2.2:9051 to make and destroy each lease's address.
+      - anon_control:/var/lib/anon/control:ro
+    networks:
+      default: {}
+      # Where the daemon's control and SOCKS ports are. No fixed address: it
+      # dials, it is not dialled here.
+      hidden: {}
+    depends_on:
+      # A hidden provider with no daemon is not a hidden provider: it checks
+      # the control port at startup and refuses to start without it.
+      anon:
+        condition: service_healthy
+      # AND ITS PUBLISHER BEFORE ITSELF, which is about DNS, not publishing.
+      # The provider decides ONCE, at startup, whether publish_url is near
+      # (dial direct) or not (dial through anon), by resolving it. A publisher
+      # that does not exist yet does not resolve, and the provider would ask
+      # the daemon for a circuit to `directory-publisher` for the rest of its
+      # life: SOCKS "host unreachable" on every Profile, Listing and Liveness.
+      # The sandbox found this the hard way (infra/sandbox, `provider-hs`).
+      directory-publisher:
+        condition: service_started
+
+  directory-publisher:
+    environment:
+      # WITHOUT THESE TWO IT REFUSES TO START: a publisher beside a hidden
+      # provider that reached the relay's edge from this box's real address
+      # would name exactly what the provider hides. Every host it dials rides
+      # the proxy, except a chain RPC on a private address, which no exit
+      # could reach and no watched network carries (tools/publisher/README.md
+      # § "Publishing from a hidden provider").
+      TOON_HIDDEN: 'true'
+      TOON_SOCKS_PROXY: socks5h://172.30.2.2:9050
+      # HTTP, and it has to be: the SOCKS carriage is the publisher's `fetch`,
+      # a BTP websocket never passes through it, and so the publisher refuses
+      # to start with a proxy and `btp` or `auto`. The devnet relay PINS
+      # `g.toon.relay` to BTP and refuses an HTTP write, so ON THE DEVNET TODAY
+      # A HIDDEN PROVIDER'S DIRECTORY WRITES ARE REFUSED. README § "Running
+      # hidden" has the check and what closes it.
+      TOON_TRANSPORT: http
+    networks:
+      default: {}
+      hidden: {}
+    depends_on:
+      anon:
+        condition: service_healthy
+
+  # No TLS edge on a box with no public name. `profiles:` is how an overlay
+  # switches a service off: nothing here ever enables `public`.
+  nginx:
+    profiles: ['public']
+  certbot:
+    profiles: ['public']
+
+networks:
+  # The daemon, the connector, the provider and the publisher. Dynamic
+  # addresses come from the upper half only: Docker does not reserve a pinned
+  # address for a container that has not started yet, and a publisher handed
+  # .3 on a cold start would leave the connector failing with "Address already
+  # in use" (the sandbox's TOON_Network#44).
+  hidden:
+    name: toon-provider-hidden
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.2.0/24
+          # The HOST, as the daemon sees it: provider.toml's
+          # `anon.forward_host`. A hidden lease's ports are published on the
+          # host by its ingress forwarder, and the daemon forwards the lease's
+          # `.anyone` address to them here. Named rather than left to Docker's
+          # default so it can never move.
+          gateway: 172.30.2.1
+          ip_range: 172.30.2.128/25
+
+  # EVERY HIDDEN WORKLOAD'S ONLY NETWORK, and `[anon.egress].network`. The
+  # provider attaches workloads to it by shelling out to the host daemon,
+  # which knows it by this `name:`, never by the compose key. `internal`, so
+  # Docker gives it no NAT and a container on it no default route: a workload
+  # reaches 10.204.0.0/24 and nothing else until the provider's
+  # namespace-owner sidecar points it at the daemon, and a tenant image that
+  # ignores every proxy setting still cannot leak where this box is. The
+  # provider attaches to it and never removes it.
+  hidden-egress:
+    name: toon-provider-hidden-egress
+    driver: bridge
+    internal: true
+    driver_opts:
+      # A stable interface name, for the one host where it matters: with
+      # br_netfilter loaded, Docker's isolation of an internal network drops
+      # every transparently proxied packet unless DOCKER-USER accepts
+      # bridge-to-bridge traffic on this interface. hidden-firewall.sh adds
+      # that rule by this name.
+      com.docker.network.bridge.name: toon-hegress
+    ipam:
+      config:
+        - subnet: 10.204.0.0/24
+
+volumes:
+  anon_data:
+  anon_control:

@@ -71,11 +71,13 @@ The provider and publisher images are pinned to a commit, `sha-<short>`. Until
 the first image is published the pin is the placeholder `sha-0000000`, and
 `pull-images.sh` builds both images on the box instead, and compiling the
 provider needs that 4 GB too
-([How updates arrive](deploy/README.md#how-updates-arrive)). A
-[Hidden Provider](#hidden-provider), reachable only through Anyone, is
-configured with the `[anon]` tables in
-[`provider.example.toml`](provider.example.toml), but the bundle does not set
-one up yet.
+([How updates arrive](deploy/README.md#how-updates-arrive)). To run a
+[Hidden Provider](#hidden-provider) instead, reachable only through Anyone,
+set `HIDDEN=1` and follow
+[Running hidden](deploy/README.md#running-hidden): it needs no domain and no
+public ports, but it does need Base Sepolia and Solana devnet RPC nodes of
+your own, and on the devnet today its directory writes are refused (that
+section says why).
 
 ## Status
 

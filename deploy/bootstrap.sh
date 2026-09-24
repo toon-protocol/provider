@@ -7,7 +7,12 @@
 # Expects .env, the listings file it names and the three connector key files
 # to already be in this directory; see README.md § "Standing one up". Everything it installs is
 # listed here, and it makes no changes outside this directory, ufw, docker,
-# journald and the two systemd units it owns.
+# journald and the systemd units it owns.
+#
+# With HIDDEN=1 in .env it stands up a Hidden Provider instead (README §
+# "Running hidden"): it opens no public port but SSH, starts the anon daemon
+# and copies the box's `.anyone` address into .env before anything else, and
+# installs no certificate, since there is no public name to certify.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -17,9 +22,12 @@ for f in signer.key settlement.key settlement-solana.key; do
 done
 
 set -a; . ./.env; set +a
-: "${DOMAIN:?set DOMAIN in .env}"
-: "${PUBLIC_IP:?set PUBLIC_IP in .env}"
 : "${ILP_ADDRESS:?set ILP_ADDRESS in .env}"
+HIDDEN=${HIDDEN:-0}
+if [ "$HIDDEN" != 1 ]; then
+  : "${DOMAIN:?set DOMAIN in .env}"
+  : "${PUBLIC_IP:?set PUBLIC_IP in .env}"
+fi
 # Checked here as well as in render.sh so a missing one stops this before it
 # has touched the firewall, not five steps in.
 [ -f "${LISTINGS_FILE:-listings.toml}" ] || {
@@ -43,16 +51,31 @@ echo "==> [1/9] Firewall"
 # so opening them here does not make them reachable — they already were. It
 # makes `ufw status` tell the truth about this box, which matters when the next
 # person reads it.
+#
+# A HIDDEN box opens SSH and nothing else: no ACME, no TLS edge, no workload
+# range. Everything a tenant reaches arrives over a circuit the anon daemon
+# dialled OUT for, and the workload ports docker still publishes on this host
+# are closed in DOCKER-USER by hidden-firewall.sh (step 4), because ufw cannot
+# close what docker opens.
 apt-get update -y
 apt-get install -y ufw curl gettext-base openssl jq
 ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
 ufw allow 22/tcp  comment 'SSH'
-ufw allow 80/tcp  comment 'HTTP (ACME)'
-ufw allow 443/tcp comment 'HTTPS'
-ufw allow 40000:40099/tcp comment 'workload SSH forwards'
-ufw allow 41000:42599/tcp comment 'workload published ports'
+if [ "$HIDDEN" = 1 ]; then
+  # The anon daemon, and only it, reaches a lease's ports: it dials them at
+  # the hidden network's gateway, through docker-proxy, so they arrive on
+  # INPUT, where this is the one allowance. 172.30.2.2 is its pinned address
+  # (docker-compose.hidden.yml); the ranges are the public box's, below.
+  ufw allow proto tcp from 172.30.2.2 to any port 40000:40099 comment 'anon -> lease SSH forwards'
+  ufw allow proto tcp from 172.30.2.2 to any port 41000:42599 comment 'anon -> lease published ports'
+else
+  ufw allow 80/tcp  comment 'HTTP (ACME)'
+  ufw allow 443/tcp comment 'HTTPS'
+  ufw allow 40000:40099/tcp comment 'workload SSH forwards'
+  ufw allow 41000:42599/tcp comment 'workload published ports'
+fi
 ufw --force enable
 
 echo "==> [2/9] Docker"
@@ -73,7 +96,75 @@ echo "==> [4/9] Pre-pull the workload sidecars"
 docker pull docker:28-dind@sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac || \
   echo "::warning:: could not pre-pull the dind sidecar; the first ci lease will pull it itself."
 
+if [ "$HIDDEN" = 1 ]; then
+  # Every hidden lease runs two sidecars of this one image, pinned by digest in
+  # the app (toon_provider::docker::HIDDEN_SIDECAR_IMAGE): the namespace owner
+  # that points the workload's only route at anon, and the ingress forwarder
+  # that holds its ports. The HOST daemon pulls it, not the provider, so an
+  # unpulled one is a pull from this box's real address at the moment a lease
+  # starts; pulled now, it is one pull at setup that says nothing about any
+  # lease. tests/deploy_bundle.rs keeps this line equal to the app's pin.
+  docker pull alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc || \
+    echo "::warning:: could not pre-pull the hidden-lease sidecar; the first hidden lease will pull it itself."
+
+  # DOCKER-USER, which ufw cannot reach: no lease port from outside the box,
+  # and, if br_netfilter is loaded, the egress bridge let through.
+  # Installed as a unit so it comes back after a reboot or a docker restart,
+  # both of which leave the chain empty.
+  if [ "$(cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo 0)" = 1 ]; then
+    echo "    br_netfilter is loaded: hidden-firewall.sh will accept bridged traffic on the egress bridge"
+  fi
+  install -m 644 toon-hidden-firewall.service /etc/systemd/system/toon-hidden-firewall.service
+  systemctl daemon-reload
+  systemctl enable toon-hidden-firewall.service
+  systemctl restart toon-hidden-firewall.service
+fi
+
 echo "==> [5/9] The connector, and the sealing key it alone knows"
+# ── First, on a hidden box: the address the connector is reached at ──────────
+# The same handshake one step earlier. The connector publishes its own
+# endpoint (`[node] http_endpoint`), and on a hidden box that is the `.anyone`
+# address this box's anon daemon generates, which does not exist until the
+# daemon has run. So: build and start the daemon alone, read the address, and
+# write it into .env as HIDDEN_ADDRESS, where render.sh and every later apply
+# read it. The daemon generates its key within seconds; publishing a
+# descriptor for it waits on bootstrapping, which the provider waits for (its
+# healthcheck), not this step.
+if [ "$HIDDEN" = 1 ]; then
+  ./pull-images.sh anon
+  docker compose up -d --no-deps anon
+  echo "    waiting for the anon daemon to generate this box's address"
+  for _ in $(seq 1 40); do
+    ADDRESS=$(docker compose exec -T anon cat /var/lib/anon/hidden_service/hostname 2>/dev/null | tr -d '[:space:]' || true)
+    [ -n "${ADDRESS:-}" ] && break
+    sleep 3
+  done
+  if ! printf '%s' "${ADDRESS:-}" | grep -Eqx '[a-z2-7]{56}\.anyone'; then
+    echo "FAILED: read '${ADDRESS:-}' from the anon daemon, not an .anyone address." >&2
+    echo "If it is empty the daemon did not start; its log says why (AgreeToTerms and the" >&2
+    echo "Nickname are the usual two):" >&2
+    docker compose logs --tail 40 anon >&2 || true
+    exit 1
+  fi
+  if [ -z "${HIDDEN_ADDRESS:-}" ]; then
+    printf '\n# Written by bootstrap.sh from the anon daemon. A COPY of this box%s .anyone\n# address, which is where every tenant reaches the connector.\nHIDDEN_ADDRESS=%s\n' "'s" "$ADDRESS" >> .env
+    echo "    recorded HIDDEN_ADDRESS=${ADDRESS} in .env"
+    set -a; . ./.env; set +a
+  elif [ "$HIDDEN_ADDRESS" != "$ADDRESS" ]; then
+    # The key behind the address is on the anon_data volume. A different
+    # address means that volume was lost or replaced, and every Profile a
+    # tenant has read names a connector that no longer answers. Say so rather
+    # than quietly republishing.
+    echo "FAILED: .env says HIDDEN_ADDRESS=${HIDDEN_ADDRESS}, but the anon daemon now" >&2
+    echo "publishes ${ADDRESS}. The anon_data volume holding this box's address key was" >&2
+    echo "lost or replaced. Restore it from a backup to keep the old address, or delete the" >&2
+    echo "HIDDEN_ADDRESS line from .env and re-run to move to the new one." >&2
+    exit 1
+  else
+    echo "    HIDDEN_ADDRESS is already in .env and the daemon agrees — kept"
+  fi
+fi
+
 # A chicken and egg, resolved once and then recorded. provider.toml must carry
 # the connector's sealing key VERBATIM (ADR 0011) — a tenant compares the two
 # byte for byte and refuses to spawn if they differ — and the connector does
@@ -116,7 +207,8 @@ if [ -z "${CONNECTOR_SEAL_KEY:-}" ]; then
     echo "FAILED: the connector never answered GET /ilp/identity." >&2
     echo "Almost always one of: the Solana settlement key holds no SOL (it submits a" >&2
     echo "transaction at boot), a key file is not readable by uid 10001, or a settlement" >&2
-    echo "address is wrong. The log says which:" >&2
+    echo "address is wrong. On a hidden box, also: one of the HIDDEN_SETTLEMENT_*_RPC_URL" >&2
+    echo "nodes is not reachable from the container, or not synced. The log says which:" >&2
     docker compose logs --tail 40 provider-connector >&2 || true
     exit 1
   fi
@@ -138,7 +230,11 @@ echo "==> [7/9] Pull and start"
 docker compose up -d
 
 echo "==> [8/9] TLS"
-./init-letsencrypt.sh
+if [ "$HIDDEN" = 1 ]; then
+  echo "    none: a hidden box has no public name. The address is its own key."
+else
+  ./init-letsencrypt.sh
+fi
 
 echo "==> [9/9] The auto-apply timer"
 # The box follows the tracked branch from here on: every five minutes it
@@ -151,11 +247,21 @@ systemctl daemon-reload
 systemctl enable --now toon-auto-apply.timer
 
 echo
-echo "provider box up."
-echo "  paid ILP edge : https://proxy.provider.${DOMAIN}/ilp"
-echo "  sealing key   : https://proxy.provider.${DOMAIN}/ilp/identity"
-echo "  health        : https://provider.${DOMAIN}/health"
-echo "  workloads     : ${PUBLIC_IP}:40000-40099 (ssh), ${PUBLIC_IP}:41000-42599 (published)"
+if [ "$HIDDEN" = 1 ]; then
+  echo "hidden provider box up."
+  echo "  paid ILP edge : http://${HIDDEN_ADDRESS}/ilp          (through anon only)"
+  echo "  sealing key   : http://${HIDDEN_ADDRESS}/ilp/identity"
+  echo "  workloads     : each lease at an .anyone address of its own"
+  echo
+  echo "The address is only reachable once the daemon has bootstrapped and published"
+  echo "its descriptor: \`docker compose logs anon | grep Bootstrapped\`."
+else
+  echo "provider box up."
+  echo "  paid ILP edge : https://proxy.provider.${DOMAIN}/ilp"
+  echo "  sealing key   : https://proxy.provider.${DOMAIN}/ilp/identity"
+  echo "  health        : https://provider.${DOMAIN}/health"
+  echo "  workloads     : ${PUBLIC_IP}:40000-40099 (ssh), ${PUBLIC_IP}:41000-42599 (published)"
+fi
 echo
 echo "The Profile, the Listings and the Liveness are published by"
 echo "directory-publisher. If they do not appear on the relay, that container's"

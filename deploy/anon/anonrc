@@ -1,0 +1,156 @@
+##===== /etc/anon/anonrc — a HIDDEN provider box's own daemon (`anon`) =====##
+#
+# Only a box with HIDDEN=1 runs this (docker-compose.hidden.yml, README §
+# "Running hidden"). It does the three jobs a Hidden Provider needs from anon
+# (spec §10, ADR 0008):
+#
+#   1. INGRESS: one `.anyone` address, for this box's connector. It is the only
+#      way a tenant reaches the paid edge. bootstrap.sh reads the address back
+#      and writes it into .env as HIDDEN_ADDRESS, the way it copies the
+#      connector's sealing key.
+#   2. A CONTROL PORT, cookie-authenticated, over which `toon-provider` creates
+#      one `.anyone` address per lease (ADD_ONION) and destroys it when the
+#      lease ends (DEL_ONION).
+#   3. EGRESS: a SOCKS port for the provider's and the publisher's own
+#      outbound, and a TRANSPARENT proxy (TransPort + DNSPort) that is the only
+#      route off the internal network every hidden workload is attached to.
+#
+# COMMITTED, NOT RENDERED. Nothing in it is an operator's: every address is a
+# fixed one on the two pinned networks docker-compose.hidden.yml declares, and
+# tests/deploy_bundle.rs checks each one against that file and the rendered
+# provider.toml. A change is a reviewed commit, like a pin. It is the sandbox's
+# conf/anonrc-hs (infra/sandbox), with this bundle's addresses:
+#
+#   172.30.2.0/24   `toon-provider-hidden`: the daemon (.2), the connector (.3)
+#                   and the provider and publisher (dynamic, from .128 up)
+#   10.204.0.0/24   `toon-provider-hidden-egress`, internal: the daemon (.2)
+#                   and every hidden workload
+#
+# Mounted READ-ONLY at /etc/anon/anonrc.
+
+# WITHOUT THIS THE DAEMON DOES NOT START. In a non-interactive container it
+# exits at once ("User has not agreed to the terms and conditions") rather
+# than prompting.
+AgreeToTerms 1
+
+# Drop from root to the image's own unprivileged user. Everything bound below
+# is above 1024 for that reason, and the iptables rules that make the TransPort
+# reachable are installed by the container's entrypoint BEFORE the daemon drops.
+User anond
+DataDirectory /var/lib/anon
+
+# EXPLICIT, and it cannot be dropped: the image's entrypoint APPENDS a Nickname
+# when it finds none, and this file is mounted read-only, so a missing one is a
+# write failure at boot. A client publishes no nickname, so every box can share
+# this one.
+Nickname toonprovider
+
+# A SERVICE AND A CLIENT, never a relay: it publishes addresses, opens circuits
+# for this provider and its workloads, and carries nobody else's traffic. An
+# operator who also runs Anyone relays runs them elsewhere, not in this
+# container: a relay's address is public, and this daemon's is the one thing
+# the box hides.
+ClientOnly 1
+ORPort 0
+DirPort 0
+
+# ── 1. THE CONTROL PORT ─────────────────────────────────────────────────────
+#
+# What `toon-provider` speaks per lease: PROTOCOLINFO 1, AUTHENTICATE <hex
+# cookie>, then ADD_ONION NEW:ED25519-V3 Flags=Detach
+# Port=<port>,172.30.2.1:<port> …, and DEL_ONION <id> when the lease ends. It
+# also connects and authenticates once at startup, and refuses to start if it
+# cannot.
+#
+# BOUND TO ONE ADDRESS, and to the right one. Loopback would reach nothing: the
+# provider is a separate container. 0.0.0.0 would reach one caller too many:
+# this daemon is also on the EGRESS network, and a control port a workload
+# could dial is one a tenant could dial. So it binds this daemon's pinned
+# address on `toon-provider-hidden`, which it shares with the provider, the
+# connector and the publisher and nothing else (the INPUT DROP in
+# docker-compose.hidden.yml is the belt to that brace). Published on no host
+# interface.
+ControlPort 172.30.2.2:9051
+
+# COOKIE, NOT PASSWORD: the daemon writes a 32-byte file at startup and the
+# provider proves it can read it, so there is no secret to put in .env.
+CookieAuthentication 1
+
+# ON ITS OWN VOLUME, deliberately not the default path beside the
+# DataDirectory: the volume holding the cookie is mounted into the provider
+# read-only, and the DataDirectory holds the private key of this box's
+# address. The provider needs the first and has no business with the second.
+# provider.toml's `[anon.control] cookie_file` names this path.
+CookieAuthFile /var/lib/anon/control/control_auth_cookie
+
+# The provider runs as root, so a 0600 cookie is already readable there.
+# Group-readable anyway, so a provider image that later drops privileges only
+# needs the group.
+CookieAuthFileGroupReadable 1
+
+# ── 2. THE SOCKS PORT ───────────────────────────────────────────────────────
+#
+# Where the provider's own outbound leaves (relay reads, image fetches, the
+# publish request) and the publisher's (every relay write it pays for).
+# provider.toml's `anon.socks_proxy` and the publisher's TOON_SOCKS_PROXY both
+# name socks5h://172.30.2.2:9050: `socks5h`, so this daemon resolves every
+# name and no lookup leaves the box.
+SocksPort 172.30.2.2:9050
+
+# THE POLICY COVERS EVERY CLIENT LISTENER, not just this one: anon applies
+# SocksPolicy to the DNSPort and the TransPort too, so the egress subnet must
+# be accepted here or a workload's DNS comes back REFUSED and nothing about
+# the transparent proxy works. Two subnets, the two ways in:
+#   172.30.2.0/24  the provider and its publisher, dialling SOCKS
+#   10.204.0.0/24  the workloads, arriving at the TransPort and the DNSPort
+SocksPolicy accept 172.30.2.0/24
+SocksPolicy accept 10.204.0.0/24
+SocksPolicy accept 127.0.0.0/8
+SocksPolicy reject *
+
+# ── 3. THE TRANSPARENT EGRESS ───────────────────────────────────────────────
+#
+# A hidden workload is attached to `toon-provider-hidden-egress` (internal:
+# Docker gives it no NAT and no default route), and the provider's own
+# namespace-owner sidecar points its default route and its resolver at this
+# daemon's fixed address there, 10.204.0.2 (`[anon.egress].gateway`). The
+# container's entrypoint redirects what arrives from that subnet:
+#
+#     udp/tcp dport 53        -> 5353  (the DNSPort)
+#     tcp, leaving the subnet -> 9040  (the TransPort)
+#
+# so the workload needs no proxy settings, cannot opt out, and has no second
+# route to try. UDP other than DNS has nowhere to go: anon carries TCP.
+TransPort 10.204.0.2:9040
+DNSPort 10.204.0.2:5353
+
+# What makes `.anyone` names work for a workload with no SOCKS client: a name
+# resolved through the DNSPort is answered from this block, and a connection
+# to that address is mapped back to the name on the circuit.
+VirtualAddrNetworkIPv4 10.192.0.0/10
+AutomapHostsOnResolve 1
+AutomapHostsSuffixes .anyone,.exit
+
+# ── THE ADDRESS THIS DAEMON PUBLISHES ───────────────────────────────────────
+#
+# THE KEY IS OPERATIONAL STATE. HiddenServiceDir is on the `anon_data` named
+# volume: lose it and the address changes, and every Profile a tenant has read
+# names a connector that no longer answers. Back it up with the key files.
+#
+# Per-lease addresses are NOT here: they are made at runtime over the control
+# port and destroyed with the lease. This file holds only the address that has
+# to exist before anything runs.
+HiddenServiceDir /var/lib/anon/hidden_service
+
+# PORT 80 -> the connector's client edge (`client_edge_addr = "0.0.0.0:4000"`),
+# pinned at 172.30.2.3. An IP LITERAL, and it has to be: anon resolves a
+# HiddenServicePort target when it PARSES this file, before the connector
+# exists, and a container name there aborts the daemon at boot ("Unparseable
+# address in hidden service port configuration"). Port 80, so the address
+# needs no port: tenants pay at http://<address>.anyone/ilp.
+HiddenServicePort 80 172.30.2.3:4000
+
+# Twice, deliberately: stdout is where `docker compose logs anon` reads, and
+# the file is what the healthcheck greps for `Bootstrapped 100%`.
+Log notice stdout
+Log notice file /var/lib/anon/notice.log

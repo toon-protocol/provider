@@ -17,6 +17,14 @@
 # never asks the registry. A build of the provider compiles the Rust app, which
 # needs at least 4 GB of RAM (README § "Sizing the box"); once the pin is a
 # real published tag, none of this runs and the box only pulls.
+#
+# ── And one service that is always built: the hidden box's anon daemon ─────
+# docker-compose.hidden.yml's `anon` has a `build:` of its own, because no
+# registry publishes the anon release a hidden provider needs (anon/Dockerfile
+# says why, and pins what it builds from by digest and sha256). A service
+# with a `build:` is built, never pulled: a pull would ask a registry for a
+# name that only exists on this box. The layer cache makes a rebuild of an
+# unchanged Dockerfile a no-op.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -41,7 +49,9 @@ fi
 pull=()
 for service in "${services[@]}"; do
   image=$(docker compose config --images "$service")
-  if [ "${image##*:}" = "$PLACEHOLDER" ] && dockerfile=$(dockerfile_for "$service"); then
+  if docker compose config --format json | jq -e --arg s "$service" '.services[$s].build' >/dev/null; then
+    docker compose build --quiet "$service" >&2
+  elif [ "${image##*:}" = "$PLACEHOLDER" ] && dockerfile=$(dockerfile_for "$service"); then
     echo "::warning:: $image is the placeholder pin (nothing published yet); building $service from this checkout instead." >&2
     docker build --quiet -t "$image" -f "../$dockerfile" .. >&2
   else
