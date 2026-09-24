@@ -134,11 +134,12 @@ PROVIDER_BEFORE_UP=$(docker compose "${COMPOSE[@]}" ps -q provider || true)
 
 # Every service is a published image now (TOON_Network#151): `provider` and
 # `directory-publisher` pull the immutable pin `docker-compose.yml` names, the
-# same as the connector already did. No `build` step and no `--ignore-*`
-# flags: a pull that fails is a real problem (a bad pin, an unpublished tag,
-# GHCR unreachable) and this should fail loudly on it, not paper over it and
-# bring up a stale container.
-docker compose "${COMPOSE[@]}" pull
+# same as the connector already did. No `--ignore-*` flags: a pull that fails
+# is a real problem (a bad pin, an unpublished tag, GHCR unreachable) and this
+# fails loudly on it rather than bring up a stale container. The one
+# exception is pull-images.sh's: while a pin is still the sha-0000000
+# placeholder, that image is built from the checkout just fast-forwarded.
+./pull-images.sh
 docker compose "${COMPOSE[@]}" up -d
 
 # A service must reach `healthy`. Docker resets Health.Status to `starting` on

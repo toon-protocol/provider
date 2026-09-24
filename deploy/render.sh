@@ -18,8 +18,9 @@
 # The connector's [[routes]] are not written by anyone: they are what
 # `toon-provider routes` prints for the provider.toml rendered here, so a
 # price is written once and the two files cannot drift. On a box the binary
-# is the provider image this compose file runs, pulled or built first so the
-# rows come from the same build that will serve them, and run with
+# is the provider image this compose file pins, got by pull-images.sh first
+# (pulled, or built here while the pin is the placeholder) so the rows come
+# from the same build that will serve them, and run with
 # `docker run` rather than `docker compose run`: the service's own bind mount
 # names ./provider.toml, which --connector-only has not rendered, and docker
 # answers a missing bind source by creating a directory there. It also mounts
@@ -181,10 +182,9 @@ provider_routes() {
   if [ -n "${TOON_PROVIDER_BIN:-}" ]; then
     "$TOON_PROVIDER_BIN" --config "$1" routes
   else
-    # Whichever the compose file says: a pinned image is pulled, a build is
-    # built (a cache hit when nothing changed). The other is a no-op.
-    docker compose pull --quiet --ignore-buildable provider >&2
-    docker compose build --quiet provider >&2
+    # The pinned image, pulled -- or, while the pin is still the sha-0000000
+    # placeholder, built from this checkout under that name. pull-images.sh.
+    ./pull-images.sh provider
     local image volume state=()
     image=$(docker compose config --images provider)
     volume=$(docker volume ls -q \

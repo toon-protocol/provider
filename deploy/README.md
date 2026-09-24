@@ -26,6 +26,7 @@ One host, five containers, and the workloads it sells.
 | `nginx/node.conf.template` | Two server blocks: the paid edge, and `GET /health`. Rendered. |
 | `render.sh` | Renders the above from `.env` and the listings file. Idempotent. |
 | `bootstrap.sh` | Fresh host → running box, including the sealing-key handshake. Idempotent. |
+| `pull-images.sh` | Gets the pinned images onto the box: pulls them, or builds one from the checkout while its pin is still the `sha-0000000` placeholder. |
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
 | `auto-apply.sh` + the two units | The box half of GitOps: follow the branch, apply what merged. |
 | `.env.example` | Every variable, with what it is and how to generate it, and the devnet's relay and settlement values as a preset. |
@@ -125,8 +126,12 @@ gets real use, `g6-standard-4` (8 GiB, 4 vCPU) is the next honest step.
 is the one box in the fleet that built its own app — and a Rust release build
 of this crate needed more memory than a nanode has on top of everything above.
 `provider` and `directory-publisher` are published images now, pulled like the
-connector already was, so that floor is gone; the sold-capacity arithmetic
-above is what actually sizes this box.)
+connector already was, so that floor is gone once their pins name a published
+build; the sold-capacity arithmetic above is what sizes this box. **Until
+then** the pins read the placeholder `sha-0000000`, which names nothing on
+GHCR, and `pull-images.sh` builds both images from the checkout instead — so
+until the first publish, a box still compiles the provider and still needs
+the 4 GB this table assumes. § "How updates arrive" says more.)
 
 **Disk.** 20 GiB of the 80 GB is the verified-blob cache
 (`blob_cache_max_bytes`). There is no eviction yet: a blob that would cross the
@@ -213,7 +218,8 @@ the Solana settlement key **before** the first `up -d`.
 ```
 
 Firewall, Docker, journald cap, the `dind` sidecar pre-pull, the sealing-key
-handshake, render, build, start, certificate, timer. Idempotent — re-run it to
+handshake, render, pull (or, before the first publish, build), start,
+certificate, timer. Idempotent — re-run it to
 reconcile a box.
 
 **5. Go to production TLS.** `bootstrap.sh` starts on Let's Encrypt *staging*
@@ -353,8 +359,18 @@ as § "Bumping the connector pin", below, now covering all three images —
 and the box picks it up on its next fast-forward like any other file change:
 pull, then `up -d`. `.github/workflows/publish-provider-image.yml` is what
 publishes the provider and publisher candidates a pin bump chooses between.
-Nothing here compiles anything any more (TOON_Network#151); the checkout this
-script fast-forwards is config, not a build input.
+Once the pins name published builds, nothing here compiles anything
+(TOON_Network#151), and the checkout this script fast-forwards is config, not
+a build input.
+
+**The placeholder pin.** Until that workflow has published its first
+`sha-<short>`, the `provider` and `directory-publisher` pins read
+`sha-0000000`, git's all-zero "no commit", which no registry has. Every pull
+goes through `pull-images.sh`, and for that one tag, and only for those two
+images, it builds the image from the checkout and tags it with the pinned
+name, so compose finds it locally and never asks GHCR. Any other pin that will
+not pull still fails the apply. The first real pin bump ends this without
+anything on the box changing: the next fast-forward pulls it like any other.
 
 ```bash
 systemctl status toon-auto-apply.timer
@@ -428,9 +444,10 @@ is yours to edit. Everything that makes a box yours is in two gitignored files:
 The connector's `[[routes]]` are not in either: `render.sh` generates them by
 running `toon-provider routes` on the `provider.toml` it has just rendered, so
 a price is written once and the two configs cannot drift. On a box the binary
-comes from the provider image in `docker-compose.yml`, which `render.sh` pulls
-or builds first so the rows come from the build that will serve them. Off a
-box, point it at a binary of your own:
+comes from the provider image in `docker-compose.yml`, which `render.sh` gets
+first through `pull-images.sh` (pulled, or built from the checkout while the
+pin is the placeholder), so the rows come from the build that will serve them.
+Off a box, point it at a binary of your own:
 
 ```bash
 cargo build --release --bin toon-provider
