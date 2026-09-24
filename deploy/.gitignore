@@ -18,3 +18,6 @@ operator-write.keys
 nginx/conf.d/
 *.key
 *.secret
+# The last commit auto-apply.sh applied AND verified (TOON_Network#160).
+# Written only on success, so it never carries this operator's history.
+.applied
