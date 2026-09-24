@@ -1,0 +1,15 @@
+[Unit]
+Description=Apply the merged TOON provider bundle (fast-forward, render, build, compose up)
+Documentation=https://github.com/toon-protocol/provider/blob/main/deploy/README.md
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/root/provider/deploy/auto-apply.sh
+# The script takes its own flock; this only stops systemd stacking runs.
+# Budget for the worst honest case: a cold Rust release build (this is the one
+# box in the fleet that compiles its own app), a multi-image pull, `up -d`,
+# three 120s health waits and two activation restarts. A SIGTERM mid-restart
+# would leave the new config live but unverified.
+TimeoutStartSec=3600

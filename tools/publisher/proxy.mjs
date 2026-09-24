@@ -68,7 +68,7 @@ export function proxyFor(request, envProxy) {
  * is a refusal at startup rather than a per-request failure — a hidden
  * provider that cannot publish anonymously must not publish at all.
  */
-export function startupRefusal({ hidden, socksProxy }) {
+export function startupRefusal({ hidden, socksProxy, transport, endpointRewrite }) {
   if (socksProxy !== undefined) {
     try {
       validateProxy(socksProxy, 'TOON_SOCKS_PROXY');
@@ -81,6 +81,59 @@ export function startupRefusal({ hidden, socksProxy }) {
       'TOON_HIDDEN is set, so TOON_SOCKS_PROXY is required: a publisher beside a hidden ' +
       'provider would otherwise reach the connector from this host\'s real address, which is ' +
       'the one thing the provider is hiding (spec §10, ADR 0008).'
+    );
+  }
+  return transportRefusal({ transport, socksProxy, hidden, endpointRewrite });
+}
+
+/** The carriages this publisher may pay over. `auto` lets the node's own route policy decide. */
+export const TRANSPORTS = ['http', 'auto', 'btp'];
+
+/**
+ * Which ILP carriage this publisher pays over, and where that choice is not
+ * this publisher's to make.
+ *
+ * `http` is the default and was until now the only behaviour: a one-shot POST
+ * per packet, which is what publishing is — a handful of packets a minute,
+ * already serialized. But a node may PIN a route to one carriage, and the
+ * devnet relay pins `g.toon.relay` to BTP; an HTTP one-shot there comes back
+ * refused with `extra.requiredTransport` and no directory event is ever
+ * written. `auto` reads the pin out of the node's own self-description and
+ * dials what it asks for, which is what a deployment against such a relay
+ * needs.
+ *
+ * TWO THINGS THE HTTP CARRIAGE CARRIES THAT A WEBSOCKET DOES NOT, and both are
+ * refusals at startup rather than warnings:
+ *
+ *   * THE PROXY. A SOCKS5h carriage is installed as this process's `fetch`.
+ *     BTP opens a websocket instead, which never passes through it — so a
+ *     hidden publisher on BTP would reach the connector from this host's real
+ *     address while every log line still said it was proxied. That is the leak
+ *     TOON_HIDDEN exists to prevent.
+ *   * THE ENDPOINT REWRITE. `TOON_ENDPOINT_REWRITE` is applied inside that
+ *     same `fetch`. A deployment that needs one (the sandbox, whose hub
+ *     advertises a host-side address) would have BTP dial the advertised
+ *     address verbatim and fail to connect for a reason nothing names.
+ */
+export function transportRefusal({ transport, socksProxy, hidden, endpointRewrite }) {
+  if (transport === undefined || transport === '') return null;
+  if (!TRANSPORTS.includes(transport)) {
+    return `TOON_TRANSPORT must be one of ${TRANSPORTS.join(', ')}, not ${JSON.stringify(transport)}.`;
+  }
+  if (transport === 'http') return null;
+  if (socksProxy !== undefined || hidden) {
+    return (
+      `TOON_TRANSPORT=${transport} cannot be used with a proxy: the SOCKS5h carriage is this ` +
+      "process's `fetch`, and BTP opens a websocket that never passes through it. A hidden " +
+      "publisher on BTP would reach the connector from this host's real address (spec §10, " +
+      'ADR 0008). Leave TOON_TRANSPORT unset, or drop the proxy.'
+    );
+  }
+  if (endpointRewrite !== undefined && Object.keys(endpointRewrite).length > 0) {
+    return (
+      `TOON_TRANSPORT=${transport} cannot be used with TOON_ENDPOINT_REWRITE: the rewrite is ` +
+      "applied inside this process's `fetch`, and BTP dials a websocket that never passes " +
+      'through it — so the advertised address would be dialled verbatim and nothing would say why.'
     );
   }
   return null;

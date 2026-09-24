@@ -38,6 +38,19 @@ const CHANNEL_STORE = process.env.TOON_CHANNEL_STORE ?? '/var/lib/toon-publisher
 const DEPOSIT = BigInt(process.env.TOON_DEPOSIT ?? '10000000'); // 10 USDC at 6dp
 const TIMEOUT_MS = Number(process.env.TOON_TIMEOUT_MS ?? 60_000);
 
+// Which ILP carriage the packets are paid over. `http` — a one-shot POST per
+// packet — is the default and was the only behaviour: publishing is a handful
+// of packets a minute, already serialized below, and BTP's ordered socket buys
+// nothing for that. But a node may PIN a route to one carriage. The devnet
+// relay pins `g.toon.relay` to BTP, and an HTTP one-shot there is refused with
+// `extra.requiredTransport` — so a publisher against such a relay writes
+// nothing at all until this is `auto`, which dials whatever the node's own
+// self-description asks for. `proxy.mjs`'s `transportRefusal` is where the two
+// things the HTTP carriage carries and a websocket does not are refused rather
+// than lost: the SOCKS5h proxy and the endpoint rewrite, both of which live
+// inside this process's `fetch`.
+const TRANSPORT = process.env.TOON_TRANSPORT ?? 'http';
+
 // Hiding this process's own hop (spec §10, ADR 0008). The provider app sends
 // the proxy IN each publish request — it is the process that knows whether it
 // is hidden — and these two are the operator's side of the same fact:
@@ -113,7 +126,12 @@ if (!MNEMONIC) {
   console.error('[publisher] TOON_MNEMONIC is required: this process pays for every relay write.');
   process.exit(1);
 }
-const refusal = startupRefusal({ hidden: HIDDEN, socksProxy: SOCKS_PROXY });
+const refusal = startupRefusal({
+  hidden: HIDDEN,
+  socksProxy: SOCKS_PROXY,
+  transport: TRANSPORT,
+  endpointRewrite: Object.fromEntries(ENDPOINT_REWRITE),
+});
 if (refusal !== null) {
   console.error(`[publisher] ${refusal}`);
   process.exit(1);
@@ -161,10 +179,11 @@ async function client(socksProxy) {
         channelStore: CHANNEL_STORE,
         deposit: DEPOSIT,
         timeoutMs: TIMEOUT_MS,
-        // One-shot and stateless, which is what publishing is: a handful of
-        // packets a minute, already serialized below. BTP's ordered socket
-        // buys nothing here and would bypass the endpoint rewrite.
-        transport: 'http',
+        // One-shot and stateless by default, which is what publishing is: a
+        // handful of packets a minute, already serialized below. `auto` is
+        // for a relay that PINS its write route to BTP, where a one-shot is
+        // refused outright; TOON_TRANSPORT, above, says what that costs.
+        transport: TRANSPORT,
         // The carriage, never `socksProxy:` — the library's own option
         // refuses a proxy beside a clearnet connector as pointless
         // misdirection, and for a hidden PROVIDER (as opposed to a tenant

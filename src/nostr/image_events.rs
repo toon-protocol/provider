@@ -98,10 +98,27 @@ pub struct ImageEntry {
 
 impl ImageEntry {
     /// Read an Image Registry entry from a signed event, checking its kind,
-    /// its `d` tag's `<name>:<tag>` shape and that its `x` tag names the
-    /// digest the content describes.
+    /// that every digest it carries — the entry's own and each blob's
+    /// (TOON_Network#104) — is `sha256:<64 lowercase hex>`, its `d` tag's
+    /// `<name>:<tag>` shape, and that its `x` tag names the digest the
+    /// content describes.
     pub fn from_event(event: &Event) -> Result<Self> {
         let content: ImageEntryContent = parse_content(event, K_IMAGE, "an Image Registry entry")?;
+        if !is_sha256_digest(&content.digest) {
+            bail!(
+                "an Image Registry entry's digest must be `sha256:<64 lowercase hex>`, not {:?}",
+                content.digest
+            );
+        }
+        for blob in &content.blobs {
+            if !is_sha256_digest(&blob.digest) {
+                bail!(
+                    "an Image Registry entry's blob digest must be `sha256:<64 lowercase hex>`, \
+                     not {:?}",
+                    blob.digest
+                );
+            }
+        }
         check_x_tag(event, &content.digest)?;
         let d = identifier(event)?;
         let (name, tag) = d.rsplit_once(':').with_context(|| {
@@ -237,10 +254,17 @@ pub struct BlobRecord {
 
 impl BlobRecord {
     /// Read a Blob Record from a signed event, checking its kind, that its
+    /// digest is `sha256:<64 lowercase hex>` (TOON_Network#104), that its
     /// `d` and `x` tags both name the digest its content describes, and that
     /// its content carries exactly one of `parts` or `pages` (§8.2).
     pub fn from_event(event: &Event) -> Result<Self> {
         let content: BlobRecordContent = parse_content(event, K_BLOB, "a Blob Record")?;
+        if !is_sha256_digest(&content.digest) {
+            bail!(
+                "a Blob Record's digest must be `sha256:<64 lowercase hex>`, not {:?}",
+                content.digest
+            );
+        }
         check_x_tag(event, &content.digest)?;
         let d = identifier(event)?;
         if d != content.digest {

@@ -1,0 +1,194 @@
+# =============================================================================
+# Connector config for the TOON devnet provider box — rendered by ./render.sh
+# =============================================================================
+# The connector is the payment proxy in front of `toon-provider`. It terminates
+# payment, unseals the packet and forwards a plain HTTP POST to the app — so
+# the app reads no X-TOON-* header and contains no ILP, claim or settlement
+# logic. It also means the app's listener must never be reachable any other
+# way: a spawn that arrives past the connector is a spawn nobody paid for.
+#
+# Three rules the parser enforces, worth knowing before you edit:
+#
+#   * One TOML file, read once at startup, immutable for the process
+#     lifetime. There is NO environment-variable layer — the only variable the
+#     connector reads is RUST_LOG. Editing this file does nothing until the
+#     container restarts (a bind mount is not a reload).
+#   * Unknown keys are a hard startup failure, and removed keys are refused by
+#     name. A stale config says so at boot instead of quietly doing nothing,
+#     but it means a config change and a connector upgrade must land in the
+#     right order. Land config first.
+#   * Every key that carries a secret is a PATH, never the value — so the
+#     rendered connector.toml is not a secret. (provider.toml, beside it, IS:
+#     it carries this provider's Nostr key inline.)
+#
+# deploy/README.md § "Bumping the connector pin" has the procedure, and
+# tests/deploy_bundle.rs fails the build if this file and provider.toml.template
+# ever disagree about a route, a price or a handler.
+# =============================================================================
+
+# The client edge: POST /ilp, GET /ilp/btp, GET /ilp/identity and /metrics all
+# share this port. Bound to 0.0.0.0 INSIDE the container only — docker-compose
+# publishes it on 127.0.0.1, and nginx is what faces the internet.
+client_edge_addr = "0.0.0.0:4000"
+
+# Where this node records which claims it has already been paid. This MUST be a
+# mounted volume: a watermark that dies with the container hands every payer
+# their spent claims back as free service.
+state_dir = "/app/state"
+
+# No peering is configured and none is expected: a tenant pays this node
+# DIRECTLY at its own client edge, which is the shape the devnet already
+# documents for the store and the gas station. `peer_expose` still names a
+# carriage because `[node]` below declares endpoints and the two must agree.
+peer_expose = "http"
+
+# This node's signing identity. `GET /ilp/identity` answers with this key,
+# every packet is sealed to it, and provider.toml's `connector_seal_key` is a
+# verbatim copy of its public half — which is the value a tenant compares
+# byte-for-byte before it will spawn anything here (ADR 0011).
+[signer]
+key_file = "/app/data/signer.key"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# The terminated routes — GENERATED, NOT WRITTEN
+# ═════════════════════════════════════════════════════════════════════════════
+# Everything between here and the settlement tables is the exact output of
+#
+#     toon-provider routes --config deploy/provider.toml
+#
+# pasted verbatim: one spawn and one extend row per LIVE listing version at
+# that version's price, a standby pair at its `standby_price` for a tier that
+# sells Warm Standbys, and the four free provider-wide rows. Every path is
+# literal and the app serves exactly these.
+#
+# DO NOT EDIT THESE BY HAND. A listing change is a new version with new rows
+# and a restart (ADR 0009) — re-run the command. `tests/deploy_bundle.rs`
+# renders provider.toml.template, asks the real route renderer what it would
+# print, and fails if this block is not it, so the two cannot drift.
+#
+# The connector both TERMINATES and PRICES each route: a packet must arrive
+# covered to the figure here or it is refused, and a refusal on a paid route
+# is still billed (TOON_Network ADR 0003 — one route, one price, no refunds).
+# The free rows are written `price = 0` rather than left out: a terminated
+# route is never silently free, and the parser requires a price either way.
+
+[[routes]]
+prefix = "g.toon.provider.basic.v1.spawn"
+handler_url = "http://provider:8080/listings/basic/v1/spawn"
+price = 1000
+
+[[routes]]
+prefix = "g.toon.provider.basic.v1.extend"
+handler_url = "http://provider:8080/listings/basic/v1/extend"
+price = 1000
+
+[[routes]]
+prefix = "g.toon.provider.basic.v1.standby"
+handler_url = "http://provider:8080/listings/basic/v1/standby"
+price = 400
+
+[[routes]]
+prefix = "g.toon.provider.basic.v1.standby.extend"
+handler_url = "http://provider:8080/listings/basic/v1/standby/extend"
+price = 400
+
+[[routes]]
+prefix = "g.toon.provider.ci.v1.spawn"
+handler_url = "http://provider:8080/listings/ci/v1/spawn"
+price = 5000
+
+[[routes]]
+prefix = "g.toon.provider.ci.v1.extend"
+handler_url = "http://provider:8080/listings/ci/v1/extend"
+price = 5000
+
+[[routes]]
+prefix = "g.toon.provider.availability"
+handler_url = "http://provider:8080/availability"
+price = 0
+
+[[routes]]
+prefix = "g.toon.provider.status"
+handler_url = "http://provider:8080/status"
+price = 0
+
+[[routes]]
+prefix = "g.toon.provider.terminate"
+handler_url = "http://provider:8080/terminate"
+price = 0
+
+[[routes]]
+prefix = "g.toon.provider.rotate"
+handler_url = "http://provider:8080/rotate"
+price = 0
+
+
+# ── Getting paid ─────────────────────────────────────────────────────────────
+# Settlement is per-chain. A tenant pays in whichever of these it holds; the
+# connector verifies the claim against the chain named here, and resolves an
+# unknown buyer's channel from that chain — so anyone who opens a channel can
+# pay this node with no config edit here (connector ADR 0052).
+#
+# Fail-closed at STARTUP: the connector resolves token_address through the
+# registry at contract_address and reads the token's own decimals(). A wrong
+# address is a refuse-to-start, not a silently mispriced node. The Solana leg
+# goes further and SUBMITS a transaction at boot (an idempotent associated
+# token account create), so that key must hold SOL before the first `up -d` —
+# deploy/README.md § "The two funded identities".
+#
+# These are the values the rest of the devnet answers with; read them back
+# from any node's `GET /ilp` rather than trusting a second copy of them.
+
+[settlement.evm]
+rpc_url          = "https://base-sepolia-rpc.publicnode.com"
+contract_address = "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"  # TokenNetworkRegistry
+token_address    = "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"  # mock USDC (6dp)
+decimals         = 6
+
+[settlement.evm.key]
+key_file = "/app/data/settlement.key"
+
+[settlement.solana]
+rpc_url       = "https://api.devnet.solana.com"
+program_id    = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+token_address = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"   # mock USDC (6dp)
+decimals      = 6
+
+[settlement.solana.key]
+key_file = "/app/data/settlement-solana.key"
+
+
+# ── The operator surface ─────────────────────────────────────────────────────
+# Gates /metrics and the redeem endpoints. Without this section they are not
+# mounted at all (404, not 401) — which also means no way to redeem what this
+# provider has earned, so it is not optional in practice.
+#
+# Both are FILE-VALUED. The values live in two files render.sh writes from
+# .env, 0600 and owned by uid 10001, mounted beside the key files — so the
+# rendered connector.toml holds paths and nothing else. A section naming a
+# file that is missing or empty is a refuse-to-start, never a silently open
+# surface.
+#
+# `write_keys_file` is the allowlist of RFC 9421 signing keys for operator
+# WRITES, one ED25519 PUBLIC key per line in 64 hex characters, `#` comments
+# allowed. The private half never lives on this box; to sign a write from a
+# shell, use the connector repository's docs/operators/sign-write.sh. Revoke a
+# key by deleting its line and restarting.
+[operator]
+bearer_token_file = "/app/data/operator-bearer.token"
+write_keys_file   = "/app/data/operator-write.keys"
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# THIS DEPLOYMENT — the TOON devnet provider box
+# ═════════════════════════════════════════════════════════════════════════════
+# Everything above describes any provider behind any connector. What follows is
+# this box's place in the TOON devnet: the address it answers for and the URLs
+# it is reachable on. A tenant reads these back from `GET /ilp` to discover the
+# node, and `auto-apply.sh` compares them against what the running process
+# actually serves on every apply.
+[node]
+addresses     = ["g.toon.provider"]
+http_endpoint = "https://proxy.provider.${DOMAIN}/ilp"
+btp_endpoint  = "wss://proxy.provider.${DOMAIN}/ilp/btp"

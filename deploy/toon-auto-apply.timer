@@ -1,0 +1,11 @@
+[Unit]
+Description=Check every 5 minutes for a merged TOON provider bundle change
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=toon-auto-apply.service
+
+[Install]
+WantedBy=timers.target
