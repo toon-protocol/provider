@@ -25,7 +25,14 @@ import { dirname } from 'node:path';
 import { ToonClient, JsonFileChannelStore } from '@toon-protocol/client';
 import { createHiddenServiceTransport } from '@toon-protocol/client/hidden-service';
 import { lookup } from 'node:dns/promises';
-import { isNearUrl, isRpcTarget, isTrue, proxyFor, startupRefusal } from './proxy.mjs';
+import {
+  carriageThrough,
+  hiddenRpcRefusal,
+  isNearUrl,
+  isTrue,
+  proxyFor,
+  startupRefusal,
+} from './proxy.mjs';
 import { estimateSpendPerCadence, loadChannelStatus, noChannelStatusBody, statusBody } from './status.mjs';
 import { topup } from './topup.mjs';
 
@@ -62,11 +69,10 @@ const LIVENESS_CADENCE_S = (() => {
 // nothing for that. But a node may PIN a route to one carriage. The devnet
 // relay pins `g.toon.relay` to BTP, and an HTTP one-shot there is refused with
 // `extra.requiredTransport` — so a publisher against such a relay writes
-// nothing at all until this is `auto`, which dials whatever the node's own
-// self-description asks for. `proxy.mjs`'s `transportRefusal` is where the two
-// things the HTTP carriage carries and a websocket does not are refused rather
-// than lost: the SOCKS5h proxy and the endpoint rewrite, both of which live
-// inside this process's `fetch`.
+// nothing at all until this is `btp` (or `auto`, which dials whatever the
+// node's own self-description asks for). Either rides the proxy and the
+// endpoint rewrite exactly as HTTP does: `carriageThrough` hands the client a
+// socket factory that takes the same route as its `fetch` (TOON_Network#165).
 const TRANSPORT = process.env.TOON_TRANSPORT ?? 'http';
 
 // Hiding this process's own hop (spec §10, ADR 0008). The provider app sends
@@ -90,49 +96,22 @@ const rpcNear = () => (rpcIsNear ??= isNearUrl(RPC_URL, lookup));
 // A connector's self-description advertises the endpoint a client should dial,
 // and the client dials THAT, not the URL it was configured with — one free GET
 // is the whole of bootstrapping. When the advertised address is one this
-// process cannot reach, this rewrites it. That is a deployment fact, not a
-// protocol one: the sandbox's hub advertises `http://127.0.0.1:3200/ilp`
-// because its smoke tests run on the host, and a container on the compose
-// network reaches the same node at `http://relay-connector:3000`.
+// process cannot reach, this rewrites it, for the `fetch` and the BTP socket
+// alike (`proxy.mjs`, `rewriteUrl`). That is a deployment fact, not a protocol
+// one: the sandbox's hub advertises `http://127.0.0.1:3200/ilp` because its
+// smoke tests run on the host, and a container on the compose network reaches
+// the same node at `http://relay-connector:3000`.
 //   TOON_ENDPOINT_REWRITE='{"http://127.0.0.1:3200":"http://relay-connector:3000"}'
 const ENDPOINT_REWRITE = Object.entries(JSON.parse(process.env.TOON_ENDPOINT_REWRITE ?? '{}'));
 
-/** The URL a request really goes to: every advertised prefix swapped. */
-const rewrite = (input) => {
-  let url = typeof input === 'string' ? input : input?.url ?? String(input);
-  for (const [from, to] of ENDPOINT_REWRITE) {
-    if (url.startsWith(from)) {
-      url = to + url.slice(from.length);
-      break;
-    }
-  }
-  return url;
+/** What `carriageThrough` dials with: this host's own, and the library's proxy. */
+const DIAL = {
+  createHiddenServiceTransport,
+  fetch: (input, init) => fetch(input, init),
+  WebSocket: globalThis.WebSocket,
+  rpcUrl: RPC_URL,
+  rpcNear,
 };
-
-/**
- * The `fetch` this process pays through, and how to shut it down.
- *
- * With no proxy it is the global one, rewritten — exactly what this process
- * did before hidden providers existed. With one it is the client library's
- * SOCKS5h carriage, and it applies to EVERY host, not only `.anyone` ones: a
- * hidden provider whose payer reached a clearnet hub directly would have named
- * this host to the hub, whatever the connector's address looked like. The
- * chain RPC is the one exception, and `isRpcTarget` says why.
- */
-function carriageThrough(socksProxy) {
-  if (socksProxy === undefined) {
-    return { fetch: (input, init) => fetch(rewrite(input), init), close: async () => {} };
-  }
-  const transport = createHiddenServiceTransport(socksProxy);
-  return {
-    fetch: async (input, init) => {
-      const url = rewrite(input);
-      if (isRpcTarget(url, RPC_URL) && (await rpcNear())) return fetch(url, init);
-      return transport.fetch(url, init);
-    },
-    close: () => transport.close(),
-  };
-}
 
 // Relay READ url -> the paid ILP destination that writes to it. The provider
 // knows relays by the URL it publishes and a tenant reads; only this process
@@ -144,12 +123,9 @@ if (!MNEMONIC) {
   console.error('[publisher] TOON_MNEMONIC is required: this process pays for every relay write.');
   process.exit(1);
 }
-const refusal = startupRefusal({
-  hidden: HIDDEN,
-  socksProxy: SOCKS_PROXY,
-  transport: TRANSPORT,
-  endpointRewrite: Object.fromEntries(ENDPOINT_REWRITE),
-});
+const refusal =
+  startupRefusal({ hidden: HIDDEN, socksProxy: SOCKS_PROXY, transport: TRANSPORT }) ??
+  (await hiddenRpcRefusal({ hidden: HIDDEN, rpcUrl: RPC_URL }, lookup));
 if (refusal !== null) {
   console.error(`[publisher] ${refusal}`);
   process.exit(1);
@@ -184,7 +160,7 @@ async function client(socksProxy) {
     await stale.carriage.close().catch(() => {});
   }
   if (current === null) {
-    const carriage = carriageThrough(socksProxy);
+    const carriage = carriageThrough(socksProxy, ENDPOINT_REWRITE, DIAL);
     const entry = { proxy: socksProxy, carriage, promise: null };
     entry.promise = (async () => {
       mkdirSync(dirname(CHANNEL_STORE), { recursive: true });
@@ -198,7 +174,7 @@ async function client(socksProxy) {
         deposit: DEPOSIT,
         timeoutMs: TIMEOUT_MS,
         // One-shot and stateless by default, which is what publishing is: a
-        // handful of packets a minute, already serialized below. `auto` is
+        // handful of packets a minute, already serialized below. `btp` is
         // for a relay that PINS its write route to BTP, where a one-shot is
         // refused outright; TOON_TRANSPORT, above, says what that costs.
         transport: TRANSPORT,
@@ -206,8 +182,11 @@ async function client(socksProxy) {
         // refuses a proxy beside a clearnet connector as pointless
         // misdirection, and for a hidden PROVIDER (as opposed to a tenant
         // dialling a hidden connector) covering the clearnet hop is the whole
-        // point.
+        // point. BOTH halves: the client edge rides `fetch`, and the BTP
+        // socket rides `createWebSocket`. Given only the first, the client
+        // would open the socket itself, from this host's real address.
         fetch: carriage.fetch,
+        createWebSocket: carriage.createWebSocket,
       });
       const opened = await c.channel.open({ deposit: DEPOSIT });
       console.log(

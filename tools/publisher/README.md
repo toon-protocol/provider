@@ -109,7 +109,7 @@ Environment only; there is no config file.
 | `TOON_LIVENESS_CADENCE_S` | — | Seconds between this provider's Liveness writes, used by `GET /status` to estimate a runway. Optional: unset means `/status` reports `runway_s: null` and says why. |
 | `TOON_TRANSPORT` | `http` | The ILP carriage the packets are paid over: `http`, `auto` or `btp`. See below. |
 | `RELAY_WRITE_ROUTES` | `{}` | JSON map of relay READ url -> the PAID ILP destination that writes to it, e.g. `{"ws://relay:7100":"g.toon.relay"}`. |
-| `TOON_ENDPOINT_REWRITE` | `{}` | JSON map of advertised URL prefix -> the address this process can actually reach it at. |
+| `TOON_ENDPOINT_REWRITE` | `{}` | JSON map of advertised URL prefix -> the address this process can actually reach it at. Applies to the BTP socket's `ws://` URL too. |
 | `TOON_SOCKS_PROXY` | — | `socks5h://<host>:<port>` used when a publish request names none. |
 | `TOON_HIDDEN` | `false` | This publisher sits beside a **hidden** provider. Then `TOON_SOCKS_PROXY` is **required** and a missing one is a startup refusal. |
 
@@ -118,32 +118,33 @@ ending in `.ephemeral` is refused at startup by name.
 
 ### Which carriage the packets ride
 
-`TOON_TRANSPORT` defaults to `http` — a one-shot POST per packet — because
+`TOON_TRANSPORT` defaults to `http`, a one-shot POST per packet, because
 that is what publishing is: a handful of packets a minute, serialized through
 one channel. BTP's ordered socket buys nothing for that.
 
 But **a node may pin a route to one carriage**, and the devnet relay pins
 `g.toon.relay` to BTP. An HTTP one-shot there comes back refused carrying
 `extra.requiredTransport`, and the provider's Profile, Listings and Liveness
-are never written at all. `TOON_TRANSPORT=auto` reads the pin out of the
-node's own self-description and dials whatever it asks for, which is what a
-deployment against such a relay wants.
+are never written at all. `TOON_TRANSPORT=btp` names the socket outright,
+which is what a deployment against that relay wants. `auto` reads the pin out
+of the node's own self-description, and that relay's `GET /ilp` did not
+publish it when last checked (2026-09-22, see `deploy/docker-compose.yml`),
+so there `auto` falls back to HTTP and is refused.
 
-**Two things the HTTP carriage carries that a websocket does not**, and both
-are startup refusals rather than warnings, because both fail silently:
+**Every carriage rides the same route.** The client is handed two things
+that dial: a `fetch` for the client edge and a `createWebSocket` for the BTP
+socket, built together (`proxy.mjs`, `carriageThrough`), so the two cannot
+disagree:
 
-* **`TOON_SOCKS_PROXY` / `TOON_HIDDEN`.** The SOCKS5h carriage is installed as
-  this process's `fetch`. BTP opens a websocket that never passes through it,
-  so a hidden publisher on BTP would reach the connector from this host's real
-  address while every log line still said it was proxied — the exact leak
-  `TOON_HIDDEN` exists to prevent (spec §10, ADR 0008).
-* **`TOON_ENDPOINT_REWRITE`.** The rewrite is applied inside that same `fetch`,
-  so BTP would dial the advertised address verbatim and fail to connect for a
-  reason nothing names.
-
-Either combination refuses to start, by name. The sandbox sets both a rewrite
-and (on the `hs` profile) a proxy, so it stays on `http`; a devnet box sets
-neither and uses `auto`.
+* **Beside a proxy** both are `@toon-protocol/client`'s SOCKS5h carriage,
+  and the websocket reaches the relay through the proxy like every other
+  byte. Handing over only the `fetch` would not do: the client would open the
+  socket itself, from this host's real address. That was the gap before
+  TOON_Network#165, and this process refused `btp`/`auto` beside a proxy
+  because of it.
+* **`TOON_ENDPOINT_REWRITE`** applies to both. A `ws://`/`wss://` URL is
+  matched against the same `http://`/`https://` prefixes and keeps its own
+  scheme, so the node is named once.
 
 `TOON_ENDPOINT_REWRITE` exists because a client dials the endpoint a
 connector's **self-description advertises**, not the URL it was configured
@@ -162,7 +163,9 @@ would name the operator's location to that connector whatever the provider's
 Profile claims.
 
 So a publish request from a hidden provider **carries the proxy**, and this
-process dials through it — **for every host, not only `.anyone` ones**. A
+process dials through it — **for every host, not only `.anyone` ones, and on
+every carriage**: the HTTP one-shot and the BTP socket alike, so a hidden
+publisher can write to a relay that pins BTP. A
 hidden provider whose payer reached a clearnet hub directly would have named
 this host to the hub, connector address notwithstanding. The scheme must be
 `socks5h`: under plain `socks5` this process resolves the destination first,
@@ -202,7 +205,8 @@ exactly as it did before the field existed — absent means direct.
 ## Tests
 
 `npm test` (`node --test`) covers `proxy.mjs` — which proxy a publication
-rides, what is refused at startup, and what stays direct — `blob.mjs` below,
+rides, what is refused at startup, what stays direct, and that the `fetch`
+and the BTP socket take the same route — `blob.mjs` below,
 `status.mjs` (`status.test.mjs`, against real fixture channel files in
 `test/fixtures/`) and `topup.mjs` (`topup.test.mjs`, against a stubbed
 client). None of these needs network, a chain or a mnemonic.

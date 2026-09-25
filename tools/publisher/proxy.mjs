@@ -2,7 +2,8 @@
 //
 // Kept apart from `publish.mjs` because that file starts a server and demands
 // a mnemonic the moment it is imported: these are the decisions worth testing
-// on their own (`node --test`), and they are pure.
+// on their own (`node --test`). They are pure; the one that builds the
+// carriage, `carriageThrough`, is handed everything it dials with.
 
 /** Truthy env flags, as compose writes them. */
 export function isTrue(value) {
@@ -68,7 +69,7 @@ export function proxyFor(request, envProxy) {
  * is a refusal at startup rather than a per-request failure — a hidden
  * provider that cannot publish anonymously must not publish at all.
  */
-export function startupRefusal({ hidden, socksProxy, transport, endpointRewrite }) {
+export function startupRefusal({ hidden, socksProxy, transport }) {
   if (socksProxy !== undefined) {
     try {
       validateProxy(socksProxy, 'TOON_SOCKS_PROXY');
@@ -83,60 +84,123 @@ export function startupRefusal({ hidden, socksProxy, transport, endpointRewrite 
       'the one thing the provider is hiding (spec §10, ADR 0008).'
     );
   }
-  return transportRefusal({ transport, socksProxy, hidden, endpointRewrite });
+  return transportRefusal({ transport });
+}
+
+/**
+ * Why a hidden publisher must not start with this chain RPC, or `null`.
+ *
+ * `carriageThrough` covers what the client sends through the `fetch` and the
+ * socket it is handed. The client's channel does not use either: opening,
+ * depositing and the chain reads behind them dial `TOON_RPC_URL` with the
+ * platform's own `fetch` (`@toon-protocol/client` routes chain RPC through a
+ * proxy only under its own `socksProxy:` option, which refuses a clearnet
+ * connector). So beside a hidden provider the RPC must be near: its own
+ * node on a private address, which no exit could reach and whose traffic
+ * crosses no watched network. A far one would see this host's real address
+ * on every channel operation, so it is a refusal to start.
+ *
+ * `lookup` is `dns.promises.lookup`, as for `isNearUrl`.
+ */
+export async function hiddenRpcRefusal({ hidden, rpcUrl }, lookup) {
+  if (!hidden || (await isNearUrl(rpcUrl, lookup))) return null;
+  return (
+    `TOON_HIDDEN is set, so TOON_RPC_URL must be your own node on a private address, not ` +
+    `${JSON.stringify(rpcUrl)}: the payment channel dials its chain RPC directly, never ` +
+    "through the proxy, and a public RPC would see this host's real address (spec §10, " +
+    'ADR 0008).'
+  );
 }
 
 /** The carriages this publisher may pay over. `auto` lets the node's own route policy decide. */
 export const TRANSPORTS = ['http', 'auto', 'btp'];
 
 /**
- * Which ILP carriage this publisher pays over, and where that choice is not
- * this publisher's to make.
+ * Whether `TOON_TRANSPORT` names a carriage at all.
  *
- * `http` is the default and was until now the only behaviour: a one-shot POST
- * per packet, which is what publishing is — a handful of packets a minute,
- * already serialized. But a node may PIN a route to one carriage, and the
- * devnet relay pins `g.toon.relay` to BTP; an HTTP one-shot there comes back
- * refused with `extra.requiredTransport` and no directory event is ever
- * written. `auto` reads the pin out of the node's own self-description and
- * dials what it asks for, which is what a deployment against such a relay
- * needs.
+ * `http` is the default: a one-shot POST per packet, which is what publishing
+ * is — a handful of packets a minute, already serialized. But a node may PIN a
+ * route to one carriage, and the devnet relay pins `g.toon.relay` to BTP; an
+ * HTTP one-shot there comes back refused with `extra.requiredTransport` and no
+ * directory event is ever written. `btp` names the socket outright, and `auto`
+ * reads the pin out of the node's own self-description.
  *
- * TWO THINGS THE HTTP CARRIAGE CARRIES THAT A WEBSOCKET DOES NOT, and both are
- * refusals at startup rather than warnings:
- *
- *   * THE PROXY. A SOCKS5h carriage is installed as this process's `fetch`.
- *     BTP opens a websocket instead, which never passes through it — so a
- *     hidden publisher on BTP would reach the connector from this host's real
- *     address while every log line still said it was proxied. That is the leak
- *     TOON_HIDDEN exists to prevent.
- *   * THE ENDPOINT REWRITE. `TOON_ENDPOINT_REWRITE` is applied inside that
- *     same `fetch`. A deployment that needs one (the sandbox, whose hub
- *     advertises a host-side address) would have BTP dial the advertised
- *     address verbatim and fail to connect for a reason nothing names.
+ * Every carriage is allowed beside every setting. Until TOON_Network#165 a
+ * proxy or an endpoint rewrite refused `btp` and `auto`, because both lived
+ * only in this process's `fetch` and the BTP socket went round it — from this
+ * host's real address, on a hidden box. `carriageThrough` now hands the client
+ * a socket factory that takes the same route as the `fetch`, so there is
+ * nothing left for the socket to go round.
  */
-export function transportRefusal({ transport, socksProxy, hidden, endpointRewrite }) {
+export function transportRefusal({ transport }) {
   if (transport === undefined || transport === '') return null;
   if (!TRANSPORTS.includes(transport)) {
     return `TOON_TRANSPORT must be one of ${TRANSPORTS.join(', ')}, not ${JSON.stringify(transport)}.`;
   }
-  if (transport === 'http') return null;
-  if (socksProxy !== undefined || hidden) {
-    return (
-      `TOON_TRANSPORT=${transport} cannot be used with a proxy: the SOCKS5h carriage is this ` +
-      "process's `fetch`, and BTP opens a websocket that never passes through it. A hidden " +
-      "publisher on BTP would reach the connector from this host's real address (spec §10, " +
-      'ADR 0008). Leave TOON_TRANSPORT unset, or drop the proxy.'
-    );
-  }
-  if (endpointRewrite !== undefined && Object.keys(endpointRewrite).length > 0) {
-    return (
-      `TOON_TRANSPORT=${transport} cannot be used with TOON_ENDPOINT_REWRITE: the rewrite is ` +
-      "applied inside this process's `fetch`, and BTP dials a websocket that never passes " +
-      'through it — so the advertised address would be dialled verbatim and nothing would say why.'
-    );
-  }
   return null;
+}
+
+/**
+ * The URL a dial really goes to: the first advertised prefix in `rewrite`
+ * (`[from, to]` pairs, from `TOON_ENDPOINT_REWRITE`) swapped for the address
+ * this process reaches it at.
+ *
+ * A websocket URL is matched against the same `http(s)://` prefixes and keeps
+ * its own scheme: a node advertises `ws://host/ilp/btp` beside
+ * `http://host/ilp`, and the operator names the node once, not per carriage.
+ * `ws` pairs with `http` and `wss` with `https`, never across.
+ */
+export function rewriteUrl(url, rewrite) {
+  const socket = /^wss?:\/\//.exec(url);
+  const asHttp = socket ? url.replace(/^ws/, 'http') : url;
+  for (const [from, to] of rewrite) {
+    if (asHttp.startsWith(from)) {
+      const rewritten = to + asHttp.slice(from.length);
+      return socket ? rewritten.replace(/^http/, 'ws') : rewritten;
+    }
+  }
+  return url;
+}
+
+/**
+ * How this process's packets leave it: the `fetch` for the client edge and
+ * the `createWebSocket` for the BTP carriage, which must always take the SAME
+ * route, and how to shut them down.
+ *
+ * With no proxy both are this host's own, rewritten — what this process did
+ * before hidden providers existed. With one, both are the client library's
+ * SOCKS5h carriage (`createHiddenServiceTransport`), for EVERY host, not only
+ * `.anyone` ones: a hidden provider whose payer reached a clearnet relay
+ * directly would have named this host to it, whatever the connector's address
+ * looked like. Handing over only the `fetch` is not enough, and was the gap
+ * TOON_Network#165 closed: the client would open its BTP socket itself, from
+ * this host's real address.
+ *
+ * The chain RPC is the one exception to the proxy, and `isNearUrl` says why.
+ *
+ * `deps` is what it dials with — `createHiddenServiceTransport`, `fetch`,
+ * `WebSocket`, the configured `rpcUrl` and `rpcNear()` (whether that RPC is
+ * near) — so the routing is testable without a network.
+ */
+export function carriageThrough(socksProxy, rewrite, deps) {
+  const url = (input) => rewriteUrl(typeof input === 'string' ? input : input?.url ?? String(input), rewrite);
+  if (socksProxy === undefined) {
+    return {
+      fetch: (input, init) => deps.fetch(url(input), init),
+      createWebSocket: (target) => new deps.WebSocket(url(target)),
+      close: async () => {},
+    };
+  }
+  const transport = deps.createHiddenServiceTransport(socksProxy);
+  return {
+    fetch: async (input, init) => {
+      const target = url(input);
+      if (isRpcTarget(target, deps.rpcUrl) && (await deps.rpcNear())) return deps.fetch(target, init);
+      return transport.fetch(target, init);
+    },
+    createWebSocket: (target) => transport.createWebSocket(url(target)),
+    close: () => transport.close(),
+  };
 }
 
 /** Whether `url` is the chain RPC this process was configured with. */
@@ -179,8 +243,9 @@ export function isPrivateAddress(ip) {
  * 0008) — the provider refuses to start otherwise — and `anon` builds no
  * circuit to such an address, so proxying it would fail rather than hide
  * anything: the packet never crosses a network anyone outside can watch. An
- * RPC that is anywhere else DOES leave, so it rides the proxy like everything
- * else, and no flag can leave it uncovered by mistake.
+ * RPC that is anywhere else DOES leave: what reaches it through the `fetch`
+ * rides the proxy, and the channel's own calls, which do not, are why a
+ * hidden publisher refuses to start beside one (`hiddenRpcRefusal`).
  *
  * `lookup` is `dns.promises.lookup`, passed in so this is testable without
  * DNS. A name that does not resolve is not near: the safe way to be wrong

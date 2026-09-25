@@ -833,25 +833,35 @@ on the compose network. There is no setting that sends the settlement RPC
 through anon (see above), which is why the bundle makes both RPCs yours
 rather than setting `socks_proxy`, which would change nothing here.
 
-### Known gap: directory writes on the devnet
+### Directory writes on the devnet
 
-The directory publisher pays the relay over **HTTP** on a hidden box, and has
-to: its SOCKS carriage is its `fetch`, a BTP websocket never passes through
-it, and it refuses to start with a proxy beside `btp` or `auto`
-(tools/publisher/README.md). The devnet relay **pins `g.toon.relay` to BTP**
-and refuses an HTTP write. So on the devnet today, a hidden box runs, its
-connector is reachable and its leases work, but its Profile, Listings and
-Liveness are refused by the relay, and it does not appear in the directory.
+The devnet relay **pins `g.toon.relay` to BTP** and refuses an HTTP write, so
+a publisher that can only pay over HTTP writes nothing there: the box runs,
+its connector is reachable and its leases work, but its Profile, Listings and
+Liveness are refused and it does not appear in the directory.
 
-Two things close it, either one: the publisher carrying BTP through the proxy
-too (`@toon-protocol/client`'s hidden-service transport already has a
-`createWebSocket`; the publisher passes only `fetch`), or the relay unpinning
-its write route. Whether the pin still stands:
+The publisher can pay over BTP beside the proxy since TOON_Network#165: it
+hands its client the proxy's `createWebSocket` beside its `fetch`, so the
+socket rides the daemon's SOCKS port with the rest of its traffic and the
+relay's connector sees an exit address, never this box's
+(tools/publisher/README.md § "Which carriage the packets ride"). **The
+overlay still says `TOON_TRANSPORT: http`**, because the publisher image
+pinned in `docker-compose.yml` predates that change and refuses `btp` beside
+a proxy. It moves to `btp` in the same commit that bumps that pin to a build
+carrying #165. Until then, this box is not listed on the devnet. Whether the
+relay's pin still stands:
 
 ```bash
 curl -s https://proxy.relay.devnet.toonprotocol.dev/ilp \
   | jq '.routes[] | select(.prefix == "g.toon.relay")'
 ```
+
+The publisher's chain RPC is **your Solana node**
+(`HIDDEN_SETTLEMENT_SOLANA_RPC_URL`), not the preset's public one: its
+payment channel dials the RPC directly, never through the proxy, and a
+hidden publisher refuses to start beside a public one. Yours is on a private
+address (above), so no exit could reach it and nothing crosses a watched
+network to get to it.
 
 ### Standing one up hidden
 

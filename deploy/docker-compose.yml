@@ -241,9 +241,9 @@ services:
       # would ever be written. `auto` reads the pin out of the relay's own
       # self-description and dials what it asks for.
       #
-      # It is safe here and refused where it would not be: the carriage is a
-      # websocket, so it passes through neither a SOCKS5h proxy nor
-      # TOON_ENDPOINT_REWRITE, and this publisher sets neither.
+      # A publisher carrying TOON_Network#165 can pay over BTP beside a SOCKS5h
+      # proxy too, the socket riding it exactly as the `fetch` does; the hidden
+      # overlay moves to it with the pin bump that brings that build.
       # tools/publisher/README.md § "Which carriage the packets ride".
       # `auto` cannot work against this relay: its `GET /ilp` advertises
       # `peerCarriages: []` and no per-route carriage, so nothing there names
