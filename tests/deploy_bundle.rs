@@ -44,6 +44,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+use toon_provider::provider::SettlementRpc;
 use toon_provider::{load_config, render_routes, ProviderConfig};
 
 fn deploy_dir() -> PathBuf {
@@ -794,7 +795,7 @@ fn the_firewall_opens_exactly_the_workload_ports_the_config_hands_out() {
 
 #[test]
 fn the_connector_pin_is_immutable_and_written_once() {
-    const PIN: &str = "ghcr.io/toon-protocol/connector:rust-2026.09.11.1";
+    const PIN: &str = "ghcr.io/toon-protocol/connector:rust-sha-854d199";
 
     // A dated release alias or an exact commit. Never `rust-main`, and never
     // the retired `rust-release` pointer, which is frozen on a build whose
@@ -1083,14 +1084,24 @@ fn the_publisher_pays_over_a_carriage_the_relay_will_accept() {
 const HIDDEN_ADDRESS: &str = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.anyone";
 
 /// The operator's own settlement nodes, on a private network the connector's
-/// container routes to.
+/// container routes to: ADR 0030's self-hosted option.
 const HIDDEN_EVM_RPC: &str = "http://10.8.0.1:8545";
 const HIDDEN_SOLANA_RPC: &str = "http://10.8.0.1:8899";
 
-/// Another operator, hidden: `acme_env` plus the switch, the overlay, the
-/// address bootstrap.sh would have written and the two self-hosted RPCs.
-/// PUBLIC_IP and DOMAIN are still set (fixture_env carries them), which is
-/// the point: a hidden render must not publish them even when .env has them.
+/// The devnet preset's public, keyless RPCs (`.env.example`): what a hidden
+/// box reaches through anon by DEFAULT (spec §10, ADR 0030).
+const PRESET_EVM_RPC: &str = "https://base-sepolia-rpc.publicnode.com";
+const PRESET_SOLANA_RPC: &str = "https://api.devnet.solana.com";
+
+/// The anon daemon's SOCKS port, as every process on the hidden box names it.
+const ANON_SOCKS: &str = "socks5h://172.30.2.2:9050";
+
+/// Another operator, hidden, the way `.env.example` now ships it: `acme_env`
+/// plus the switch, the overlay and the address bootstrap.sh would have
+/// written, and NO self-hosted RPC — so both chains' public preset RPCs are
+/// reached through anon. PUBLIC_IP and DOMAIN are still set (fixture_env
+/// carries them), which is the point: a hidden render must not publish them
+/// even when .env has them.
 fn hidden_env() -> BTreeMap<&'static str, &'static str> {
     let mut env = acme_env();
     env.insert("HIDDEN", "1");
@@ -1099,26 +1110,59 @@ fn hidden_env() -> BTreeMap<&'static str, &'static str> {
         "docker-compose.yml:docker-compose.hidden.yml",
     );
     env.insert("HIDDEN_ADDRESS", HIDDEN_ADDRESS);
+    env
+}
+
+/// The same box, self-hosting both chains' RPCs: the stronger option for
+/// reads, and the only one before ADR 0030.
+fn self_hosted_env() -> BTreeMap<&'static str, &'static str> {
+    let mut env = hidden_env();
     env.insert("HIDDEN_SETTLEMENT_EVM_RPC_URL", HIDDEN_EVM_RPC);
     env.insert("HIDDEN_SETTLEMENT_SOLANA_RPC_URL", HIDDEN_SOLANA_RPC);
     env
 }
 
+fn render_hidden(env: &BTreeMap<&str, &str>) -> (String, String) {
+    let render = run_render(env, Some(ACME_LISTINGS), None, &[]);
+    assert!(
+        render.ok,
+        "render.sh refused a hidden box:\n{}",
+        render.stderr
+    );
+    assert!(
+        !render.wrote("nginx/conf.d/node.conf"),
+        "a hidden box has no nginx, and render.sh wrote it a config"
+    );
+    (render.read("provider.toml"), render.read("connector.toml"))
+}
+
 fn hidden_render() -> &'static (String, String) {
     static RENDERED: OnceLock<(String, String)> = OnceLock::new();
-    RENDERED.get_or_init(|| {
-        let render = run_render(&hidden_env(), Some(ACME_LISTINGS), None, &[]);
-        assert!(
-            render.ok,
-            "render.sh refused a hidden box:\n{}",
-            render.stderr
-        );
-        assert!(
-            !render.wrote("nginx/conf.d/node.conf"),
-            "a hidden box has no nginx, and render.sh wrote it a config"
-        );
-        (render.read("provider.toml"), render.read("connector.toml"))
-    })
+    RENDERED.get_or_init(|| render_hidden(&hidden_env()))
+}
+
+fn self_hosted_render() -> &'static (String, String) {
+    static RENDERED: OnceLock<(String, String)> = OnceLock::new();
+    RENDERED.get_or_init(|| render_hidden(&self_hosted_env()))
+}
+
+/// `[settlement.<chain>]` of a rendered connector.toml, as the two keys
+/// the provider's `[anon.settlement.<chain>]` mirrors.
+fn connector_settlement(connector: &toml::Value, chain: &str) -> SettlementRpc {
+    let table = &connector["settlement"][chain];
+    SettlementRpc {
+        rpc_url: table["rpc_url"].as_str().unwrap().to_string(),
+        rpc_via_socks_proxy: table["rpc_via_socks_proxy"]
+            .as_bool()
+            .unwrap_or_else(|| panic!("[settlement.{chain}] renders no rpc_via_socks_proxy")),
+    }
+}
+
+fn rpc(url: &str, proxied: bool) -> SettlementRpc {
+    SettlementRpc {
+        rpc_url: url.to_string(),
+        rpc_via_socks_proxy: proxied,
+    }
 }
 
 /// The `[anon]` value of what the loader made of the hidden render.
@@ -1170,7 +1214,12 @@ fn a_hidden_render_passes_the_real_loader_and_publishes_no_host() {
         anon.socks_proxy.as_deref(),
         Some("socks5h://172.30.2.2:9050")
     );
-    assert_eq!(anon.settlement_rpc_url.as_deref(), Some(HIDDEN_SOLANA_RPC));
+    // Both chains' RPCs, named per chain, and by default the preset's
+    // public ones reached through anon (ADR 0030). The single legacy key is
+    // gone: it could name only one of the two the connector dials.
+    assert_eq!(anon.settlement_rpc_url, None);
+    assert_eq!(anon.settlement.evm, Some(rpc(PRESET_EVM_RPC, true)));
+    assert_eq!(anon.settlement.solana, Some(rpc(PRESET_SOLANA_RPC, true)));
     assert_eq!(anon.forward_host, "172.30.2.1");
     let control = anon.control.as_ref().expect("[anon.control]");
     assert_eq!(control.addr, "172.30.2.2:9051");
@@ -1221,9 +1270,15 @@ fn a_hidden_render_is_what_satisfies_each_hiding_condition() {
     };
 
     refused(&without("socks_proxy = ", 1), "anon.socks_proxy");
+    // Each chain the Profile settles on is a chain the connector dials, so
+    // each table is a condition of its own.
     refused(
-        &without("settlement_rpc_url = ", 1),
-        "anon.settlement_rpc_url",
+        &without("[anon.settlement.evm]", 3),
+        "[anon.settlement.evm]",
+    );
+    refused(
+        &without("[anon.settlement.solana]", 3),
+        "[anon.settlement.solana]",
     );
     refused(&without("[anon.control]", 3), "[anon.control]");
     refused(&without("[anon.egress]", 3), "[anon.egress]");
@@ -1241,7 +1296,7 @@ fn a_hidden_render_is_what_satisfies_each_hiding_condition() {
 }
 
 #[test]
-fn a_hidden_connector_publishes_the_circuit_and_settles_on_the_operators_own_nodes() {
+fn a_hidden_connector_publishes_the_circuit_and_reaches_the_preset_rpcs_through_anon() {
     let connector = &hidden_render().1;
     let value: toml::Value = toml::from_str(connector).expect("connector.toml parses");
 
@@ -1260,25 +1315,22 @@ fn a_hidden_connector_publishes_the_circuit_and_settles_on_the_operators_own_nod
         &vec![toml::Value::from("g.acme.provider")]
     );
 
-    // The connector dials its settlement RPCs DIRECTLY — its socks_proxy
-    // covers the ILP wire to `.anyone` peers only (ADR 0070 decision 4) — so
-    // both are the operator's own, and the preset's public ones are gone.
+    // The DEFAULT (ADR 0030, connector ADR 0073): the preset's public
+    // keyless RPCs, each table riding the daemon's SOCKS port on its own
+    // pinned circuit, and nothing dialled direct. The root `socks_proxy` is
+    // the one proxy `rpc_via_socks_proxy` selects; without it the connector
+    // refuses to start.
+    assert_eq!(value["socks_proxy"].as_str(), Some(ANON_SOCKS));
     assert_eq!(
-        value["settlement"]["evm"]["rpc_url"].as_str().unwrap(),
-        HIDDEN_EVM_RPC
+        connector_settlement(&value, "evm"),
+        rpc(PRESET_EVM_RPC, true)
     );
     assert_eq!(
-        value["settlement"]["solana"]["rpc_url"].as_str().unwrap(),
-        HIDDEN_SOLANA_RPC
+        connector_settlement(&value, "solana"),
+        rpc(PRESET_SOLANA_RPC, true)
     );
     let set = settings(connector);
-    for public in [
-        "publicnode.com",
-        "api.devnet.solana.com",
-        "proxy.provider",
-        "https://",
-        "wss://",
-    ] {
+    for public in ["proxy.provider", "wss://", "http://api.", "http://base"] {
         assert!(
             !set.contains(public),
             "the hidden connector.toml carries {public} outside a comment"
@@ -1309,6 +1361,85 @@ fn a_hidden_connector_publishes_the_circuit_and_settles_on_the_operators_own_nod
 }
 
 #[test]
+fn a_self_hosting_hidden_connector_settles_on_the_operators_own_nodes_directly() {
+    let (_, connector) = self_hosted_render();
+    let value: toml::Value = toml::from_str(connector).expect("connector.toml parses");
+    // HIDDEN_SETTLEMENT_*_RPC_URL is the self-hosting option: dialled
+    // directly, and the preset's public ones gone.
+    assert_eq!(
+        connector_settlement(&value, "evm"),
+        rpc(HIDDEN_EVM_RPC, false)
+    );
+    assert_eq!(
+        connector_settlement(&value, "solana"),
+        rpc(HIDDEN_SOLANA_RPC, false)
+    );
+    let set = settings(connector);
+    for public in ["publicnode.com", "api.devnet.solana.com", "https://"] {
+        assert!(
+            !set.contains(public),
+            "the self-hosting connector.toml carries {public} outside a comment"
+        );
+    }
+
+    // Either option per chain, independently: self-host the cheap EVM node
+    // and reach Solana's public RPC through anon.
+    let mut env = hidden_env();
+    env.insert("HIDDEN_SETTLEMENT_EVM_RPC_URL", HIDDEN_EVM_RPC);
+    let (provider, connector) = render_hidden(&env);
+    let value: toml::Value = toml::from_str(&connector).unwrap();
+    assert_eq!(
+        connector_settlement(&value, "evm"),
+        rpc(HIDDEN_EVM_RPC, false)
+    );
+    assert_eq!(
+        connector_settlement(&value, "solana"),
+        rpc(PRESET_SOLANA_RPC, true)
+    );
+    let (config, _dir) = load_rendered(&provider);
+    assert_eq!(config.anon.settlement.evm, Some(rpc(HIDDEN_EVM_RPC, false)));
+    assert_eq!(
+        config.anon.settlement.solana,
+        Some(rpc(PRESET_SOLANA_RPC, true))
+    );
+}
+
+#[test]
+fn the_gate_judges_exactly_the_rpcs_the_connector_dials() {
+    // The gap connector ADR 0073 found: the provider checked one URL while
+    // the connector dialled one per chain. Both files now come from the same
+    // .env values, and this holds them to each other for every shape a
+    // hidden box can take, so the loader's verdict is a verdict on what the
+    // connector is handed.
+    let mut mixed = hidden_env();
+    mixed.insert("HIDDEN_SETTLEMENT_SOLANA_RPC_URL", HIDDEN_SOLANA_RPC);
+    for (what, (provider, connector)) in [
+        ("proxied", hidden_render().clone()),
+        ("self-hosted", self_hosted_render().clone()),
+        ("mixed", render_hidden(&mixed)),
+    ] {
+        let (config, _dir) = load_rendered(&provider);
+        let value: toml::Value = toml::from_str(&connector).unwrap();
+        assert_eq!(
+            config.anon.settlement.evm.as_ref(),
+            Some(&connector_settlement(&value, "evm")),
+            "{what}: the EVM RPC the gate judged is not the one the connector dials"
+        );
+        assert_eq!(
+            config.anon.settlement.solana.as_ref(),
+            Some(&connector_settlement(&value, "solana")),
+            "{what}: the Solana RPC the gate judged is not the one the connector dials"
+        );
+        // One proxy on the box: the connector's is the provider's.
+        assert_eq!(
+            value["socks_proxy"].as_str(),
+            config.anon.socks_proxy.as_deref(),
+            "{what}"
+        );
+    }
+}
+
+#[test]
 fn a_public_render_carries_nothing_of_the_hidden_one() {
     let (provider, connector) = devnet_render();
     let set = settings(provider);
@@ -1319,6 +1450,15 @@ fn a_public_render_carries_nothing_of_the_hidden_one() {
         );
     }
     assert!(!settings(connector).contains(".anyone"));
+    // A public box dials its RPCs directly and has no proxy at all.
+    let value: toml::Value = toml::from_str(connector).unwrap();
+    assert_eq!(value.get("socks_proxy"), None);
+    for chain in ["evm", "solana"] {
+        assert!(
+            !connector_settlement(&value, chain).rpc_via_socks_proxy,
+            "a public box's [settlement.{chain}] rides a proxy"
+        );
+    }
 }
 
 #[test]
@@ -1354,35 +1494,35 @@ fn a_hidden_render_refuses_what_it_cannot_hide() {
     );
     refused(env, "not an anon address");
 
-    // No self-hosted RPC, for either chain: the connector would dial the
-    // preset's public ones from this box's address.
-    for missing in [
-        "HIDDEN_SETTLEMENT_EVM_RPC_URL",
-        "HIDDEN_SETTLEMENT_SOLANA_RPC_URL",
-    ] {
-        let mut env = hidden_env();
-        env.remove(missing);
-        refused(env, missing);
-    }
-    // A PUBLIC RPC, for either chain, refused by the provider's own rule in
-    // the real loader, not by a copy of it in shell. IP literals, so the
-    // verdict does not depend on this machine's resolver.
-    let mut env = hidden_env();
+    // A PUBLIC RPC named as self-hosted, for either chain: dialled directly
+    // it would link this box's address to its settlement keys. Refused by
+    // the provider's own rule in the real loader, not by a copy of it in
+    // shell. IP literals, so the verdict does not depend on this machine's
+    // resolver.
+    let mut env = self_hosted_env();
     env.insert("HIDDEN_SETTLEMENT_SOLANA_RPC_URL", "http://8.8.8.8:8899");
-    refused(env, "public address");
-    let mut env = hidden_env();
+    refused(
+        env,
+        "[anon.settlement.solana] rpc_url \"http://8.8.8.8:8899\" is at the public address",
+    );
+    let mut env = self_hosted_env();
     env.insert("HIDDEN_SETTLEMENT_EVM_RPC_URL", "http://8.8.8.8:8545");
     refused(
         env,
-        "HIDDEN_SETTLEMENT_EVM_RPC_URL=http://8.8.8.8:8545 was refused",
+        "[anon.settlement.evm] rpc_url \"http://8.8.8.8:8545\" is at the public address",
     );
+    // A preset RPC reached through anon over plain http: the exit relay
+    // could read and rewrite every answer. The connector refuses it too.
+    let mut env = hidden_env();
+    env.insert("SETTLEMENT_SOLANA_RPC_URL", "http://api.devnet.solana.com");
+    refused(env, "plain http");
     // Loopback passes the app's rule and reaches nothing from a container.
     for loopback in [
         "http://127.0.0.1:8899",
         "http://localhost:8899",
         "http://[::1]:8899",
     ] {
-        let mut env = hidden_env();
+        let mut env = self_hosted_env();
         env.insert("HIDDEN_SETTLEMENT_SOLANA_RPC_URL", loopback);
         refused(env, "is loopback");
     }
@@ -1433,6 +1573,15 @@ fn the_daemon_the_overlay_and_the_config_name_the_same_addresses() {
         .unwrap()
         .trim_start_matches("socks5h://");
     assert_eq!(line_value(&anonrc, "SocksPort "), socks);
+    // The settlement circuits are pinned by SOCKS username, which is the
+    // daemon's IsolateSOCKSAuth: on by default, and nothing may turn it off.
+    assert!(
+        !anonrc
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .any(|l| l.contains("NoIsolateSOCKSAuth")),
+        "anonrc turns IsolateSOCKSAuth off, which unpins every settlement circuit"
+    );
     assert_eq!(line_value(&anonrc, "ControlPort "), control.addr);
     let daemon_ip = control.addr.split(':').next().unwrap();
     assert!(socks.starts_with(&format!("{daemon_ip}:")));
@@ -1505,11 +1654,22 @@ fn the_hidden_overlay_publishes_nothing_and_switches_the_tls_edge_off() {
             "the overlay leaves {service} running"
         );
     }
-    // The publisher: hidden, proxied, and paying through this box's own chain
-    // RPC. Its channel dials that RPC directly, never through the proxy, so
-    // the base file's public one would see this box's real address.
-    assert!(overlay.contains("TOON_HIDDEN: 'true'"));
-    assert!(overlay.contains("TOON_RPC_URL: ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-}"));
+    // The publisher: hidden, and a hidden PAYER (toon-client's socksProxy,
+    // TOON_Network#167): every byte through the proxy, its chain RPC too. It
+    // reads the base file's public RPC through anon by default, and this
+    // box's own node, dialled directly, when the operator self-hosts one.
+    let publisher = service_block(&overlay, "directory-publisher");
+    assert_eq!(env_value(publisher, "TOON_HIDDEN"), Some("'true'"));
+    assert_eq!(
+        env_value(publisher, "TOON_RPC_URL"),
+        Some(
+            "${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-${SOLANA_RPC_URL:-https://api.devnet.solana.com}}"
+        )
+    );
+    assert_eq!(
+        env_value(publisher, "TOON_PROXY_RPC"),
+        Some("${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:+false}")
+    );
     // BTP, as the devnet relay's pin requires, its socket riding the proxy
     // (TOON_Network#165). Over HTTP the box would run and never be listed.
     assert!(overlay.contains("TOON_TRANSPORT: btp"));

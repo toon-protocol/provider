@@ -50,8 +50,9 @@ pub use availability::availability;
 pub use blob_cache::BlobCache;
 pub use cleanup::SWEEP_INTERVAL_SECS;
 pub use config::{
-    is_private_ip, load_config, settlement_rpc_verdict, AnonConfig, AnonControl, BackendKind,
-    ImagePolicyConfig, Listing, ProviderConfig, RpcHostVerdict, MAX_PORTS_PER_WORKLOAD,
+    is_private_ip, load_config, proxied_rpc_verdict, settlement_rpc_route_verdict,
+    settlement_rpc_verdict, AnonConfig, AnonControl, BackendKind, ImagePolicyConfig, Listing,
+    ProviderConfig, RpcHostVerdict, SettlementRpc, SettlementRpcs, MAX_PORTS_PER_WORKLOAD,
 };
 pub use fetcher::BlobFetcher;
 pub use image_policy::{ImagePolicy, ResolvedImage};
@@ -320,31 +321,45 @@ impl ProviderService {
     }
 
     /// The half of the settlement-RPC gate that only a RUNNING provider can
-    /// apply (spec §10, ADR 0008). Config load accepts an RPC hostname that
-    /// does not resolve — with a warning, so that `routes` works on a host
-    /// outside the sandbox's compose network — but a provider about to
-    /// publish `hidden: true` must be able to show its RPC is self-hosted,
-    /// and a name that does not resolve where the provider runs shows
-    /// nothing. Nothing is checked twice for a provider that is not hidden.
+    /// apply (spec §10, ADR 0008, ADR 0030). Config load accepts a
+    /// self-hosted RPC's hostname that does not resolve — with a warning, so
+    /// that `routes` works on a host outside the sandbox's compose network
+    /// — but a provider about to publish `hidden = true` must be able to
+    /// show each self-hosted RPC is private, and a name that does not
+    /// resolve where the provider runs shows nothing. A proxied RPC is
+    /// never resolved at all: its name is the proxy's to resolve. Nothing is
+    /// checked twice for a provider that is not hidden.
     fn refuse_unverified_settlement_rpc(&self) -> Result<()> {
         let config = &self.state.config;
-        let Some(rpc) = config
+        if !config.hidden {
+            return Ok(());
+        }
+        let legacy = config
             .anon
             .settlement_rpc_url
             .as_deref()
-            .filter(|_| config.hidden)
-        else {
-            return Ok(());
-        };
-        match config::settlement_rpc_verdict(rpc)? {
-            config::RpcHostVerdict::Private => Ok(()),
-            config::RpcHostVerdict::Unresolved(name) => bail!(
-                "anon.settlement_rpc_url names {:?}, which does not resolve here, so this \
-                 provider cannot show its settlement RPC is self-hosted and will not publish \
-                 hidden = true. Name it by a loopback or private address, or by a name this \
-                 host resolves (spec §10, ADR 0008)",
-                name
-            ),
+            .map(|url| config::SettlementRpc {
+                rpc_url: url.to_string(),
+                rpc_via_socks_proxy: false,
+            });
+        let rpcs = legacy
+            .iter()
+            .map(|rpc| ("anon.settlement_rpc_url", rpc))
+            .chain(config.anon.settlement.tables());
+        for (key, rpc) in rpcs {
+            match config::settlement_rpc_route_verdict(key, rpc)? {
+                config::RpcHostVerdict::Private | config::RpcHostVerdict::Proxied => {}
+                config::RpcHostVerdict::Unresolved(name) => bail!(
+                    "{} names {:?}, which does not resolve here, so this provider cannot show \
+                     its settlement RPC is self-hosted and will not publish hidden = true. Name \
+                     it by a loopback or private address, or by a name this host resolves; or, \
+                     for a public RPC, name it in [anon.settlement.<chain>] with \
+                     rpc_via_socks_proxy = true (spec §10, ADR 0030)",
+                    key,
+                    name
+                ),
+            }
         }
+        Ok(())
     }
 }

@@ -6,10 +6,10 @@ import { describe, it } from 'node:test';
 
 import {
   carriageThrough,
-  hiddenRpcRefusal,
+  chainRpcRoute,
+  clientRouteOptions,
   isNearUrl,
   isPrivateAddress,
-  isRpcTarget,
   isTrue,
   proxyFor,
   rewriteUrl,
@@ -151,7 +151,6 @@ describe('rewriteUrl', () => {
 });
 
 describe('carriageThrough', () => {
-  const RPC = 'http://solana-validator:8899';
   const rewrite = [['http://127.0.0.1:3200', 'http://relay-connector:3000']];
 
   /** Records where each dial went, instead of dialling. */
@@ -165,8 +164,6 @@ describe('carriageThrough', () => {
     return {
       dialled,
       deps: {
-        rpcUrl: RPC,
-        rpcNear: async () => true,
         createHiddenServiceTransport: (proxy) => {
           dialled.push(['proxy built', proxy]);
           return hs;
@@ -181,31 +178,37 @@ describe('carriageThrough', () => {
     };
   }
 
-  it('sends the BTP socket through the proxy, rewritten, beside a proxy', async () => {
+  it('beside a proxy and no rewrite, hands the client nothing: its own socksProxy carries every byte', async () => {
+    // A hidden PAYER (@toon-protocol/client 3.3, TOON_Network#167): the
+    // client edge, the BTP socket and the chain RPC all ride the proxy the
+    // client is given. An injected `fetch` would win over the client's own
+    // for the edge, so none is injected unless a rewrite needs one.
+    const { dialled, deps } = world();
+    const carriage = carriageThrough('socks5h://anon:9050', [], deps);
+    assert.equal(carriage.fetch, undefined);
+    assert.equal(carriage.createWebSocket, undefined);
+    await carriage.close();
+    assert.deepEqual(dialled, [], 'nothing built, nothing dialled');
+  });
+
+  it('beside a proxy AND a rewrite, sends both halves through the proxy, rewritten', async () => {
     const { dialled, deps } = world();
     const carriage = carriageThrough('socks5h://anon:9050', rewrite, deps);
 
     assert.equal(carriage.createWebSocket('ws://127.0.0.1:3200/ilp/btp'), 'proxied socket');
     await carriage.fetch('http://127.0.0.1:3200/ilp');
+    // The chain RPC is no business of this carriage any more: under a proxy
+    // the client never hands chain RPC to an injected `fetch`.
+    await carriage.fetch('https://api.devnet.solana.com/');
     await carriage.close();
 
     assert.deepEqual(dialled, [
       ['proxy built', 'socks5h://anon:9050'],
       ['proxy socket', 'ws://relay-connector:3000/ilp/btp'],
       ['proxy fetch', 'http://relay-connector:3000/ilp'],
+      ['proxy fetch', 'https://api.devnet.solana.com/'],
       ['proxy closed'],
     ]);
-  });
-
-  it('still dials a near chain RPC directly beside a proxy, and a far one through it', async () => {
-    const near = world();
-    await carriageThrough('socks5h://anon:9050', [], near.deps).fetch(`${RPC}/`);
-    assert.deepEqual(near.dialled.at(-1), ['direct fetch', `${RPC}/`]);
-
-    const far = world();
-    far.deps.rpcNear = async () => false;
-    await carriageThrough('socks5h://anon:9050', [], far.deps).fetch(`${RPC}/`);
-    assert.deepEqual(far.dialled.at(-1), ['proxy fetch', `${RPC}/`]);
   });
 
   it('with no proxy dials directly, the socket rewritten like the fetch', async () => {
@@ -223,16 +226,102 @@ describe('carriageThrough', () => {
   });
 });
 
-describe('isRpcTarget', () => {
-  it('knows the configured RPC by origin, whatever the path', () => {
-    assert.equal(isRpcTarget('http://127.0.0.1:8899/', 'http://127.0.0.1:8899'), true);
-    assert.equal(isRpcTarget('http://127.0.0.1:8899/rpc', 'http://127.0.0.1:8899'), true);
+describe('clientRouteOptions', () => {
+  const direct = { fetch: 'direct fetch', createWebSocket: 'direct socket' };
+
+  it('with no proxy passes the direct carriage and nothing else', () => {
+    assert.deepEqual(clientRouteOptions(undefined, direct, true), {
+      fetch: 'direct fetch',
+      createWebSocket: 'direct socket',
+    });
   });
 
-  it('is not fooled by another host or another port', () => {
-    assert.equal(isRpcTarget('http://relay-connector:3000/ilp', 'http://127.0.0.1:8899'), false);
-    assert.equal(isRpcTarget('http://127.0.0.1:8900/', 'http://127.0.0.1:8899'), false);
-    assert.equal(isRpcTarget('not a url', 'http://127.0.0.1:8899'), false);
+  it('beside a proxy makes the client a hidden payer, its chain RPC through the proxy', () => {
+    assert.deepEqual(clientRouteOptions('socks5h://anon:9050', {}, true), {
+      socksProxy: 'socks5h://anon:9050',
+    });
+  });
+
+  it('says proxyRpc: false only when the chain RPC is to be dialled directly', () => {
+    assert.deepEqual(clientRouteOptions('socks5h://anon:9050', {}, false), {
+      socksProxy: 'socks5h://anon:9050',
+      proxyRpc: false,
+    });
+  });
+
+  it('keeps an injected carriage only when there is one (a rewrite)', () => {
+    const proxied = { fetch: 'proxy fetch', createWebSocket: 'proxy socket' };
+    assert.deepEqual(clientRouteOptions('socks5h://anon:9050', proxied, true), {
+      socksProxy: 'socks5h://anon:9050',
+      fetch: 'proxy fetch',
+      createWebSocket: 'proxy socket',
+    });
+  });
+});
+
+describe('chainRpcRoute', () => {
+  const PUBLIC = 'https://api.devnet.solana.com';
+  const near = async () => [{ address: '10.0.0.5' }];
+  const far = async () => [{ address: '203.0.113.7' }];
+  const noLookup = async (host) => {
+    throw new Error(`looked up ${host}`);
+  };
+
+  it('by default sends a public RPC through the proxy, and never looks its name up', async () => {
+    // A lookup of the public RPC's name from this host is the one query a
+    // hidden box must not make for a host it reaches only through anon.
+    assert.deepEqual(await chainRpcRoute({ hidden: true, rpcUrl: PUBLIC }, noLookup), { proxyRpc: true });
+    assert.deepEqual(
+      await chainRpcRoute({ hidden: true, rpcUrl: 'https://8.8.8.8:8899' }, noLookup),
+      { proxyRpc: true },
+    );
+  });
+
+  it('by default dials an RPC on this box or its compose network directly', async () => {
+    // No exit could reach it; proxying it would fail, not hide.
+    assert.deepEqual(
+      await chainRpcRoute({ hidden: true, rpcUrl: 'http://10.0.0.5:8899' }, noLookup),
+      { proxyRpc: false },
+    );
+    assert.deepEqual(
+      await chainRpcRoute({ hidden: true, rpcUrl: 'http://solana-validator:8899' }, near),
+      { proxyRpc: false },
+    );
+    // A one-label name that turns out public is proxied.
+    assert.deepEqual(await chainRpcRoute({ hidden: true, rpcUrl: 'https://rpc:8899' }, far), { proxyRpc: true });
+  });
+
+  it('refuses plain http through the proxy, which an exit relay could rewrite', async () => {
+    const { refusal } = await chainRpcRoute({ hidden: true, rpcUrl: 'http://api.devnet.solana.com' }, noLookup);
+    assert.match(refusal, /plain http/);
+    const onion = `http://${'r'.repeat(56)}.anyone:8899`;
+    assert.deepEqual(await chainRpcRoute({ hidden: true, rpcUrl: onion }, noLookup), { proxyRpc: true });
+  });
+
+  it('takes TOON_PROXY_RPC=true or false over where the RPC is', async () => {
+    assert.deepEqual(
+      await chainRpcRoute({ hidden: true, rpcUrl: 'http://rpc.lan.example:8899', proxyRpc: 'false' }, near),
+      { proxyRpc: false },
+    );
+    assert.deepEqual(
+      await chainRpcRoute({ hidden: true, rpcUrl: 'https://10.0.0.5:8899', proxyRpc: 'true' }, noLookup),
+      { proxyRpc: true },
+    );
+    assert.deepEqual(await chainRpcRoute({ hidden: true, rpcUrl: PUBLIC, proxyRpc: '' }, noLookup), {
+      proxyRpc: true,
+    });
+    const { refusal } = await chainRpcRoute({ hidden: false, rpcUrl: PUBLIC, proxyRpc: 'maybe' }, noLookup);
+    assert.match(refusal, /TOON_PROXY_RPC/);
+  });
+
+  it('refuses a hidden publisher told to dial a public RPC directly', async () => {
+    const { refusal } = await chainRpcRoute({ hidden: true, rpcUrl: PUBLIC, proxyRpc: 'false' }, far);
+    assert.match(refusal, /TOON_RPC_URL/);
+    assert.match(refusal, /private address/);
+    // Not hidden, the operator may send it where they like.
+    assert.deepEqual(await chainRpcRoute({ hidden: false, rpcUrl: PUBLIC, proxyRpc: 'false' }, far), {
+      proxyRpc: false,
+    });
   });
 });
 
@@ -278,29 +367,6 @@ describe('isNearUrl', () => {
 
   it('is not near when the name does not resolve — the safe way to be wrong', async () => {
     assert.equal(await isNearUrl('http://gone:8899', failing), false);
-  });
-});
-
-describe('hiddenRpcRefusal', () => {
-  const near = async () => [{ address: '10.0.0.5' }];
-  const far = async () => [{ address: '203.0.113.7' }];
-
-  it('refuses a hidden publisher whose chain RPC is not near', async () => {
-    // The client dials its channel's chain RPC itself (open, deposit), not
-    // through the `fetch` it is handed, so no proxy covers a far one: it would
-    // see this host's real address.
-    const why = await hiddenRpcRefusal({ hidden: true, rpcUrl: 'https://api.devnet.solana.com' }, far);
-    assert.match(why, /TOON_RPC_URL/);
-    assert.match(why, /private address/);
-  });
-
-  it('lets a hidden publisher start beside its own private RPC', async () => {
-    assert.equal(await hiddenRpcRefusal({ hidden: true, rpcUrl: 'http://10.0.0.5:8899' }, far), null);
-    assert.equal(await hiddenRpcRefusal({ hidden: true, rpcUrl: 'http://solana:8899' }, near), null);
-  });
-
-  it('has nothing to say about a publisher that is not hidden', async () => {
-    assert.equal(await hiddenRpcRefusal({ hidden: false, rpcUrl: 'https://api.devnet.solana.com' }, far), null);
   });
 });
 

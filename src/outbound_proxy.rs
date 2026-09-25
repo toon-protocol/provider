@@ -39,7 +39,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use url::Url;
 
 use crate::outbound_guard::OutboundGuard;
@@ -228,6 +228,113 @@ pub fn is_private_url(url: &str) -> bool {
     }
 }
 
+/// A settlement chain, as the pinned circuit its RPC reads ride.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettlementChain {
+    Evm,
+    Solana,
+}
+
+impl SettlementChain {
+    /// The SOCKS username of this chain's pinned circuit — the connector's
+    /// own (`connector_chain_rpc::Circuit::socks_username`, connector ADR
+    /// 0073 decision 3), so the provider's occasional reads of a chain's RPC
+    /// (`status`, `redeem`) ride the circuit the connector already keeps for
+    /// that chain rather than one of their own: one exit per chain, per box,
+    /// sees this box's RPC traffic (ADR 0030). The `anon` daemon's
+    /// `IsolateSOCKSAuth` (on by default, and left on in `deploy/anon/anonrc`)
+    /// is what makes the username a circuit.
+    pub fn socks_username(self) -> &'static str {
+        match self {
+            SettlementChain::Evm => "toon-settlement-evm",
+            SettlementChain::Solana => "toon-settlement-solana",
+        }
+    }
+}
+
+/// How this process reaches one chain's settlement RPC: the URL, and the
+/// `socks5h://` proxy URL (with that chain's circuit credentials) it rides,
+/// or `None` for a direct dial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettlementRpcRoute {
+    pub url: String,
+    pub via: Option<String>,
+}
+
+impl SettlementRpcRoute {
+    /// The per-request budget of a read that rides a settlement circuit.
+    /// Connector ADR 0073 measured calls through anon that needed a fresh
+    /// circuit at up to 13 s, so the 10 s a direct read gets would turn a
+    /// slow circuit into a spurious failure. Shared by `status` and `redeem`.
+    pub const CIRCUIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// `direct` when this route is dialled directly, else `CIRCUIT_TIMEOUT`.
+    pub fn timeout(&self, direct: Duration) -> Duration {
+        if self.via.is_some() {
+            Self::CIRCUIT_TIMEOUT
+        } else {
+            direct
+        }
+    }
+
+    /// Dialled directly: a public provider's RPC, or a self-hosted one.
+    pub fn direct(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            via: None,
+        }
+    }
+
+    /// A Hidden Provider's route to `rpc` (spec §10, ADR 0030): through
+    /// `socks_proxy` on `chain`'s pinned circuit when the table says so,
+    /// else direct. A proxied RPC with no `socks_proxy` is an error, never
+    /// a direct dial — the config gate refuses that config, and this says
+    /// so again for a caller that never ran it.
+    pub fn of(
+        rpc: &crate::provider::SettlementRpc,
+        socks_proxy: Option<&str>,
+        chain: SettlementChain,
+    ) -> Result<Self> {
+        if !rpc.rpc_via_socks_proxy {
+            return Ok(Self::direct(rpc.rpc_url.clone()));
+        }
+        let proxy = socks_proxy.ok_or_else(|| {
+            anyhow!(
+                "the settlement RPC is to be reached through anon (rpc_via_socks_proxy = true), \
+                 and anon.socks_proxy is not set"
+            )
+        })?;
+        let mut via = Url::parse(proxy)
+            .with_context(|| format!("anon.socks_proxy {:?} is not a URL", proxy))?;
+        if via.scheme() != "socks5h" {
+            bail!("anon.socks_proxy {:?} is not socks5h://", proxy);
+        }
+        via.set_username(chain.socks_username())
+            .and_then(|()| via.set_password(Some("pinned")))
+            .map_err(|()| anyhow!("anon.socks_proxy {:?} cannot carry credentials", proxy))?;
+        Ok(Self {
+            url: rpc.rpc_url.clone(),
+            via: Some(via.to_string()),
+        })
+    }
+
+    /// An HTTP client for this route with `timeout` per request. Direct
+    /// means direct: an `HTTP_PROXY` in the environment is ignored either
+    /// way, so nothing reaches an RPC by a route this did not choose.
+    pub fn client(&self, timeout: Duration) -> Result<reqwest::Client> {
+        let builder = reqwest::Client::builder().no_proxy().timeout(timeout);
+        let builder = match &self.via {
+            Some(via) => builder.proxy(
+                reqwest::Proxy::all(via).context("the settlement circuit is not a usable proxy")?,
+            ),
+            None => builder,
+        };
+        builder
+            .build()
+            .context("building the settlement RPC's HTTP client")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -265,6 +372,43 @@ mod tests {
             assert!(why.contains("must be socks5h://<host>:<port>"), "{why}");
             assert!(why.contains("resolves names on the far side"), "{why}");
         }
+    }
+
+    #[test]
+    fn a_proxied_settlement_rpc_rides_its_chains_pinned_circuit() {
+        let rpc = crate::provider::SettlementRpc {
+            rpc_url: "https://api.devnet.solana.com".to_string(),
+            rpc_via_socks_proxy: true,
+        };
+        let route = SettlementRpcRoute::of(
+            &rpc,
+            Some("socks5h://172.30.2.2:9050"),
+            SettlementChain::Solana,
+        )
+        .unwrap();
+        assert_eq!(route.url, "https://api.devnet.solana.com");
+        assert_eq!(
+            route.via.as_deref(),
+            Some("socks5h://toon-settlement-solana:pinned@172.30.2.2:9050")
+        );
+        let evm = SettlementRpcRoute::of(&rpc, Some("socks5h://anon:9050"), SettlementChain::Evm)
+            .unwrap();
+        assert_eq!(
+            evm.via.as_deref(),
+            Some("socks5h://toon-settlement-evm:pinned@anon:9050")
+        );
+        // Never a quiet direct dial.
+        assert!(SettlementRpcRoute::of(&rpc, None, SettlementChain::Solana).is_err());
+
+        let own = crate::provider::SettlementRpc {
+            rpc_url: "http://10.0.0.5:8899".to_string(),
+            rpc_via_socks_proxy: false,
+        };
+        assert_eq!(
+            SettlementRpcRoute::of(&own, Some("socks5h://anon:9050"), SettlementChain::Solana)
+                .unwrap(),
+            SettlementRpcRoute::direct("http://10.0.0.5:8899")
+        );
     }
 
     #[test]

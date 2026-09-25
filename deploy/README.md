@@ -367,10 +367,13 @@ public box `connector_url` is the public edge, so the bearer token would
 hairpin out through nginx. On a hidden box it is an `.anyone` address. Both
 stacks put `provider` and `provider-connector` on the default network, so the
 one compose address works for both. **On a hidden box** `status` dials
-nothing public: the balance is read from `anon.settlement_rpc_url` (the
-overlay also sets `HIDDEN_SETTLEMENT_SOLANA_RPC_URL` into the container), and
-any source that is not on the box's private network is reported as "not
-asked" rather than dialled.
+nothing public directly: the balance is read from the RPC
+`[anon.settlement.solana]` names, by the route it names — your own node
+directly, or the public preset through the anon daemon on the circuit the
+connector keeps for Solana (spec §10, ADR 0030) — and any other source that
+is not on the box's private network is reported as "not asked" rather than
+dialled. `redeem`'s EVM gas price is read the same way, from
+`[anon.settlement.evm]`.
 
 ### `--check`, and the timer that runs it
 
@@ -649,11 +652,19 @@ config it was validated against are the same commit and the box takes both with
 one fast-forward, so a build can never reach this box ahead of the config it
 needs.
 
-The current pin is `rust-2026.09.11.1` (= `rust-sha-f278cd6`), the build the
-sandbox proves this provider against end to end. The rest of the devnet fleet
-is a release behind on `rust-2026.08.28.1`; the 09.11 release is purely
-additive to the config schema (`[[tokens]]`, `[[rates]]`, `socks_proxy`, all
-optional and all absent here), so the two interoperate.
+The current pin is `rust-sha-854d199`, the `main` build that merged
+connector#1335 (connector ADR 0073): the first connector that accepts
+`rpc_via_socks_proxy` in a `[settlement.*]` table, which this bundle now
+renders on every box (`false` on a public one, `true` by default on a hidden
+one, § "Running hidden"). An older connector refuses that key, so the pin and
+the template moved in one commit (TOON_Network#167). It is a commit build
+rather than a release handle because no release carried #1335 yet when it was
+pinned; move it to the first `rust-<handle>` release cut from `854d199` or
+later (connector ADR 0068) when there is one. The previous pin was
+`rust-2026.09.11.1` (= `rust-sha-f278cd6`); the rest of the devnet fleet is
+on `rust-2026.09.11.1` or `rust-2026.08.28.1`, and this box peers with none of
+them (tenants pay it at its own client edge), so nothing here needs them to
+move.
 
 ## Privacy and exposure invariants
 
@@ -737,8 +748,8 @@ nothing of it is reachable except over Anyone: the connector at the box's own
 provider README's § "Hidden Provider" is the reference for what that means;
 this section is how the bundle does it, and what it costs.
 
-**Read the settlement RPC part before anything else.** It is the one
-requirement that decides whether hidden is for you.
+**Read the settlement RPC part before anything else.** It says what is and
+is not hidden about getting paid.
 
 ### What changes
 
@@ -748,7 +759,7 @@ requirement that decides whether hidden is for you.
 | A lease is reached at | `PUBLIC_IP:<port>` | its own `.anyone` address, made per lease over the daemon's control port |
 | A workload's own traffic | the host's network | an internal network whose only way out is the daemon's transparent proxy |
 | The provider's and publisher's outbound | direct | through the daemon's SOCKS port (`socks5h`) |
-| Settlement RPCs | the preset's public ones | **your own nodes**, on a private address |
+| Settlement RPCs | the preset's public ones, direct | the preset's public ones **through the anon daemon**, one pinned circuit per chain; or your own node, direct |
 | DNS, nginx, Let's Encrypt | yes | none: `DOMAIN` and `PUBLIC_IP` are never rendered |
 | ufw | 22, 80, 443 and both workload ranges | 22, and the workload ranges from the daemon's address only |
 | Extra services | none | `anon` |
@@ -757,44 +768,87 @@ It is one bundle, not two. `HIDDEN=1` in `.env` is the switch and
 `COMPOSE_FILE=docker-compose.yml:docker-compose.hidden.yml` beside it adds the
 overlay (docker compose reads that line itself, so every `docker compose`
 command in this directory, auto-apply's included, sees the hidden stack);
-`render.sh` refuses a `.env` where the two disagree. `provider.toml.template`
-carries both shapes, and `render.sh` keeps the `@hidden-only` blocks
-(`hidden = true` and the `[anon]` tables) and drops the `@public-only` one
-(`public_ip`). The listings, the routes, the keys and `auto-apply.sh` work the
+`render.sh` refuses a `.env` where the two disagree. Both templates carry
+both shapes, and `render.sh` keeps the `@hidden-only` blocks (`hidden = true`
+and the `[anon]` tables in `provider.toml`, the root `socks_proxy` in
+`connector.toml`) and drops the `@public-only` one (`public_ip`). The listings, the routes, the keys and `auto-apply.sh` work the
 same way on both.
 
-### The settlement RPCs: you run them
+### The settlement RPCs: through anon, or your own
 
 The connector reads chain state and submits transactions, on both chains, at
-boot and for every settlement. **It dials its settlement RPC directly.** Its
-`socks_proxy` key covers the ILP wire to `.anyone` peers and nothing else, by
-decision (connector ADR 0070, decision 4: "Settlement RPC and `handler_url`
-dial direct"), and this box has no peers. So a public RPC on a hidden box
-would see every query and every transaction of this box's settlement keys
-arrive from this box's real address, which undoes the hiding for anyone who
-can read that RPC's logs. This is also the provider's own rule:
-`anon.settlement_rpc_url` must be loopback, private, or a name resolving only
-to private addresses, and the app refuses to load otherwise.
+boot and for every settlement. An unproxied read of a public RPC would link
+this box's address to its settlement keys, so spec §10 (as amended by
+TOON_Network ADR 0030, on the evidence in connector ADR 0073) allows exactly
+two things per chain, and the bundle does both:
 
-So `.env` names your own nodes, one per chain, and `render.sh` refuses to
-render without both:
+- **By default, the preset's public, keyless RPC through the anon daemon.**
+  With nothing more in `.env` than `HIDDEN=1` and the overlay, `render.sh`
+  writes the connector's root `socks_proxy = "socks5h://172.30.2.2:9050"` and
+  `rpc_via_socks_proxy = true` in both `[settlement.evm]` and
+  `[settlement.solana]`. Every client of each table (the settlement backend,
+  and on EVM the channel-index syncer and rate source) then rides the daemon
+  on a circuit pinned per chain by SOCKS username (`toon-settlement-evm`,
+  `toon-settlement-solana`; the daemon's `IsolateSOCKSAuth`, which
+  `anon/anonrc` leaves on), and a daemon that is down fails the settlement
+  dial rather than going direct. The connector refuses a plain `http://`
+  RPC through the circuit, so the preset URLs stay `https://`.
+- **Or your own node, directly.** Set a chain's
+  `HIDDEN_SETTLEMENT_<CHAIN>_RPC_URL` and it replaces that chain's preset RPC
+  with `rpc_via_socks_proxy = false`:
 
-```bash
-HIDDEN_SETTLEMENT_EVM_RPC_URL=http://10.0.0.5:8545     # Base Sepolia
-HIDDEN_SETTLEMENT_SOLANA_RPC_URL=http://10.0.0.5:8899  # Solana devnet
-```
+  ```bash
+  HIDDEN_SETTLEMENT_EVM_RPC_URL=http://10.0.0.5:8545     # Base Sepolia
+  HIDDEN_SETTLEMENT_SOLANA_RPC_URL=http://10.0.0.5:8899  # Solana devnet
+  ```
 
-They replace the preset's `SETTLEMENT_*_RPC_URL` in the connector's config;
-the rest of the preset (chain id, registry, program, tokens) is unchanged.
-`render.sh` puts **both** through the app's own rule, in the real loader, and
-refuses a public one before the connector reads a byte from it. It also
-refuses loopback: the connector is a container, and its `127.0.0.1` is
-itself. Use an address the container can route to: this host's address on a
-private network, or another machine of yours over a private link.
+  Either chain may be self-hosted alone. It must be on a private address the
+  connector's container can route to — `render.sh` refuses loopback, because
+  the connector is a container and its `127.0.0.1` is itself.
 
-**What that costs, as far as we can state it.** Neither figure below was
-measured for this bundle, and neither is specific to the devnets; they are the
-chains' own published requirements, read on 2026-09-24:
+**The rule covers every process on the box that dials the RPC** (spec §10),
+and here that is four: the connector, as above; the directory publisher,
+whose client is a hidden payer (§ "Directory writes on the devnet");
+`toon-provider status` and `redeem`, which read a balance and a gas price
+through the daemon on the connector's circuits (or your node directly); and
+`keys.sh check-funded`, which runs before the daemon is up and so, on the
+proxied default, asks nothing and says so (fund what `./keys.sh addresses`
+lists; `status` reads the balance once the box is up). "One pinned circuit
+per chain" holds per process: `status` and `redeem` share the connector's
+circuits, while the publisher's client pins its own (`toon-client-rpc-evm`,
+`toon-client-rpc-solana`), so the Solana RPC can see this box's reads arrive
+from two exits. Both name the same public keys anyway; neither is this box's
+address.
+
+**The app judges exactly what the connector dials.** `provider.toml`'s
+`[anon.settlement.evm]` and `[anon.settlement.solana]` are rendered from the
+same values as the connector's two tables (`tests/deploy_bundle.rs` holds
+them to each other), and the app's hiding gate needs one for every chain the
+Profile settles on. It refuses a public RPC dialled directly, a proxied one
+over plain `http://`, and a proxied one on a private address no exit could
+reach, so `render.sh` fails on any of them before the connector reads a byte
+of chain state. The single `anon.settlement_rpc_url` key older configs use
+still loads, under its old self-hosted rule, but names only one of the two
+RPCs the connector dials.
+
+**What this hides, and what it does not** (ADR 0030):
+
+- Payments are public on chain either way: every deposit, claim and
+  settlement names this box's settlement addresses.
+- Through anon, the RPC provider still sees every query and transaction of
+  those keys, and can profile this box's settlement activity; it sees an exit
+  relay's address, not this box's, so it cannot locate it. The ISP sees a
+  connection to the anon network, not to the RPC.
+- An **API-keyed** RPC hides nothing: the key ties every query to the account
+  that holds it. Keep the proxied RPCs keyless.
+- **Self-hosting is not automatically stronger.** It hides reads completely,
+  but a node's own chain p2p traffic — its gossip, and the first hop of every
+  transaction it submits — identifies it unless that traffic is also proxied,
+  which nothing in this bundle does and the spec neither requires nor covers.
+
+**What self-hosting costs, as far as we can state it.** Neither figure below
+was measured for this bundle, and neither is specific to the devnets; they
+are the chains' own published requirements, read on 2026-09-24:
 
 - **Solana** (Anza, [validator requirements](https://docs.anza.xyz/operations/requirements)):
   an RPC node wants 12 cores / 24 threads or more, **256 GB of RAM or more**,
@@ -808,31 +862,21 @@ chains' own published requirements, read on 2026-09-24:
   Whether that L1 node must itself be private is your threat model: it serves
   the rollup node, not this box's settlement keys.
 
-That is heavy on purpose, and it is the honest price of the claim. Two things
-are **not** a way round it:
-
-- **A local forwarder to a public RPC through anon** (a private address that
-  relays to `api.devnet.solana.com` over a circuit) would pass the app's
-  check and hide the address, but it is a *proxied* settlement RPC, which is
-  not what spec §10 asks a Hidden Provider to run, and connector ADR 0070
-  deliberately leaves circuits out of settlement ("circuit latency interacts
-  with confirmation semantics and nonce handling on both backends"). Allowing
-  it is a spec decision, not a bundle setting, and this bundle does not ship
-  one.
-- **A private address that forwards in the clear to a public RPC** from
-  another machine of yours moves the linkage to that machine. It hides this
-  box only as well as that machine is unlinkable to you.
+**A private address that forwards in the clear to a public RPC** from another
+machine of yours is not a third option: it moves the linkage to that machine,
+and hides this box only as well as that machine is unlinkable to you.
 
 ### What the connector's own outbound is, on a hidden box
 
-Checked against the pinned connector (`rust-2026.09.11.1`), loading the config
-this bundle renders: it accepts the `http://`/`ws://` `.anyone` endpoints,
-and the first thing it dials is `[settlement.evm].rpc_url`, directly
-("failed to construct the configured settlement backend … tcp connect error"
-against an unreachable private RPC). Its other outbound is the provider app,
-on the compose network. There is no setting that sends the settlement RPC
-through anon (see above), which is why the bundle makes both RPCs yours
-rather than setting `socks_proxy`, which would change nothing here.
+Its client edge is reached through the daemon's hidden service; the provider
+app on the compose network; and each settlement RPC, through the daemon's
+SOCKS port by default (above) or directly to your own node. Circuit latency is
+what connector ADR 0073 measured before allowing this: every wait on a
+proxied RPC is bounded, a confirmation poll that fails in transit does not end
+the wait, EVM nonces are read from `pending`, and the boot reads before it
+transacts. The first thing the connector does at boot is read and write both
+chains, so a daemon that has not bootstrapped yet shows up as the connector
+restarting until it has.
 
 ### Directory writes on the devnet
 
@@ -854,12 +898,16 @@ curl -s https://proxy.relay.devnet.toonprotocol.dev/ilp \
   | jq '.routes[] | select(.prefix == "g.toon.relay")'
 ```
 
-The publisher's chain RPC is **your Solana node**
-(`HIDDEN_SETTLEMENT_SOLANA_RPC_URL`), not the preset's public one: its
-payment channel dials the RPC directly, never through the proxy, and a
-hidden publisher refuses to start beside a public one. Yours is on a private
-address (above), so no exit could reach it and nothing crosses a watched
-network to get to it.
+The publisher's chain RPC rides the proxy too. Its `@toon-protocol/client`
+is a **hidden payer** (`socksProxy` beside a clearnet connector,
+TOON_Network#167): the relay's edge, the BTP socket and the chain RPC all go
+through the daemon, the RPC on a circuit per chain, failing closed. So by
+default it pays from the preset's public Solana RPC through anon, like the
+connector. When you self-host (`HIDDEN_SETTLEMENT_SOLANA_RPC_URL`), the
+overlay points it at your node instead and sets `TOON_PROXY_RPC=false`, and
+it dials that node directly — no exit could reach a private address — and
+refuses to start if it is not on one (tools/publisher/README.md §
+"Publishing from a hidden provider").
 
 ### Standing one up hidden
 
@@ -867,10 +915,14 @@ As § "Standing one up", with these differences.
 
 1. **In `.env`**: `PROVIDER_NAME`, `ILP_ADDRESS` and the keys as usual; leave
    `DOMAIN` and `PUBLIC_IP` empty (they are never rendered); and uncomment
-   the "Running hidden" block: `HIDDEN=1`, the `COMPOSE_FILE` line and your
-   two RPCs. No DNS records.
-2. **Bring the RPC nodes up first and let them sync.** The connector submits a
-   Solana transaction at boot through yours.
+   the "Running hidden" block: `HIDDEN=1` and the `COMPOSE_FILE` line, and a
+   `HIDDEN_SETTLEMENT_*_RPC_URL` only for a chain whose node you run
+   yourself. No DNS records.
+2. **Fund the keys first** (`./keys.sh addresses`). On the proxied default
+   `bootstrap.sh`'s funding check asks no RPC, because the daemon is not up
+   yet, so it cannot refuse an unfunded box for you: the connector submits a
+   Solana transaction at boot. If you self-host, bring the nodes up first and
+   let them sync.
 3. **`./bootstrap.sh`.** Before the sealing-key handshake it builds the anon
    image (`pull-images.sh anon`; there is no published image of the release
    that writes `.anyone` addresses, and `anon/Dockerfile` pins what it builds
@@ -1004,10 +1056,23 @@ The publisher's only outbound connection was to the daemon's SOCKS port. The
 sandbox hub does not pin `g.toon.relay`, so this proves the carriage and not
 the devnet relay's refusal of HTTP. Not run against the devnet relay.
 
-**Not run end to end:** a connector booted against real self-hosted RPCs, a
-paid spawn of a hidden lease, a tenant paying over the circuit, and
-`make smoke-m4`. The sandbox's `hs` profile (infra/sandbox), which this
-overlay is built from, is where that suite runs, against its own chains; the
-bundle differs from it in its addresses, in running one daemon rather than
-the sandbox's three, and in settling against the operator's RPCs rather than
-the sandbox's `anvil`.
+Proxied settlement RPC (TOON_Network#167): the hidden render — root
+`socks_proxy`, both tables `rpc_via_socks_proxy = true` on the preset's https
+RPCs — was loaded by the pinned connector (`rust-sha-854d199`) in a container
+with no network. It logged "settlement rpc via socks_proxy" for both tables,
+on the circuits `toon-settlement-evm` and `toon-settlement-solana`, and then
+refused to start on "socks connect error: Proxy server unreachable": it
+failed closed and dialled nothing direct. The public render loads in the same
+image, and the previous pin (`rust-2026.09.11.1`) refuses the hidden one at
+`[settlement.evm]`. Connector ADR 0073 has the measurements of settlement
+over real Anyone circuits.
+
+**Not run end to end:** a hidden box of this bundle booted against the
+devnet over real circuits (connector and publisher on the proxied preset),
+a connector booted against real self-hosted RPCs, a paid spawn of a hidden
+lease, a tenant paying over the circuit, and `make smoke-m4`. The sandbox's
+`hs` profile (infra/sandbox), which this overlay is built from, is where that
+suite runs, against its own chains; the bundle differs from it in its
+addresses, in running one daemon rather than the sandbox's three, and in
+settling against the preset's RPCs through anon (or the operator's own)
+rather than the sandbox's `anvil`.

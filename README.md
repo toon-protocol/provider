@@ -82,10 +82,11 @@ commit, `sha-<short>`, so the box pulls them and compiles nothing
 ([How updates arrive](deploy/README.md#how-updates-arrive)). To run a
 [Hidden Provider](#hidden-provider) instead, reachable only through Anyone,
 set `HIDDEN=1` and follow
-[Running hidden](deploy/README.md#running-hidden): it needs no domain and no
-public ports, but it does need Base Sepolia and Solana devnet RPC nodes of
-your own, and on the devnet today its directory writes are refused (that
-section says why).
+[Running hidden](deploy/README.md#running-hidden): it needs no domain, no
+public ports and no chain nodes of your own — by default it reaches the
+preset's public settlement RPCs only through the anon daemon (spec §10, ADR
+0030), and self-hosting either chain's node stays an option — and that
+section says what is and is not hidden about getting paid.
 
 ## Status
 
@@ -194,7 +195,7 @@ parts:
 
 ## Hidden Provider
 
-A provider that sets `hidden = true` (spec §10, ADR 0008) publishes a
+A provider that sets `hidden = true` (spec §10, ADR 0008, ADR 0030) publishes a
 Profile with `hidden: true` and **no `host`**, and every Listing it
 publishes carries `["l", "hidden:true", "toon.network"]` beside its
 isolation and arch labels, so a tenant can filter for or against hidden
@@ -214,23 +215,43 @@ it:
 | Per-lease `.anyone` addresses | `[anon.control]` — `addr`, and `cookie_file` **or** `password` | missing, not `host:port`, neither or both authentications |
 | The provider's own outbound through `anon` | `anon.socks_proxy` | missing, or not `socks5h://<host>:<port>` |
 | All workload egress through `anon`, direct egress dropped | `[anon.egress]` — `network`, `gateway` | missing, or `gateway` not an IP address |
-| Its own settlement RPC | `anon.settlement_rpc_url` | missing, or its host is public (below) |
+| Every settlement RPC self-hosted, or public and reached only through `anon` | `[anon.settlement.evm]` / `[anon.settlement.solana]` — `rpc_url`, `rpc_via_socks_proxy` — one for every chain family `[[settlement]]` names (or the older single `anon.settlement_rpc_url`, self-hosted only) | missing for a chain the Profile settles on, both forms set, or failing its route's rule (below) |
 
-**The settlement RPC rule.** The URL's host must be loopback, a private
+**The settlement RPC rule** (ADR 0030 amends ADR 0008's fifth condition).
+The connector dials one RPC per chain, so the gate is handed one table per
+chain, in the connector's own two keys, and needs one for every chain the
+provider settles on; the deploy bundle renders them from the same values as
+the connector's `[settlement.*]` tables. Each table is one of ADR 0030's two
+options:
+
+- **`rpc_via_socks_proxy = true`**: a public, keyless RPC reached only
+  through `anon.socks_proxy`, on one pinned circuit per chain, never direct.
+  Judged by its URL alone and **never resolved here** (the name is the
+  proxy's to resolve): it must be `https://` — plain `http://` only to an
+  `.anyone` host, because an exit relay could rewrite the answers
+  — and must not be loopback or a private address, which no exit could
+  reach. A URL carrying credentials or a query string is warned about: a
+  keyed RPC ties every query to its account, proxy or not.
+- **`rpc_via_socks_proxy = false`** (the default): self-hosted and dialled
+  directly. The URL's host must be loopback, a private
 range (RFC 1918 `10/8`, `172.16/12`, `192.168/16`; link-local; IPv6 `::1`,
 ULA `fc00::/7`, `fe80::/10`), or a hostname whose DNS resolution yields
 **only** such addresses; `localhost` is loopback by definition. A public
 address anywhere in the answer — `https://api.mainnet-beta.solana.com`
-resolved, or `8.8.8.8` written down — is refused, because an unproxied read
-of a public RPC links the operator's network location to its on-chain
-identity. A hostname that **does not resolve where the config is loaded** is
+resolved, or `8.8.8.8` written down — is refused, naming the proxied option,
+because an unproxied read of a public RPC links the operator's network
+location to its on-chain identity. The older `anon.settlement_rpc_url` is
+held to this rule. A hostname that **does not resolve where the config is loaded** is
 accepted **with a warning** at load: the sandbox's chain hostnames (`anvil`,
 `solana-validator`) resolve only inside its compose network, and an operator
 rendering the route table on the host with `toon-provider routes` must not
 be told a config is invalid that is valid where it runs. The **running**
 provider checks the name again at startup and refuses to start if it still
 does not resolve there — a hidden provider that cannot show its RPC is
-self-hosted does not publish `hidden: true`. Without `hidden = true` none of
+self-hosted does not publish `hidden: true`. The provider's own reads of
+these RPCs (`toon-provider status`'s balance, `redeem`'s gas price) take the
+same route: through `anon` on the connector's circuit for that chain, or
+directly to a self-hosted node. Without `hidden = true` none of
 the `[anon]` keys is required and the RPC is not gated; keys that are
 present are still checked for shape, so a typo fails where it was written.
 

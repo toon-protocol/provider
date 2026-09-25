@@ -11,7 +11,7 @@ use serde_json::Value;
 use url::Url;
 
 use super::{StatusArgs, SOURCE_TIMEOUT};
-use crate::outbound_proxy::is_private_url;
+use crate::outbound_proxy::{is_private_url, SettlementChain, SettlementRpcRoute};
 use crate::provider::operator_status::{OperatorStatus, OPERATOR_STATUS_VERSION};
 use crate::provider::ProviderConfig;
 use crate::topup::publisher_origin;
@@ -37,6 +37,10 @@ pub struct Sources {
     pub settlement_address: Result<String, String>,
     /// The Solana RPC the balance is read from.
     pub settlement_rpc_url: Result<String, String>,
+    /// The `socks5h://` proxy that read rides, on the Solana settlement
+    /// circuit, when a Hidden Provider reaches a public RPC through anon
+    /// (spec §10, ADR 0030); `None` dials it directly.
+    pub settlement_rpc_via: Option<String>,
     pub timeout: Duration,
 }
 
@@ -94,23 +98,48 @@ impl Sources {
             ),
         };
 
-        let settlement_rpc_url = if hidden {
-            // Never a public RPC from a hidden box: its own node, which the
-            // config gate has already required to be private (keys.py reads
-            // HIDDEN_SETTLEMENT_SOLANA_RPC_URL for the same reason).
-            match &config.anon.settlement_rpc_url {
-                Some(url) => near("the settlement RPC", url.clone()),
-                None => Err("anon.settlement_rpc_url is not set".to_string()),
+        let (settlement_rpc_url, settlement_rpc_via) = if hidden {
+            // Never a public RPC dialled directly from a hidden box: its own
+            // node, which the config gate has already required to be
+            // private, or a public one on the Solana settlement circuit
+            // (spec §10, ADR 0030). The legacy single key is the
+            // self-hosted form.
+            let rpc = config.anon.settlement.solana.clone().or_else(|| {
+                config.anon.settlement_rpc_url.clone().map(|rpc_url| {
+                    crate::provider::SettlementRpc {
+                        rpc_url,
+                        rpc_via_socks_proxy: false,
+                    }
+                })
+            });
+            match rpc {
+                None => (
+                    Err(
+                        "no Solana settlement RPC is configured ([anon.settlement.solana])"
+                            .to_string(),
+                    ),
+                    None,
+                ),
+                Some(rpc) => match SettlementRpcRoute::of(
+                    &rpc,
+                    config.anon.socks_proxy.as_deref(),
+                    SettlementChain::Solana,
+                ) {
+                    Err(e) => (Err(format!("not asked: {e:#}")), None),
+                    Ok(route) if route.via.is_some() => (Ok(route.url), route.via),
+                    Ok(route) => (near("the settlement RPC", route.url), None),
+                },
             }
         } else {
-            match &args.settlement_rpc_url {
+            let url = match &args.settlement_rpc_url {
                 Some(url) if !url.trim().is_empty() => Ok(url.trim().to_string()),
                 _ => Err(
                     "no Solana RPC to ask: set TOON_SETTLEMENT_SOLANA_RPC_URL (the deploy \
                      bundle sets it from SETTLEMENT_SOLANA_RPC_URL)"
                         .to_string(),
                 ),
-            }
+            };
+            (url, None)
         };
 
         Sources {
@@ -121,6 +150,7 @@ impl Sources {
             dashboard_url,
             settlement_address,
             settlement_rpc_url,
+            settlement_rpc_via,
             timeout: SOURCE_TIMEOUT,
         }
     }
@@ -671,6 +701,28 @@ async fn read_funding(client: &reqwest::Client, sources: &Sources) -> FundingSec
         Err(e) => {
             section.error = Some(e.clone());
             return section;
+        }
+    };
+    // Its own client when the read rides the Solana settlement circuit: the
+    // shared one dials nothing but this box's own network.
+    let proxied;
+    let client = match &sources.settlement_rpc_via {
+        None => client,
+        Some(via) => {
+            let route = SettlementRpcRoute {
+                url: rpc.clone(),
+                via: Some(via.clone()),
+            };
+            match route.client(route.timeout(sources.timeout)) {
+                Ok(c) => {
+                    proxied = c;
+                    &proxied
+                }
+                Err(e) => {
+                    section.error = Some(format!("{e:#}"));
+                    return section;
+                }
+            }
         }
     };
     let body = serde_json::json!({

@@ -24,7 +24,7 @@
 #   provider             on the hidden network, with the daemon's control
 #                        cookie mounted read-only.
 #   directory-publisher  on the hidden network, and refusing to start unless
-#                        it dials out through the daemon.
+#                        it dials out through the daemon — chain RPC included.
 #   nginx, certbot       DISABLED. No public DNS, no TLS edge, no certificate.
 #
 #   tenant ──socks5h──▶ Anyone ──▶ anon ──▶ provider-connector :4000 ──▶ provider
@@ -207,7 +207,9 @@ services:
   # PINNED AT .3, because anon/anonrc forwards the address's port 80 here by IP
   # literal. The loopback publish in docker-compose.yml stays: it is how
   # bootstrap.sh reads the sealing key and auto-apply.sh verifies GET /ilp, and
-  # 127.0.0.1 is not a public door.
+  # 127.0.0.1 is not a public door. On this network it also reaches the
+  # daemon's SOCKS port, which connector.toml's root `socks_proxy` names and
+  # every [settlement.*] table with `rpc_via_socks_proxy = true` rides.
   provider-connector:
     networks:
       default: {}
@@ -220,15 +222,15 @@ services:
       # 172.30.2.2:9051 to make and destroy each lease's address.
       - anon_control:/var/lib/anon/control:ro
     environment:
-      # `toon-provider status` reads the settlement key's balance from this
-      # box's OWN Solana node, never the public RPC the base file names: a
-      # getBalance for this address from this box's real address would link
-      # the two (keys.py § check-funded, the same rule). The command reads
-      # anon.settlement_rpc_url on a hidden provider regardless; this keeps
-      # the public URL out of the container altogether.
+      # `toon-provider status` and `redeem` read the settlement RPCs a hidden
+      # provider.toml names, [anon.settlement.solana] and
+      # [anon.settlement.evm], by the route each names: this box's own node
+      # directly, or the public one through anon on that chain's settlement
+      # circuit (spec §10, ADR 0030). Never the base file's public URL,
+      # dialled directly: a getBalance for this box's settlement address from
+      # its real address would link the two. These keep that URL out of the
+      # container altogether; empty unless the operator self-hosts.
       TOON_SETTLEMENT_SOLANA_RPC_URL: ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-}
-      # The same rule for `toon-provider redeem`'s EVM gas price: this box's
-      # own node, which it also refuses to ask unless it is private.
       TOON_SETTLEMENT_EVM_RPC_URL: ${HIDDEN_SETTLEMENT_EVM_RPC_URL:-}
     networks:
       default: {}
@@ -254,18 +256,22 @@ services:
     environment:
       # WITHOUT THESE TWO IT REFUSES TO START: a publisher beside a hidden
       # provider that reached the relay's edge from this box's real address
-      # would name exactly what the provider hides. Every host it dials rides
-      # the proxy, except a chain RPC on a private address, which no exit
-      # could reach and no watched network carries (tools/publisher/README.md
-      # § "Publishing from a hidden provider").
+      # would name exactly what the provider hides. With them its client is a
+      # HIDDEN PAYER (@toon-protocol/client's `socksProxy`, TOON_Network#167):
+      # every byte rides the proxy — the relay's edge, the BTP socket and the
+      # chain RPC, on a pinned circuit per chain — and nothing falls back to a
+      # direct dial (tools/publisher/README.md § "Publishing from a hidden
+      # provider").
       TOON_HIDDEN: 'true'
       TOON_SOCKS_PROXY: socks5h://172.30.2.2:9050
-      # ITS OWN CHAIN RPC, the one this box runs, never the public one the base
-      # file names. The payment channel dials its RPC directly, not through the
-      # proxy, so a public RPC would see every channel open and deposit arrive
-      # from this box's real address. A publisher carrying TOON_Network#165
-      # refuses to start hidden beside anything but a private one.
-      TOON_RPC_URL: ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-}
+      # The Solana RPC it pays from. By DEFAULT the base file's public one,
+      # reached through the proxy like everything else (spec §10, ADR 0030).
+      # When the operator runs its own node (HIDDEN_SETTLEMENT_SOLANA_RPC_URL),
+      # that one instead, dialled DIRECTLY — no exit could reach a private
+      # address — which is what TOON_PROXY_RPC=false says; the publisher
+      # refuses to start hidden if that RPC is not on a private address.
+      TOON_RPC_URL: ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-${SOLANA_RPC_URL:-https://api.devnet.solana.com}}
+      TOON_PROXY_RPC: ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:+false}
       # BTP, THROUGH THE PROXY. The devnet relay PINS `g.toon.relay` to BTP and
       # refuses an HTTP write, so over HTTP this box would never be listed.
       # Since TOON_Network#165 the publisher hands its client the proxy's

@@ -1,9 +1,11 @@
 //! A stub SOCKS5 proxy, so a Hidden Provider's own outbound can be tested
 //! against a proxy the test controls rather than an `anon` daemon (spec §10).
 //!
-//! It speaks exactly as much of RFC 1928 as the three clients that ride it
-//! need: the greeting, the no-authentication method, and `CONNECT` to a
-//! `DOMAINNAME` or an `IPv4` address. Once connected it is a pipe.
+//! It speaks exactly as much of RFC 1928 as the clients that ride it need:
+//! the greeting, the no-authentication method — or RFC 1929's
+//! username/password, when a client offers it, which is how a settlement
+//! RPC read names its pinned circuit (spec §10, ADR 0030) — and `CONNECT` to
+//! a `DOMAINNAME` or an `IPv4` address. Once connected it is a pipe.
 //!
 //! What makes it a TEST and not just a hop: a destination is named to it, and
 //! it alone knows where that name really is. A stub is started with a routing
@@ -33,6 +35,8 @@ struct Seen {
     destinations: Vec<String>,
     /// The local address of every connection this proxy opened onward.
     outgoing: Vec<SocketAddr>,
+    /// The username of every connection that authenticated, in order.
+    usernames: Vec<String>,
 }
 
 pub struct SocksStub {
@@ -86,6 +90,12 @@ impl SocksStub {
         self.destinations().iter().any(|d| d == destination)
     }
 
+    /// The SOCKS username each authenticating connection presented: the
+    /// circuit it asked the daemon for (`IsolateSOCKSAuth`).
+    pub fn usernames(&self) -> Vec<String> {
+        self.seen.lock().unwrap().usernames.clone()
+    }
+
     /// The local address of every onward connection this proxy opened: what
     /// a stub backend sees as the peer of a proxied connection.
     pub fn outgoing(&self) -> Vec<SocketAddr> {
@@ -104,8 +114,11 @@ async fn serve(
     routes: Arc<HashMap<String, SocketAddr>>,
     seen: Arc<Mutex<Seen>>,
 ) {
-    if greet(&mut client).await.is_none() {
+    let Some(username) = greet(&mut client).await else {
         return;
+    };
+    if let Some(username) = username {
+        seen.lock().unwrap().usernames.push(username);
     }
     let Some((host, port)) = request(&mut client).await else {
         return;
@@ -144,8 +157,10 @@ async fn serve(
     let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
 }
 
-/// The greeting: the client's method list in, "no authentication" out.
-async fn greet(client: &mut TcpStream) -> Option<()> {
+/// The greeting: the client's method list in, and "no authentication" out —
+/// or username/password (RFC 1929) when the client offers it, answered with
+/// success whatever it presents. `Some(Some(username))` for the second.
+async fn greet(client: &mut TcpStream) -> Option<Option<String>> {
     let mut head = [0u8; 2];
     client.read_exact(&mut head).await.ok()?;
     if head[0] != 5 {
@@ -153,8 +168,21 @@ async fn greet(client: &mut TcpStream) -> Option<()> {
     }
     let mut methods = vec![0u8; head[1] as usize];
     client.read_exact(&mut methods).await.ok()?;
-    client.write_all(&[5, 0]).await.ok()?;
-    Some(())
+    if !methods.contains(&2) {
+        client.write_all(&[5, 0]).await.ok()?;
+        return Some(None);
+    }
+    client.write_all(&[5, 2]).await.ok()?;
+    let mut version_and_length = [0u8; 2];
+    client.read_exact(&mut version_and_length).await.ok()?;
+    let mut username = vec![0u8; version_and_length[1] as usize];
+    client.read_exact(&mut username).await.ok()?;
+    let mut length = [0u8; 1];
+    client.read_exact(&mut length).await.ok()?;
+    let mut password = vec![0u8; length[0] as usize];
+    client.read_exact(&mut password).await.ok()?;
+    client.write_all(&[1, 0]).await.ok()?;
+    Some(Some(String::from_utf8(username).ok()?))
 }
 
 /// One `CONNECT` request, as the host and port it named.

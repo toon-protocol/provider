@@ -137,8 +137,10 @@ pub struct ImagePolicyConfig {
 /// `socks_proxy` is where the provider's OWN outbound — relay reads, image
 /// fetches, the publish request — goes out (M4-5, #42); `egress` is what
 /// the compute backend attaches every hidden workload to (M4-4, #41); and
-/// `settlement_rpc_url` is the self-hosted chain endpoint the gate checks
-/// (this ticket) and the sandbox's `hs` profile names (M4-6, #43).
+/// `settlement` (or the older single `settlement_rpc_url`) is every chain's
+/// settlement RPC, self-hosted or reached only through `anon`, which the
+/// gate checks and `status`/`redeem` read by the same route (ADR 0030,
+/// TOON_Network#167).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnonConfig {
@@ -163,13 +165,25 @@ pub struct AnonConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress: Option<EgressPolicy>,
 
-    /// The settlement RPC endpoint this provider's connector settles
-    /// against, as a URL. A Hidden Provider runs its own (ADR 0008): an
-    /// unproxied read of a public RPC would link this host's network
-    /// location to its on-chain identity. So the host here MUST be loopback,
-    /// a private range (RFC 1918, ULA, link-local), or a name that resolves
-    /// only to such addresses — see `settlement_rpc_verdict` for what
-    /// happens to a name that does not resolve where the config is loaded.
+    /// `[anon.settlement.evm]` and `[anon.settlement.solana]`: every
+    /// settlement RPC this box's connector dials, one table per chain, in
+    /// the connector's own two keys (`rpc_url`, `rpc_via_socks_proxy`), so
+    /// the gate sees exactly what the connector is handed (spec §10, ADR
+    /// 0030). A Hidden Provider needs a table for every chain family its
+    /// `[[settlement]]` legs name; see `SettlementRpc` for the rule each
+    /// one is held to.
+    #[serde(default, skip_serializing_if = "SettlementRpcs::is_empty")]
+    pub settlement: SettlementRpcs,
+
+    /// The OLDER, single-URL form of the settlement-RPC hiding condition,
+    /// kept so that configs written before the per-chain tables still load
+    /// (the sandbox's `hs` profile). It is held to ADR 0008's original rule
+    /// and nothing else: loopback, a private range (RFC 1918, ULA,
+    /// link-local), or a name resolving only to such addresses — see
+    /// `settlement_rpc_verdict`. It names ONE RPC while a connector dials
+    /// one per chain, so a Hidden Provider settling on two chains is warned
+    /// to name both in `[anon.settlement.*]` instead; the two forms are one
+    /// or the other, never both.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settlement_rpc_url: Option<String>,
 
@@ -190,10 +204,63 @@ impl Default for AnonConfig {
             control: None,
             socks_proxy: None,
             egress: None,
+            settlement: SettlementRpcs::default(),
             settlement_rpc_url: None,
             forward_host: default_forward_host(),
         }
     }
+}
+
+/// `[anon.settlement.*]`: the settlement RPC of each chain this box's
+/// connector settles on. `deploy/render.sh` writes these from the same
+/// `.env` values it writes into `connector.toml`'s `[settlement.evm]` and
+/// `[settlement.solana]`, so the gate judges the URLs the connector dials.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettlementRpcs {
+    /// `[anon.settlement.evm]`: every `evm:<chain id>` leg's RPC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evm: Option<SettlementRpc>,
+    /// `[anon.settlement.solana]`: the `solana` leg's RPC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solana: Option<SettlementRpc>,
+}
+
+impl SettlementRpcs {
+    /// Neither table is written.
+    pub fn is_empty(&self) -> bool {
+        self.evm.is_none() && self.solana.is_none()
+    }
+
+    /// Each table that is written, with the name an operator knows it by.
+    pub fn tables(&self) -> impl Iterator<Item = (&'static str, &SettlementRpc)> {
+        [
+            ("[anon.settlement.evm]", self.evm.as_ref()),
+            ("[anon.settlement.solana]", self.solana.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(key, rpc)| rpc.map(|rpc| (key, rpc)))
+    }
+}
+
+/// One chain's settlement RPC, and how a Hidden Provider reaches it — ADR
+/// 0030's two options, the same two keys the connector's
+/// `[settlement.<chain>]` table takes (connector ADR 0073):
+///
+/// - `rpc_via_socks_proxy = false` (the default): SELF-HOSTED, dialled
+///   directly, so it must be loopback, private, or a name resolving only to
+///   such addresses (`settlement_rpc_verdict`);
+/// - `rpc_via_socks_proxy = true`: a PUBLIC endpoint reached only through
+///   `anon.socks_proxy`, on one pinned circuit per chain, never direct. It
+///   must be `https` (plain `http` only to an `.anyone` host), must
+///   not be a private address no exit relay could reach, and its name is
+///   never resolved here (`settlement_rpc_route_verdict`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettlementRpc {
+    pub rpc_url: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rpc_via_socks_proxy: bool,
 }
 
 /// `[anon.control]`: where the `anon` daemon's control port is and how the
@@ -805,7 +872,7 @@ impl ProviderConfig {
 }
 
 impl ProviderConfig {
-    /// The Hidden Provider gate (spec §10, ADR 0008). With `hidden = true`
+    /// The Hidden Provider gate (spec §10, ADR 0008, ADR 0030). With `hidden = true`
     /// every hiding condition must be configured, and each missing one is
     /// its own refusal naming it — the operator who wrote `hidden = true`
     /// is looking, and a tenant who bought from a "hidden" provider with a
@@ -866,24 +933,101 @@ impl ProviderConfig {
                  through anon and blocks direct egress",
             ));
         }
-        let Some(rpc) = &self.anon.settlement_rpc_url else {
-            return Err(missing(
-                "anon.settlement_rpc_url",
-                "a Hidden Provider runs its own settlement RPC",
-            ));
-        };
         self.anon.validate_shape()?;
-        match settlement_rpc_verdict(rpc)? {
-            RpcHostVerdict::Private => {}
-            RpcHostVerdict::Unresolved(name) => warn!(
-                "anon.settlement_rpc_url names {:?}, which does not resolve here, so whether it is \
-                 self-hosted cannot be checked. A Hidden Provider's settlement RPC must be on a \
-                 loopback or private address; this is checked again where the provider runs, \
-                 and refused there if the name still does not resolve",
-                name
+        self.validate_settlement_rpcs()
+    }
+
+    /// The fifth hiding condition (spec §10, ADR 0030): every settlement
+    /// RPC this box dials is either self-hosted or reached only through
+    /// `anon`. With the per-chain tables, every chain family a
+    /// `[[settlement]]` leg names must have its table, because each leg is
+    /// a chain the connector dials; with the older single key, that one URL
+    /// is held to the self-hosted rule and nothing more.
+    fn validate_settlement_rpcs(&self) -> Result<()> {
+        let tables = &self.anon.settlement;
+        match (&self.anon.settlement_rpc_url, tables.is_empty()) {
+            (Some(_), false) => bail!(
+                "anon.settlement_rpc_url and [anon.settlement.*] are both set: name every \
+                 settlement RPC in the per-chain tables and drop the single key, so there is one \
+                 account of what the connector dials (spec §10, ADR 0030)"
             ),
+            (None, true) => bail!(
+                "hidden = true, so [anon.settlement.<chain>] must be set for every chain this \
+                 provider settles on (or the older anon.settlement_rpc_url): its settlement RPC \
+                 is self-hosted, or a public one reached only through anon (spec §10, ADR 0030)"
+            ),
+            (Some(rpc), true) => {
+                let families: BTreeSet<_> = self
+                    .settlement
+                    .iter()
+                    .map(|leg| rpc_family(&leg.chain).unwrap_or(leg.chain.as_str()))
+                    .collect();
+                if families.len() > 1 {
+                    warn!(
+                        "anon.settlement_rpc_url names one RPC, and this provider settles on {} \
+                         chains, each dialled by the connector: only that one is checked. Name \
+                         each chain's RPC in [anon.settlement.evm] and [anon.settlement.solana] \
+                         instead (spec §10, ADR 0030)",
+                        families.len()
+                    );
+                }
+                warn_if_unresolved("anon.settlement_rpc_url", settlement_rpc_verdict(rpc)?);
+            }
+            (None, false) => {
+                for leg in &self.settlement {
+                    let (key, rpc) = match rpc_family(&leg.chain) {
+                        Some("evm") => ("[anon.settlement.evm]", &tables.evm),
+                        Some("solana") => ("[anon.settlement.solana]", &tables.solana),
+                        _ => bail!(
+                            "hidden = true, and [[settlement]] names chain {:?}, which has no \
+                             [anon.settlement.*] table: this gate knows the settlement RPCs of \
+                             evm:<id> and solana, and cannot show any other is hidden (spec §10)",
+                            leg.chain
+                        ),
+                    };
+                    if rpc.is_none() {
+                        bail!(
+                            "hidden = true, and [[settlement]] names chain {:?}, so {} must be \
+                             set: the connector dials that chain's RPC too, and every RPC this \
+                             box dials is self-hosted or reached only through anon (spec §10, \
+                             ADR 0030)",
+                            leg.chain,
+                            key
+                        );
+                    }
+                }
+                for (key, rpc) in tables.tables() {
+                    warn_if_unresolved(key, settlement_rpc_route_verdict(key, rpc)?);
+                }
+            }
         }
         Ok(())
+    }
+}
+
+/// `evm` for an `evm:<chain id>` leg, `solana` for `solana` (or a
+/// `solana:<cluster>` one), and `None` for a chain family no
+/// `[anon.settlement.*]` table covers.
+fn rpc_family(chain: &str) -> Option<&'static str> {
+    let family = chain.split(':').next().unwrap_or_default();
+    match family {
+        "evm" => Some("evm"),
+        "solana" => Some("solana"),
+        _ => None,
+    }
+}
+
+/// Config load's half of an unresolved self-hosted name: a warning, and the
+/// running provider refuses it (`settlement_rpc_verdict` says why).
+fn warn_if_unresolved(key: &str, verdict: RpcHostVerdict) {
+    if let RpcHostVerdict::Unresolved(name) = verdict {
+        warn!(
+            "{} names {:?}, which does not resolve here, so whether it is self-hosted cannot be \
+             checked. A self-hosted settlement RPC must be on a loopback or private address; \
+             this is checked again where the provider runs, and refused there if the name \
+             still does not resolve",
+            key, name
+        );
     }
 }
 
@@ -944,6 +1088,9 @@ impl AnonConfig {
         if let Some(rpc) = &self.settlement_rpc_url {
             parse_url("anon.settlement_rpc_url", rpc)?;
         }
+        for (key, rpc) in self.settlement.tables() {
+            parse_url(&format!("{key} rpc_url"), &rpc.rpc_url)?;
+        }
         if self.forward_host.is_empty() {
             bail!("anon.forward_host must name the host the daemon forwards lease ports to");
         }
@@ -957,15 +1104,103 @@ pub enum RpcHostVerdict {
     /// Loopback, a private range, or a name resolving only to such
     /// addresses: self-hosted, as ADR 0008 requires.
     Private,
+    /// Reached only through `anon.socks_proxy` (ADR 0030), and so judged by
+    /// its URL alone: nothing about it was resolved here.
+    Proxied,
     /// A name that could not be resolved where this ran. Not a verdict at
     /// all: the caller decides what it means (see `settlement_rpc_verdict`).
     Unresolved(String),
 }
 
-/// The Hidden Provider's settlement-RPC rule (spec §10, ADR 0008): the URL's
-/// host is loopback, a private range, or a hostname whose DNS resolution
-/// yields only such addresses. A public address anywhere in the answer is a
-/// refusal.
+/// One `[anon.settlement.<chain>]` table, judged by the route it names
+/// (spec §10, ADR 0030): a proxied one by `proxied_rpc_verdict`, a direct
+/// one by the self-hosted rule, `settlement_rpc_verdict_at`. `key` is the
+/// table's name, for the refusal.
+pub fn settlement_rpc_route_verdict(key: &str, rpc: &SettlementRpc) -> Result<RpcHostVerdict> {
+    if rpc.rpc_via_socks_proxy {
+        proxied_rpc_verdict(key, &rpc.rpc_url)
+    } else {
+        settlement_rpc_verdict_at(&format!("{key} rpc_url"), &rpc.rpc_url)
+    }
+}
+
+/// A public settlement RPC reached only through `anon` (ADR 0030; connector
+/// ADR 0073 applies the same URL rules to the table it is handed).
+///
+/// NEVER RESOLVED HERE. The name is the proxy's to resolve (`socks5h`), and
+/// a lookup from this host of the one RPC it hides its address from would
+/// be a small leak of its own. So this judges the URL alone:
+///
+/// - `https`, because the exit relay could otherwise read and rewrite every
+///   answer — a deposit, a receipt. Plain `http` is accepted only to an
+///   `.anyone` host (`is_anyone_host`), whose address authenticates the
+///   service.
+/// - Not an address no exit could reach: loopback, a private range or
+///   `localhost`. That is a self-hosted node, dialled directly, which the
+///   table says with `rpc_via_socks_proxy = false`.
+///
+/// A key in the URL is warned about, not refused: it cannot be told from
+/// every path an RPC might use, and ADR 0030 is plain that a keyed endpoint
+/// ties every query to its account whatever route it takes.
+pub fn proxied_rpc_verdict(key: &str, url: &str) -> Result<RpcHostVerdict> {
+    let parsed = parse_url(&format!("{key} rpc_url"), url)?;
+    let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
+        bail!("{} rpc_url {:?} names no host", key, url);
+    };
+    match parsed.scheme() {
+        "https" => {}
+        "http" if is_anyone_host(&host) => {}
+        "http" => bail!(
+            "{} rpc_url {:?} is plain http, and rpc_via_socks_proxy = true would send it through \
+             an exit relay that can read and rewrite every answer. Use the endpoint's https URL \
+             (plain http is accepted only for an .anyone host; spec §10, ADR 0030)",
+            key,
+            url
+        ),
+        other => bail!(
+            "{} rpc_url {:?} is {}://, and a settlement RPC is an http(s) JSON-RPC endpoint",
+            key,
+            url,
+            other
+        ),
+    }
+    let unreachable = match parsed.host() {
+        Some(url::Host::Ipv4(ip)) => is_private_ip(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => is_private_ip(IpAddr::V6(ip)),
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        None => false,
+    };
+    if unreachable {
+        bail!(
+            "{} rpc_url {:?} is on a loopback or private address, which no exit relay can reach, \
+             so rpc_via_socks_proxy = true would fail every settlement dial. A node of your own \
+             is self-hosted: set rpc_via_socks_proxy = false (spec §10, ADR 0030)",
+            key,
+            url
+        );
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.query().is_some() {
+        warn!(
+            "{} rpc_url carries credentials or a query string, which looks like an API key. A \
+             keyed RPC ties every query to the account that holds the key, through anon or not; \
+             a Hidden Provider's proxied RPC should be a keyless endpoint (ADR 0030)",
+            key
+        );
+    }
+    Ok(RpcHostVerdict::Proxied)
+}
+
+/// The Hidden Provider's self-hosted settlement-RPC rule (spec §10, ADR
+/// 0008) for the older single key, `anon.settlement_rpc_url`.
+pub fn settlement_rpc_verdict(url: &str) -> Result<RpcHostVerdict> {
+    settlement_rpc_verdict_at("anon.settlement_rpc_url", url)
+}
+
+/// The self-hosted settlement-RPC rule (spec §10, ADR 0008), for the RPC
+/// the config names at `key`: the URL's host is loopback, a private range,
+/// or a hostname whose DNS resolution yields only such addresses. A public
+/// address anywhere in the answer is a refusal — one that names ADR 0030's
+/// other option, a public RPC reached only through `anon`.
 ///
 /// A name that does NOT resolve is `Unresolved` rather than an error, and
 /// the two callers treat it differently ON PURPOSE. Config load
@@ -977,19 +1212,22 @@ pub enum RpcHostVerdict {
 /// a hidden provider that cannot resolve its own RPC's name cannot show it
 /// is self-hosted, and starting anyway would publish a claim nobody checked.
 /// `localhost` is loopback by definition and never resolved.
-pub fn settlement_rpc_verdict(url: &str) -> Result<RpcHostVerdict> {
-    let parsed = parse_url("anon.settlement_rpc_url", url)?;
+pub fn settlement_rpc_verdict_at(key: &str, url: &str) -> Result<RpcHostVerdict> {
+    let parsed = parse_url(key, url)?;
     let public = |addr: IpAddr| {
         anyhow::anyhow!(
-            "anon.settlement_rpc_url {:?} is at the public address {}: a Hidden Provider runs its \
-             own settlement RPC on a loopback or private address, because an unproxied read of a \
-             public one links this host to its on-chain identity (spec §10, ADR 0008)",
+            "{} {:?} is at the public address {}, and it is dialled directly: an unproxied read \
+             of a public RPC links this host to its on-chain identity. A Hidden Provider's \
+             settlement RPC is self-hosted on a loopback or private address, or a public one \
+             reached only through anon — in [anon.settlement.<chain>], rpc_via_socks_proxy = \
+             true (spec §10, ADR 0030)",
+            key,
             url,
             addr
         )
     };
     match parsed.host() {
-        None => bail!("anon.settlement_rpc_url {:?} names no host", url),
+        None => bail!("{} {:?} names no host", key, url),
         Some(url::Host::Ipv4(ip)) if is_private_ip(IpAddr::V4(ip)) => Ok(RpcHostVerdict::Private),
         Some(url::Host::Ipv4(ip)) => Err(public(IpAddr::V4(ip))),
         Some(url::Host::Ipv6(ip)) if is_private_ip(IpAddr::V6(ip)) => Ok(RpcHostVerdict::Private),
@@ -1883,6 +2121,7 @@ gateway = "172.30.0.2"
                     )
                 }
                 Ok(RpcHostVerdict::Private) => panic!("{url} is not private"),
+                Ok(RpcHostVerdict::Proxied) => panic!("{url} is not marked proxied"),
                 Err(e) => assert!(e.to_string().contains("public address"), "{url}: {e}"),
             }
         }
@@ -1916,6 +2155,237 @@ gateway = "172.30.0.2"
         };
         cfg.validate()
             .expect("accepted at load, checked again at run");
+    }
+
+    // ── the per-chain settlement RPCs (spec §10, ADR 0030) ───────────────
+
+    fn direct(url: &str) -> SettlementRpc {
+        SettlementRpc {
+            rpc_url: url.to_string(),
+            rpc_via_socks_proxy: false,
+        }
+    }
+
+    fn proxied(url: &str) -> SettlementRpc {
+        SettlementRpc {
+            rpc_url: url.to_string(),
+            rpc_via_socks_proxy: true,
+        }
+    }
+
+    fn leg(chain: &str) -> Settlement {
+        Settlement {
+            chain: chain.to_string(),
+            token: "0xToken".to_string(),
+            decimals: 6,
+        }
+    }
+
+    /// `hidden()` settling on both chains, each RPC named in its own table
+    /// and the single legacy key gone: the deploy bundle's shape.
+    fn hidden_on_both_chains(evm: SettlementRpc, solana: SettlementRpc) -> ProviderConfig {
+        ProviderConfig {
+            settlement: vec![leg("evm:84532"), leg("solana")],
+            anon: AnonConfig {
+                settlement_rpc_url: None,
+                settlement: SettlementRpcs {
+                    evm: Some(evm),
+                    solana: Some(solana),
+                },
+                ..hidden().anon
+            },
+            ..hidden()
+        }
+    }
+
+    #[test]
+    fn a_hidden_provider_names_each_chains_rpc_and_may_proxy_a_public_one() {
+        // Both of ADR 0030's options, one per chain: a public keyless RPC
+        // through anon, and a self-hosted one on a private address.
+        hidden_on_both_chains(
+            proxied("https://sepolia.base.org"),
+            direct("http://10.0.0.5:8899"),
+        )
+        .validate()
+        .expect("a proxied public RPC and a self-hosted one are both hidden");
+
+        // …and through TOML, in the connector's own two keys per table.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("provider.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+provider_name = "Hidden"
+hidden = true
+nostr_private_key = "nsec1example"
+connector_url = "{}"
+
+[[settlement]]
+chain = "evm:84532"
+token = "0xToken"
+decimals = 6
+
+[[settlement]]
+chain = "solana"
+token = "Mint"
+decimals = 6
+
+[anon]
+socks_proxy = "socks5h://anon-hs:9050"
+
+[anon.settlement.evm]
+rpc_url = "https://base-sepolia-rpc.publicnode.com"
+rpc_via_socks_proxy = true
+
+[anon.settlement.solana]
+rpc_url = "https://api.devnet.solana.com"
+rpc_via_socks_proxy = true
+
+[anon.control]
+addr = "anon-hs:9051"
+password = "hunter2"
+
+[anon.egress]
+network = "toon-hidden-egress"
+gateway = "172.30.0.2"
+"#,
+                anyone_url()
+            ),
+        )
+        .unwrap();
+        let cfg = load_config(path.to_str().unwrap()).expect("a proxied hidden config loads");
+        assert_eq!(
+            cfg.anon.settlement.solana,
+            Some(proxied("https://api.devnet.solana.com"))
+        );
+        assert_eq!(cfg.anon.settlement_rpc_url, None);
+    }
+
+    #[test]
+    fn a_proxied_rpc_is_judged_by_its_url_alone_and_never_resolved_here() {
+        // No lookup: resolving the name locally is the one query a hidden
+        // box must not make for a host it only reaches through anon. A
+        // `.invalid` name (RFC 2606) would be `Unresolved` if it were asked.
+        let onion = format!("http://{}.anyone:8545", "r".repeat(56));
+        for url in [
+            "https://rpc.example.invalid",
+            "https://api.devnet.solana.com",
+            "https://sepolia.base.org/",
+            "https://8.8.8.8:8545",
+            // Plain http is fine to an onion service: its address is its key.
+            onion.as_str(),
+        ] {
+            assert_eq!(
+                settlement_rpc_route_verdict("[anon.settlement.evm]", &proxied(url)).unwrap(),
+                RpcHostVerdict::Proxied,
+                "{url}"
+            );
+        }
+        // Plain http to a clearnet host puts every answer in an exit
+        // relay's hands (connector ADR 0073 refuses it too).
+        let e = settlement_rpc_route_verdict(
+            "[anon.settlement.solana]",
+            &proxied("http://api.devnet.solana.com"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("https") && e.contains("[anon.settlement.solana]"),
+            "{e}"
+        );
+        // An exit relay cannot reach a private address, and the connector
+        // would fail every settlement dial on it.
+        for url in [
+            "https://10.0.0.5:8899",
+            "https://127.0.0.1:8899",
+            "https://localhost:8899",
+            "https://[fd00::5]:8545",
+        ] {
+            let e = settlement_rpc_route_verdict("[anon.settlement.evm]", &proxied(url))
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("rpc_via_socks_proxy = false"), "{url}: {e}");
+        }
+        assert!(
+            settlement_rpc_route_verdict("[anon.settlement.evm]", &proxied("not a url")).is_err()
+        );
+        assert!(settlement_rpc_route_verdict(
+            "[anon.settlement.evm]",
+            &proxied("wss://rpc.example.invalid")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_public_rpc_dialled_direct_is_refused_and_the_refusal_names_the_proxy() {
+        let message = refusal(hidden_on_both_chains(
+            direct("https://8.8.8.8:8545"),
+            direct("http://10.0.0.5:8899"),
+        ));
+        assert!(message.contains("[anon.settlement.evm]"), "{message}");
+        assert!(message.contains("public address 8.8.8.8"), "{message}");
+        assert!(message.contains("rpc_via_socks_proxy = true"), "{message}");
+    }
+
+    #[test]
+    fn every_chain_the_provider_settles_on_has_its_rpc_named() {
+        // The gap connector ADR 0073 found: one checked URL, and a connector
+        // that dials one RPC per chain. Each `[[settlement]]` leg is a chain
+        // the connector dials, so each needs its table.
+        let both = || {
+            hidden_on_both_chains(
+                proxied("https://sepolia.base.org"),
+                proxied("https://api.devnet.solana.com"),
+            )
+        };
+        let mut cfg = both();
+        cfg.anon.settlement.evm = None;
+        let message = refusal(cfg);
+        assert!(message.contains("[anon.settlement.evm]"), "{message}");
+        assert!(message.contains("evm:84532"), "{message}");
+
+        let mut cfg = both();
+        cfg.settlement.push(leg("bitcoin"));
+        assert!(refusal(cfg).contains("bitcoin"));
+
+        // A table for a chain it does not settle on is harmless.
+        let mut cfg = both();
+        cfg.settlement = vec![leg("solana")];
+        cfg.validate()
+            .expect("an extra table names nothing unhidden");
+    }
+
+    #[test]
+    fn the_single_legacy_key_and_the_per_chain_tables_are_one_or_the_other() {
+        let mut cfg = hidden_on_both_chains(
+            proxied("https://sepolia.base.org"),
+            proxied("https://api.devnet.solana.com"),
+        );
+        cfg.anon.settlement_rpc_url = Some("http://10.0.0.5:8899".to_string());
+        let message = refusal(cfg);
+        assert!(
+            message.contains("anon.settlement_rpc_url") && message.contains("[anon.settlement"),
+            "{message}"
+        );
+        // The legacy key alone still loads, under its old rule: the
+        // sandbox's `hs` profile is written that way.
+        hidden().validate().expect("legacy single key");
+    }
+
+    #[test]
+    fn a_settlement_table_is_shape_checked_even_when_not_hidden() {
+        let cfg = ProviderConfig {
+            anon: AnonConfig {
+                settlement: SettlementRpcs {
+                    evm: Some(direct("not a url")),
+                    solana: None,
+                },
+                ..AnonConfig::default()
+            },
+            ..ProviderConfig::default()
+        };
+        assert!(refusal(cfg).contains("[anon.settlement.evm]"));
     }
 
     #[test]

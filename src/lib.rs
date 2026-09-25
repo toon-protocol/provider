@@ -36,7 +36,10 @@ pub use hidden_service::{
     is_anyone_host, AddressPort, HiddenAddress, HiddenService, ANYONE_SUFFIX,
 };
 pub use outbound_guard::{is_publicly_routable, OutboundGuard};
-pub use outbound_proxy::{guarded_http_client, http_client, is_private_url, OutboundProxy};
+pub use outbound_proxy::{
+    guarded_http_client, http_client, is_private_url, OutboundProxy, SettlementChain,
+    SettlementRpcRoute,
+};
 pub use provider::persisted_leases;
 pub use provider::{
     load_config, render_routes, AnonConfig, AnonControl, BackendKind, LeaseEnd, LeaseRecord,

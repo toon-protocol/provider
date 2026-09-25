@@ -110,7 +110,10 @@ pub struct StatusArgs {
     pub settlement_address_file: Option<PathBuf>,
 
     /// The Solana RPC the balance is read from. Ignored on a Hidden
-    /// Provider, which reads only its own `anon.settlement_rpc_url`.
+    /// Provider, which reads only the one its config names
+    /// (`[anon.settlement.solana]`, or the older `anon.settlement_rpc_url`)
+    /// by the route it names: its own node directly, or a public one
+    /// through anon (spec §10, ADR 0030).
     #[arg(long, env = "TOON_SETTLEMENT_SOLANA_RPC_URL")]
     pub settlement_rpc_url: Option<String>,
 }

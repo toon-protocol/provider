@@ -112,6 +112,7 @@ Environment only; there is no config file.
 | `TOON_ENDPOINT_REWRITE` | `{}` | JSON map of advertised URL prefix -> the address this process can actually reach it at. Applies to the BTP socket's `ws://` URL too. |
 | `TOON_SOCKS_PROXY` | — | `socks5h://<host>:<port>` used when a publish request names none. |
 | `TOON_HIDDEN` | `false` | This publisher sits beside a **hidden** provider. Then `TOON_SOCKS_PROXY` is **required** and a missing one is a startup refusal. |
+| `TOON_PROXY_RPC` | — | Beside a proxy, whether `TOON_RPC_URL` rides it (`true`) or is dialled directly (`false`, only for your own node on a private address). Unset: a private address or one-label compose name is direct, anything else rides the proxy. See below. |
 
 `RELAY_WRITE_ROUTES` is what keeps the ephemeral lane out: a destination
 ending in `.ephemeral` is refused at startup by name.
@@ -131,20 +132,22 @@ of the node's own self-description, and that relay's `GET /ilp` did not
 publish it when last checked (2026-09-22, see `deploy/docker-compose.yml`),
 so there `auto` falls back to HTTP and is refused.
 
-**Every carriage rides the same route.** The client is handed two things
-that dial: a `fetch` for the client edge and a `createWebSocket` for the BTP
-socket, built together (`proxy.mjs`, `carriageThrough`), so the two cannot
-disagree:
+**Every carriage rides the same route** (`proxy.mjs`, `carriageThrough` and
+`clientRouteOptions`), so the client edge and the BTP socket cannot disagree:
 
-* **Beside a proxy** both are `@toon-protocol/client`'s SOCKS5h carriage,
-  and the websocket reaches the relay through the proxy like every other
-  byte. Handing over only the `fetch` would not do: the client would open the
-  socket itself, from this host's real address. That was the gap before
-  TOON_Network#165, and this process refused `btp`/`auto` beside a proxy
-  because of it.
-* **`TOON_ENDPOINT_REWRITE`** applies to both. A `ws://`/`wss://` URL is
-  matched against the same `http://`/`https://` prefixes and keeps its own
-  scheme, so the node is named once.
+* **Beside a proxy** the client is given `socksProxy` and nothing to dial
+  with: `@toon-protocol/client` 3.3 then carries every byte through it — the
+  client edge, the BTP socket and the chain RPC (see "Publishing from a
+  hidden provider"). Handing it a `fetch` anyway would win over its own for
+  the edge, so none is handed over unless `TOON_ENDPOINT_REWRITE` needs one.
+* **`TOON_ENDPOINT_REWRITE`** applies to both halves. With no proxy they are
+  this host's own `fetch` and `WebSocket`, rewritten; beside one they are the
+  client library's SOCKS5h carriage (`createHiddenServiceTransport`),
+  rewritten — both of them, because given only the `fetch` the client would
+  open the socket itself, from this host's real address (the gap
+  TOON_Network#165 closed). A `ws://`/`wss://` URL is matched against the same
+  `http://`/`https://` prefixes and keeps its own scheme, so the node is
+  named once.
 
 `TOON_ENDPOINT_REWRITE` exists because a client dials the endpoint a
 connector's **self-description advertises**, not the URL it was configured
@@ -156,7 +159,7 @@ can dial it, and a container on the compose network reaches the same node at
 
 ## Publishing from a hidden provider
 
-A [Hidden Provider](../../README.md#hidden-provider) (spec §10, ADR 0008)
+A [Hidden Provider](../../README.md#hidden-provider) (spec §10, ADR 0008, ADR 0030)
 hides where it is, and this process is part of its outbound: every relay write
 it buys is a packet to a connector, and one sent from the host's real address
 would name the operator's location to that connector whatever the provider's
@@ -188,16 +191,48 @@ this process's `TOON_SOCKS_PROXY` name the same daemon, and `TOON_HIDDEN=true`
 makes a half-wired deployment fail loudly at start rather than leak quietly at
 the first publication.
 
-**The chain RPC is the one exception, and it is decided by where the RPC is,
-not by a flag.** A hidden provider runs its own settlement RPC on loopback or
-a private address — the provider refuses to start otherwise — and `anon`
-builds no circuit to such an address, so routing it through the proxy would
-fail rather than hide anything; the packet never crosses a network anyone
-outside can watch. So `TOON_RPC_URL` is dialled directly exactly when it is
-**near**: loopback, a private or link-local range, or a name resolving only to
-those — the same rule the provider applies to this publisher's own address.
-An RPC anywhere else does leave, and rides the proxy like everything else.
-There is no flag to get that wrong with.
+**The chain RPC rides the proxy too** (spec §10, ADR 0030). Beside a proxy
+this process is a *hidden payer* (`@toon-protocol/client` 3.3,
+TOON_Network#167): its channel opens, deposits, closes and the chain reads
+behind them go through the proxy, each chain on a circuit pinned by SOCKS
+username (`toon-client-rpc-evm`, `toon-client-rpc-solana`), and a proxy that
+is down fails the call — nothing falls back to a direct dial. So a hidden
+provider's publisher pays from the **public** preset RPC
+(`https://api.devnet.solana.com`), and needs no chain node of its own. The RPC
+provider still sees this wallet's queries and transactions, which are public
+on chain anyway; it sees an exit relay's address, not this host's. Use a
+keyless RPC: an API key ties every query to the account that holds it, proxy
+or not.
+
+Until TOON_Network#167 the client refused `socksProxy` beside a clearnet
+connector, this process had to hand it a proxied `fetch` that never carried
+chain RPC, and a hidden publisher refused to start beside any RPC but a
+private one. That refusal is gone.
+
+**The one exception is your own node.** An RPC on loopback or a private
+address — what `HIDDEN_SETTLEMENT_SOLANA_RPC_URL` names in the deploy bundle
+— is one no exit could reach, so it is dialled directly (`proxyRpc: false`),
+and it never crosses a network anyone outside can watch. `TOON_PROXY_RPC`
+says which:
+
+* `false`: dial `TOON_RPC_URL` directly. Beside a hidden provider it must then
+  be **near** — loopback, a private or link-local range, or a name resolving
+  only to those — or this process refuses to start:
+
+  ```
+  [publisher] TOON_HIDDEN is set and TOON_PROXY_RPC=false, so TOON_RPC_URL must
+  be your own node on a private address, not "https://api.devnet.solana.com":
+  dialled directly, a public RPC would see this host's real address on every
+  channel operation. …
+  ```
+* `true`: through the proxy, whatever it is.
+* unset: an address literal, `localhost` or a one-label compose-network name
+  (`solana-validator`) is dialled directly when it is near; **any name with a
+  dot in it rides the proxy without being looked up**, because a DNS query
+  from this host for the public RPC it hides from is a small leak of its own.
+
+The deploy bundle's hidden overlay sets `TOON_PROXY_RPC=false` exactly when
+the operator self-hosts, and leaves it unset otherwise.
 
 A provider that is not hidden sends no `proxy` field and this process behaves
 exactly as it did before the field existed — absent means direct.
@@ -205,8 +240,9 @@ exactly as it did before the field existed — absent means direct.
 ## Tests
 
 `npm test` (`node --test`) covers `proxy.mjs` — which proxy a publication
-rides, what is refused at startup, what stays direct, and that the `fetch`
-and the BTP socket take the same route — `blob.mjs` below,
+rides, what is refused at startup, whether the chain RPC rides it, what the
+client is handed, and that the `fetch` and the BTP socket take the same
+route — `blob.mjs` below,
 `status.mjs` (`status.test.mjs`, against real fixture channel files in
 `test/fixtures/`) and `topup.mjs` (`topup.test.mjs`, against a stubbed
 client). None of these needs network, a chain or a mnemonic.

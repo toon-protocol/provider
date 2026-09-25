@@ -18,7 +18,10 @@ use serde_json::{json, Value};
 use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use toon_provider::provider::AnonConfig;
+mod common;
+
+use common::socks::SocksStub;
+use toon_provider::provider::{AnonConfig, SettlementRpc, SettlementRpcs};
 use toon_provider::status::{
     check, gather, render_text, to_json, Report, Sources, StatusArgs, Thresholds,
 };
@@ -901,6 +904,58 @@ async fn a_hidden_provider_reads_its_balance_from_its_own_node_only() {
         report.earnings.error, None,
         "compose-internal connector URL is near"
     );
+}
+
+#[tokio::test]
+async fn a_hidden_provider_reads_a_public_rpc_only_through_anon_on_the_solana_circuit() {
+    // ADR 0030's other option: a public RPC, reached through the proxy on
+    // the circuit the connector keeps for Solana. The RPC is named by a
+    // host nothing here resolves, so a direct dial could not have reached
+    // it: the balance arriving is the proof it went through the stub.
+    let world = World::healthy().await;
+    let rpc_addr = *world.rpc.address();
+    let socks = SocksStub::start(&[("solana-rpc.invalid", rpc_addr)]).await;
+    let rpc = format!("http://solana-rpc.invalid:{}", rpc_addr.port());
+    let config = ProviderConfig {
+        anon: AnonConfig {
+            socks_proxy: Some(socks.url()),
+            settlement: SettlementRpcs {
+                evm: None,
+                solana: Some(SettlementRpc {
+                    rpc_url: rpc.clone(),
+                    rpc_via_socks_proxy: true,
+                }),
+            },
+            ..AnonConfig::default()
+        },
+        ..hidden(world.config(), "unused")
+    };
+    let sources = Sources::from_config(&config, &world.args());
+    assert_eq!(sources.settlement_rpc_url.as_deref(), Ok(rpc.as_str()));
+    let report = gather(&sources, AT).await;
+    assert_eq!(
+        report.funding.lamports,
+        Some(1_500_000_000),
+        "{:?}",
+        report.funding.error
+    );
+    assert!(socks.asked_for(&format!("solana-rpc.invalid:{}", rpc_addr.port())));
+    assert_eq!(
+        socks.usernames(),
+        vec!["toon-settlement-solana".to_string()]
+    );
+
+    // No proxy configured is not a direct dial: it is not asked at all.
+    let unproxied = ProviderConfig {
+        anon: AnonConfig {
+            socks_proxy: None,
+            ..config.anon.clone()
+        },
+        ..config.clone()
+    };
+    let sources = Sources::from_config(&unproxied, &world.args());
+    let error = sources.settlement_rpc_url.expect_err("no proxy, no read");
+    assert!(error.contains("not asked"), "{error}");
 }
 
 #[tokio::test]

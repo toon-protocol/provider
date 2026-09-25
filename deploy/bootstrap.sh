@@ -49,7 +49,8 @@ echo "==> Keys and funding"
 # shortfall is a warning, not a refusal: a re-run reconciles a working box,
 # and the publisher's deposit is already in its channel, not in its wallet.
 # An RPC that does not answer is a warning either way. A hidden box asks only
-# its own Solana node, never a public one (keys.py says why).
+# its own Solana node, never a public one, and on the default proxied preset
+# it asks nothing at all, because anon is not running yet (keys.py says why).
 command -v python3 >/dev/null 2>&1 || { apt-get update -y && apt-get install -y python3-minimal; }
 funded=0
 if [ -n "${CONNECTOR_SEAL_KEY:-}" ]; then
@@ -231,8 +232,9 @@ if [ -z "${CONNECTOR_SEAL_KEY:-}" ]; then
     echo "FAILED: the connector never answered GET /ilp/identity." >&2
     echo "Almost always one of: the Solana settlement key holds no SOL (it submits a" >&2
     echo "transaction at boot), a key file is not readable by uid 10001, or a settlement" >&2
-    echo "address is wrong. On a hidden box, also: one of the HIDDEN_SETTLEMENT_*_RPC_URL" >&2
-    echo "nodes is not reachable from the container, or not synced. The log says which:" >&2
+    echo "address is wrong. On a hidden box, also: the anon daemon has no circuit yet (a" >&2
+    echo "proxied settlement RPC fails closed until it has), or a HIDDEN_SETTLEMENT_*_RPC_URL" >&2
+    echo "node is not reachable from the container, or not synced. The log says which:" >&2
     docker compose logs --tail 40 provider-connector >&2 || true
     exit 1
   fi

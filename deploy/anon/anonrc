@@ -95,6 +95,16 @@ CookieAuthFileGroupReadable 1
 # provider.toml's `anon.socks_proxy` and the publisher's TOON_SOCKS_PROXY both
 # name socks5h://172.30.2.2:9050: `socks5h`, so this daemon resolves every
 # name and no lookup leaves the box.
+#
+# AND EVERY SETTLEMENT RPC THIS BOX DOES NOT HOST ITSELF (spec §10, ADR 0030):
+# connector.toml's root `socks_proxy` names this port too, and each
+# `[settlement.*]` table with `rpc_via_socks_proxy = true` rides it on a
+# circuit pinned per chain by SOCKS username (`toon-settlement-evm`,
+# `toon-settlement-solana`; the publisher's client uses `toon-client-rpc-*`).
+# That pinning is IsolateSOCKSAuth, which is on by default for a SocksPort.
+# Never add NoIsolateSOCKSAuth here: without isolation every chain's RPC, the ILP
+# wire and the relay reads could share one exit. tests/deploy_bundle.rs
+# checks this line carries no isolation flag that turns it off.
 SocksPort 172.30.2.2:9050
 
 # THE POLICY COVERS EVERY CLIENT LISTENER, not just this one: anon applies

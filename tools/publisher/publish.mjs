@@ -27,8 +27,8 @@ import { createHiddenServiceTransport } from '@toon-protocol/client/hidden-servi
 import { lookup } from 'node:dns/promises';
 import {
   carriageThrough,
-  hiddenRpcRefusal,
-  isNearUrl,
+  chainRpcRoute,
+  clientRouteOptions,
   isTrue,
   proxyFor,
   startupRefusal,
@@ -84,14 +84,15 @@ const TRANSPORT = process.env.TOON_TRANSPORT ?? 'http';
 const SOCKS_PROXY = process.env.TOON_SOCKS_PROXY;
 const HIDDEN = isTrue(process.env.TOON_HIDDEN);
 
-// Whether the chain RPC is near enough to dial directly: loopback, a private
-// range, or a name resolving only to those — what a hidden provider's own
-// settlement RPC has to be (ADR 0008), and what `anon` can build no circuit
-// to. Resolved once, on the first proxied request, because it is a fact about
-// the deployment and not about the publication. Anywhere else, the RPC leaves
-// this host like everything else and rides the proxy with it.
-let rpcIsNear = null;
-const rpcNear = () => (rpcIsNear ??= isNearUrl(RPC_URL, lookup));
+// Whether the chain RPC rides the proxy beside one (spec §10, ADR 0030). A
+// hidden payer's chain RPC does by default — the public preset, on a circuit
+// pinned per chain — and TOON_PROXY_RPC=false sends it directly, for a node
+// the operator runs on a private address, which no exit could reach. The
+// hidden overlay sets it exactly when the operator self-hosts; unset, a
+// private address literal or compose name is dialled directly and anything
+// else rides the proxy (`chainRpcRoute`). Decided once, at startup, because
+// it is a fact about the deployment and not about the publication.
+const PROXY_RPC = process.env.TOON_PROXY_RPC;
 
 // A connector's self-description advertises the endpoint a client should dial,
 // and the client dials THAT, not the URL it was configured with — one free GET
@@ -109,8 +110,6 @@ const DIAL = {
   createHiddenServiceTransport,
   fetch: (input, init) => fetch(input, init),
   WebSocket: globalThis.WebSocket,
-  rpcUrl: RPC_URL,
-  rpcNear,
 };
 
 // Relay READ url -> the paid ILP destination that writes to it. The provider
@@ -123,13 +122,16 @@ if (!MNEMONIC) {
   console.error('[publisher] TOON_MNEMONIC is required: this process pays for every relay write.');
   process.exit(1);
 }
+const rpcRoute = await chainRpcRoute({ hidden: HIDDEN, rpcUrl: RPC_URL, proxyRpc: PROXY_RPC }, lookup);
 const refusal =
   startupRefusal({ hidden: HIDDEN, socksProxy: SOCKS_PROXY, transport: TRANSPORT }) ??
-  (await hiddenRpcRefusal({ hidden: HIDDEN, rpcUrl: RPC_URL }, lookup));
+  rpcRoute.refusal ??
+  null;
 if (refusal !== null) {
   console.error(`[publisher] ${refusal}`);
   process.exit(1);
 }
+const RPC_PROXIED = rpcRoute.proxyRpc;
 for (const [relay, destination] of Object.entries(WRITE_ROUTES)) {
   if (destination.endsWith('.ephemeral')) {
     console.error(
@@ -157,6 +159,9 @@ async function client(socksProxy) {
   if (current !== null && current.proxy !== socksProxy) {
     const stale = current;
     current = null;
+    // The client first: beside a proxy it owns the circuits its own
+    // `socksProxy` opened, and holds them open until it is closed.
+    await stale.promise.then((c) => c.close()).catch(() => {});
     await stale.carriage.close().catch(() => {});
   }
   if (current === null) {
@@ -178,21 +183,23 @@ async function client(socksProxy) {
         // for a relay that PINS its write route to BTP, where a one-shot is
         // refused outright; TOON_TRANSPORT, above, says what that costs.
         transport: TRANSPORT,
-        // The carriage, never `socksProxy:` — the library's own option
-        // refuses a proxy beside a clearnet connector as pointless
-        // misdirection, and for a hidden PROVIDER (as opposed to a tenant
-        // dialling a hidden connector) covering the clearnet hop is the whole
-        // point. BOTH halves: the client edge rides `fetch`, and the BTP
-        // socket rides `createWebSocket`. Given only the first, the client
-        // would open the socket itself, from this host's real address.
-        fetch: carriage.fetch,
-        createWebSocket: carriage.createWebSocket,
+        // The route (`clientRouteOptions`). Beside a proxy that is the
+        // client's own `socksProxy`, which makes it a HIDDEN PAYER
+        // (TOON_Network#167): the edge, the BTP socket and the chain RPC all
+        // ride it, each chain's RPC on a pinned circuit of its own, failing
+        // closed — so a hidden provider's publisher can pay from the public
+        // preset RPC rather than a node of its own (spec §10, ADR 0030), and
+        // `proxyRpc: false` only for an RPC on a private address. With no
+        // proxy, the direct carriage, rewritten.
+        ...clientRouteOptions(socksProxy, carriage, RPC_PROXIED),
       });
       const opened = await c.channel.open({ deposit: DEPOSIT });
       console.log(
         `[publisher] paying ${CONNECTOR} from ${c.identity?.solanaPublicKey ?? '(unknown)'} ` +
           `on channel ${opened.channelId ?? '(id unreported)'}` +
-          (socksProxy === undefined ? '' : ` through ${socksProxy}`),
+          (socksProxy === undefined
+            ? ''
+            : ` through ${socksProxy}, chain RPC ${RPC_PROXIED ? 'through it too' : 'direct (a private address)'}`),
       );
       return c;
     })().catch(async (e) => {

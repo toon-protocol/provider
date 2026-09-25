@@ -11,13 +11,16 @@
 #   nginx/node.conf.template  -> nginx/conf.d/node.conf     (public box only)
 #
 # ── Public or hidden ─────────────────────────────────────────────────────────
-# HIDDEN=1 in .env renders a Hidden Provider (spec §10, ADR 0008; README §
-# "Running hidden"): provider.toml keeps its @hidden-only blocks (hidden =
-# true and the [anon] tables) and drops its @public-only one (public_ip),
-# both configs name the connector at the box's `.anyone` address
-# (HIDDEN_ADDRESS, which bootstrap.sh reads off the anon daemon), the
-# connector settles against the operator's own RPCs, and there is no nginx
-# config because there is no nginx. Without HIDDEN it is the other way round.
+# HIDDEN=1 in .env renders a Hidden Provider (spec §10, ADR 0008, ADR 0030;
+# README § "Running hidden"): both templates keep their @hidden-only blocks
+# (hidden = true and the [anon] tables in provider.toml, the root
+# socks_proxy in connector.toml) and drop their @public-only ones
+# (public_ip), both configs name the connector at the box's `.anyone`
+# address (HIDDEN_ADDRESS, which bootstrap.sh reads off the anon daemon),
+# the connector reaches each chain's settlement RPC through anon — or
+# directly, for a chain whose node the operator runs itself — and there is
+# no nginx config because there is no nginx. Without HIDDEN it is the other
+# way round.
 #
 # Every output is gitignored, and so are its inputs: .env and the listings
 # file are the operator's own. Nothing an operator makes theirs is a committed
@@ -154,39 +157,54 @@ if [ "$HIDDEN" = 1 ]; then
     exit 1
   fi
 
-  # ── The settlement RPCs this box runs itself ───────────────────────────────
-  # The connector reads and transacts on both chains, DIRECTLY: its
-  # socks_proxy covers the ILP wire to `.anyone` peers only (connector ADR
-  # 0070 decision 4). So on a hidden box the preset's public RPCs are replaced
-  # by the operator's own, and a render without them is refused rather than a
-  # box that links its address to its settlement keys on first boot. Whether
-  # each one is near enough is the app's own rule, applied below by the real
-  # config loader, not by a copy of it here.
-  : "${HIDDEN_SETTLEMENT_EVM_RPC_URL:?HIDDEN=1, so set HIDDEN_SETTLEMENT_EVM_RPC_URL in .env: the Base Sepolia RPC this box runs itself, on a private address (README § Running hidden)}"
-  : "${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:?HIDDEN=1, so set HIDDEN_SETTLEMENT_SOLANA_RPC_URL in .env: the Solana devnet RPC this box runs itself, on a private address (README § Running hidden)}"
-  for var in HIDDEN_SETTLEMENT_EVM_RPC_URL HIDDEN_SETTLEMENT_SOLANA_RPC_URL; do
-    # Loopback satisfies the app's rule and reaches nothing here: the
-    # connector is a container, and its 127.0.0.1 is itself. Refused by name,
-    # because the failure it would otherwise be is a connector that restarts
-    # forever on "connection refused".
-    case "$(url_host "${!var}")" in
-      localhost | 127.* | ::1)
-        echo "${var}=${!var} is loopback, and the connector is a container: its" >&2
-        echo "127.0.0.1 is itself, not this host. Name the node at a private address the" >&2
-        echo "container can route to, such as this host's address on a private network." >&2
-        exit 1
-        ;;
-    esac
+  # ── How the connector reaches each chain's settlement RPC ──────────────────
+  # Spec §10 / ADR 0030: every settlement RPC a hidden box dials is either a
+  # node the operator runs on a private address, dialled directly, or a
+  # public one reached ONLY through anon. Per chain:
+  #
+  #   HIDDEN_SETTLEMENT_<CHAIN>_RPC_URL set    self-hosted: it replaces the
+  #                                            preset's RPC, rpc_via_socks_proxy
+  #                                            = false.
+  #   unset (the default)                      the preset's public, keyless
+  #                                            RPC, rpc_via_socks_proxy = true:
+  #                                            the connector rides the root
+  #                                            socks_proxy, on that chain's own
+  #                                            pinned circuit, never direct.
+  #
+  # Whether each is acceptable is the app's own rule, applied below by the
+  # real config loader to the [anon.settlement.*] tables this writes from the
+  # same values as the connector's, not by a copy of it here.
+  for chain in EVM SOLANA; do
+    own="HIDDEN_SETTLEMENT_${chain}_RPC_URL"
+    via="SETTLEMENT_${chain}_RPC_VIA_SOCKS_PROXY"
+    if [ -n "${!own:-}" ]; then
+      # Loopback satisfies the app's rule and reaches nothing here: the
+      # connector is a container, and its 127.0.0.1 is itself. Refused by
+      # name, because the failure it would otherwise be is a connector that
+      # restarts forever on "connection refused".
+      case "$(url_host "${!own}")" in
+        localhost | 127.* | ::1)
+          echo "${own}=${!own} is loopback, and the connector is a container: its" >&2
+          echo "127.0.0.1 is itself, not this host. Name the node at a private address the" >&2
+          echo "container can route to, such as this host's address on a private network." >&2
+          exit 1
+          ;;
+      esac
+      printf -v "SETTLEMENT_${chain}_RPC_URL" '%s' "${!own}"
+      printf -v "$via" '%s' false
+    else
+      printf -v "$via" '%s' true
+    fi
   done
-  SETTLEMENT_EVM_RPC_URL=$HIDDEN_SETTLEMENT_EVM_RPC_URL
-  SETTLEMENT_SOLANA_RPC_URL=$HIDDEN_SETTLEMENT_SOLANA_RPC_URL
-  export SETTLEMENT_EVM_RPC_URL SETTLEMENT_SOLANA_RPC_URL
 
   CONNECTOR_URL="http://${HIDDEN_ADDRESS}/ilp"
   NODE_HTTP_ENDPOINT=$CONNECTOR_URL
   NODE_BTP_ENDPOINT="ws://${HIDDEN_ADDRESS}/ilp/btp"
   KEEP=hidden DROP=public
 else
+  # A public box dials its settlement RPCs directly: it hides nothing.
+  SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY=false
+  SETTLEMENT_SOLANA_RPC_VIA_SOCKS_PROXY=false
   : "${DOMAIN:?set DOMAIN in .env}"
   : "${PUBLIC_IP:?set PUBLIC_IP in .env (this box public IPv4 — where tenants reach their workloads)}"
   : "${CERT_NAME:=proxy.provider.${DOMAIN}}"
@@ -196,6 +214,8 @@ else
   KEEP=public DROP=hidden
 fi
 export CERT_NAME CONNECTOR_URL NODE_HTTP_ENDPOINT NODE_BTP_ENDPOINT
+export SETTLEMENT_EVM_RPC_URL SETTLEMENT_SOLANA_RPC_URL
+export SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY SETTLEMENT_SOLANA_RPC_VIA_SOCKS_PROXY
 
 # ── Nobody takes the fleet's namespace by accident ───────────────────────────
 # `g.toon` and everything under it are the TOON fleet's own addresses. A
@@ -284,11 +304,12 @@ splice() {
 }
 
 # Keep the "# @$KEEP-only:begin/end" blocks (markers removed) and drop the
-# "# @$DROP-only:begin/end" ones whole, reading stdin to stdout. A marker that
-# is unbalanced, nested or of a third kind is refused: any of them would
-# render a provider that is half public and half hidden.
+# "# @$DROP-only:begin/end" ones whole, reading stdin to stdout; $1 names the
+# template, for the refusal. A marker that is unbalanced, nested or of a
+# third kind is refused: any of them would render a box that is half public
+# and half hidden.
 select_blocks() {
-  awk -v keep="$KEEP" -v drop="$DROP" '
+  awk -v keep="$KEEP" -v drop="$DROP" -v template="$1" '
     /^# @[a-z]+-only:(begin|end)$/ {
       kind = $0; sub(/^# @/, "", kind); sub(/-only:.*/, "", kind)
       edge = $0; sub(/.*:/, "", edge)
@@ -300,18 +321,18 @@ select_blocks() {
     open != drop { print }
     END {
       if (bad == "" && open != "") bad = "unclosed " open " block"
-      if (bad != "") { print "render.sh: provider.toml.template: " bad > "/dev/stderr"; exit 3 }
+      if (bad != "") { print "render.sh: " template ": " bad > "/dev/stderr"; exit 3 }
     }'
 }
 
-# $1: the seal key to render with; $2: where to write; $3, optional: the
-# settlement RPC to write in [anon] instead of the Solana one (the EVM check
-# below). The listings are spliced in AFTER envsubst so that nothing in the
-# operator's own file is ever read as a variable.
+# $1: the seal key to render with; $2: where to write. The listings are
+# spliced in AFTER envsubst so that nothing in the operator's own file is
+# ever read as a variable.
 render_provider_toml() {
-  CONNECTOR_SEAL_KEY=$1 HIDDEN_SETTLEMENT_SOLANA_RPC_URL=${3:-${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-}} \
-    envsubst '${PROVIDER_NAME} ${ILP_ADDRESS} ${PUBLIC_IP} ${NOSTR_PRIVATE_KEY} ${CONNECTOR_URL} ${RELAY_WS} ${CONNECTOR_SEAL_KEY} ${SETTLEMENT_EVM_CHAIN_ID} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS} ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL}' \
-    < provider.toml.template | select_blocks | splice '# @render: listings' "$LISTINGS_FILE" > "$2"
+  CONNECTOR_SEAL_KEY=$1 \
+    envsubst '${PROVIDER_NAME} ${ILP_ADDRESS} ${PUBLIC_IP} ${NOSTR_PRIVATE_KEY} ${CONNECTOR_URL} ${RELAY_WS} ${CONNECTOR_SEAL_KEY} ${SETTLEMENT_EVM_CHAIN_ID} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS} ${SETTLEMENT_EVM_RPC_URL} ${SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY} ${SETTLEMENT_SOLANA_RPC_URL} ${SETTLEMENT_SOLANA_RPC_VIA_SOCKS_PROXY}' \
+    < provider.toml.template | select_blocks provider.toml.template \
+    | splice '# @render: listings' "$LISTINGS_FILE" > "$2"
 }
 
 # `toon-provider routes` for the provider config at $1, rows only: the
@@ -323,8 +344,7 @@ provider_routes() {
   # The pinned image, pulled -- or, while the pin is still the sha-0000000
   # placeholder, built from this checkout under that name. pull-images.sh.
   # Once per render, and out here rather than in the pipeline below, whose
-  # left side is a subshell that would forget it: a hidden render asks the
-  # loader twice.
+  # left side is a subshell that would forget it.
   if [ -z "${TOON_PROVIDER_BIN:-}" ] && [ -z "${PROVIDER_IMAGE_READY:-}" ]; then
     ./pull-images.sh provider
     PROVIDER_IMAGE_READY=1
@@ -364,28 +384,21 @@ fi
 
 provider_routes "$ROUTES_FROM" > "$WORK/routes.toml"
 
-# The loader has just judged HIDDEN_SETTLEMENT_SOLANA_RPC_URL, the one
-# `anon.settlement_rpc_url` names. The connector dials the EVM one directly
-# too, so it goes through the same rule the same way: rendered into that one
-# field of a throwaway copy, and loaded. A public address is a refusal here,
-# before the connector has read a byte of chain state from this box.
-if [ "$HIDDEN" = 1 ]; then
-  render_provider_toml "0x$(printf '0%.0s' $(seq 64))" "$WORK/evm-rpc-check.toml" "$HIDDEN_SETTLEMENT_EVM_RPC_URL"
-  provider_routes "$WORK/evm-rpc-check.toml" > /dev/null || {
-    echo "HIDDEN_SETTLEMENT_EVM_RPC_URL=${HIDDEN_SETTLEMENT_EVM_RPC_URL} was refused by the provider's own" >&2
-    echo "settlement RPC rule (the loader's message is above). The connector would dial it" >&2
-    echo "directly, from this box's address." >&2
-    exit 1
-  }
-fi
+# On a hidden box the loader has just judged every settlement RPC the
+# connector will dial: provider.toml's [anon.settlement.evm] and
+# [anon.settlement.solana] are rendered from the same values as the
+# connector's [settlement.*] tables, below. A public RPC dialled directly, or
+# a proxied one over plain http, was a refusal above, before the connector
+# has read a byte of chain state from this box.
 grep -q '^\[\[routes\]\]$' "$WORK/routes.toml" || {
   echo "\`toon-provider routes\` printed no [[routes]] for ${ROUTES_FROM##*/}; refusing to" >&2
   echo "render a connector that terminates nothing." >&2
   exit 1
 }
 
-envsubst '${NODE_HTTP_ENDPOINT} ${NODE_BTP_ENDPOINT} ${ILP_ADDRESS} ${SETTLEMENT_EVM_RPC_URL} ${SETTLEMENT_EVM_REGISTRY} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_SOLANA_RPC_URL} ${SETTLEMENT_SOLANA_PROGRAM_ID} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS}' \
-  < connector.toml.template | splice '# @render: routes' "$WORK/routes.toml" > "$WORK/connector.toml"
+envsubst '${NODE_HTTP_ENDPOINT} ${NODE_BTP_ENDPOINT} ${ILP_ADDRESS} ${SETTLEMENT_EVM_RPC_URL} ${SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY} ${SETTLEMENT_EVM_REGISTRY} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_SOLANA_RPC_URL} ${SETTLEMENT_SOLANA_RPC_VIA_SOCKS_PROXY} ${SETTLEMENT_SOLANA_PROGRAM_ID} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS}' \
+  < connector.toml.template | select_blocks connector.toml.template \
+  | splice '# @render: routes' "$WORK/routes.toml" > "$WORK/connector.toml"
 
 # Written only once everything above has succeeded, so a refusal leaves the
 # last good render in place rather than half of a new one.
@@ -506,7 +519,12 @@ echo "  listings            : ${LISTINGS_FILE}"
 if [ "$HIDDEN" = 1 ]; then
   echo "  HIDDEN              : reached only at ${HIDDEN_ADDRESS}"
   echo "  paid ILP edge       : ${CONNECTOR_URL}"
-  echo "  settlement RPCs     : ${HIDDEN_SETTLEMENT_EVM_RPC_URL} (EVM), ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL} (Solana)"
+  for chain in EVM SOLANA; do
+    url="SETTLEMENT_${chain}_RPC_URL" via="SETTLEMENT_${chain}_RPC_VIA_SOCKS_PROXY"
+    how="self-hosted, direct"
+    [ "${!via}" = true ] && how="through anon"
+    printf '  %-20s: %s (%s)\n' "${chain} settlement RPC" "${!url}" "$how"
+  done
 else
   echo "  paid ILP edge       : ${CONNECTOR_URL}"
   echo "  health              : https://provider.${DOMAIN}/health"
