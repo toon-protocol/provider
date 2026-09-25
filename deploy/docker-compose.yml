@@ -46,7 +46,7 @@ services:
     # so the connector moves by a reviewed commit here: this tag and the
     # matching literal in tests/deploy_bundle.rs, together.
     # README § "Bumping the connector pin".
-    image: ghcr.io/toon-protocol/connector:rust-2026.09.11.1
+    image: ghcr.io/toon-protocol/connector:rust-sha-854d199
     command: ['/app/config/connector.toml']
     volumes:
       - ./connector.toml:/app/config/connector.toml:ro
@@ -141,9 +141,10 @@ services:
       TOON_CONNECTOR_OPERATOR_URL: http://provider-connector:4000
       TOON_CONNECTOR_BEARER_TOKEN_FILE: /etc/toon-provider/operator-bearer.token
       TOON_SETTLEMENT_SOLANA_ADDRESS_FILE: /etc/toon-provider/settlement-solana.address
-      # The same RPC the connector settles on. docker-compose.hidden.yml
-      # replaces it with the box's own node, and `status` on a hidden
-      # provider reads anon.settlement_rpc_url and nothing else anyway.
+      # The same RPC the connector settles on. On a hidden provider `status`
+      # reads [anon.settlement.solana] (or the older anon.settlement_rpc_url)
+      # by the route that table names instead, and docker-compose.hidden.yml
+      # clears this unless the operator self-hosts.
       TOON_SETTLEMENT_SOLANA_RPC_URL: ${SETTLEMENT_SOLANA_RPC_URL:-}
       # `toon-provider redeem` (TOON_Network#173) reads the EVM gas price
       # here for its per-channel estimate, from the RPC the connector redeems

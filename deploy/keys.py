@@ -590,8 +590,17 @@ def cmd_check_funded(role, warn_only):
 
     A hidden box asks only its OWN Solana node (HIDDEN_SETTLEMENT_SOLANA_RPC_URL):
     a getBalance to a public RPC from its address would link that address to
-    its settlement keys, which is the one thing hiding it is for."""
+    its settlement keys, which is the one thing hiding it is for. Without one
+    it reaches the public RPC only through anon (spec §10, ADR 0030), and
+    this runs before bootstrap.sh has started the daemon, so it asks nothing
+    and says so; `toon-provider status` reads the balance through anon once
+    the box is up."""
     hidden = env("HIDDEN") == "1"
+    if hidden and not env("HIDDEN_SETTLEMENT_SOLANA_RPC_URL"):
+        print("::warning:: not checked: this hidden box reaches its Solana RPC only through anon,")
+        print("            which is not running yet. Fund what ./keys.sh addresses lists before the")
+        print("            connector starts; `toon-provider status` reads the balance through anon.")
+        return 3
     connector_rpc = env("HIDDEN_SETTLEMENT_SOLANA_RPC_URL") if hidden else env("SETTLEMENT_SOLANA_RPC_URL")
     publisher_rpc = connector_rpc if hidden else (env("SOLANA_RPC_URL") or DEVNET_SOLANA_RPC)
     rows, _ = addresses(role)

@@ -44,6 +44,18 @@ state_dir = "/app/state"
 # carriage because `[node]` below declares endpoints and the two must agree.
 peer_expose = "http"
 
+# @hidden-only:begin
+# ON A HIDDEN BOX ONLY: the anon daemon's SOCKS port, the one proxy this node
+# has (connector ADR 0070). It carries the ILP wire to any `.anyone` peer, and
+# every [settlement.*] table below that sets `rpc_via_socks_proxy = true`
+# (connector ADR 0073) — each chain on a circuit of its own, pinned by SOCKS
+# username. A table that asks for it with no proxy here is a refusal to start,
+# and a proxy that is down fails the settlement dial; nothing falls back to a
+# direct one. The same address provider.toml's `anon.socks_proxy` names.
+# Root level, before any table, or TOML would read it as a table's key.
+socks_proxy = "socks5h://172.30.2.2:9050"
+# @hidden-only:end
+
 # This node's signing identity. `GET /ilp/identity` answers with this key,
 # every packet is sealed to it, and provider.toml's `connector_seal_key` is a
 # verbatim copy of its public half — which is the value a tenant compares
@@ -96,28 +108,39 @@ key_file = "/app/data/signer.key"
 # Solana devnet mock USDC); read them back from any devnet node's `GET /ilp`
 # rather than trusting a second copy of them.
 #
-# ON A HIDDEN BOX THE TWO rpc_url LINES ARE THE OPERATOR'S OWN NODES:
-# render.sh puts HIDDEN_SETTLEMENT_EVM_RPC_URL and
-# HIDDEN_SETTLEMENT_SOLANA_RPC_URL here in place of the preset's public ones,
-# and refuses to render without them. This connector dials its settlement RPC
-# DIRECTLY: its `socks_proxy` key covers the ILP wire to `.anyone` peers and
-# nothing else (connector ADR 0070 decision 4), so a public RPC here would be
-# read, and transacted on, from this box's real address.
+# `rpc_via_socks_proxy` is how each table reaches its rpc_url (connector ADR
+# 0073, TOON_Network ADR 0030), and render.sh decides it per chain:
+#
+#   public box    false: the preset's RPC, dialled directly.
+#   hidden box    true, BY DEFAULT: the same public, keyless preset RPC, but
+#                 only through the root `socks_proxy` above — every client of
+#                 the table (the backend, and on EVM the channel-index syncer
+#                 and rate source) on that chain's pinned circuit, never
+#                 direct. The connector refuses a plain http:// rpc_url here,
+#                 because an exit relay could rewrite the answers.
+#   hidden box,   false: HIDDEN_SETTLEMENT_<CHAIN>_RPC_URL, a node the
+#   self-hosted   operator runs on a private address, in place of the
+#                 preset's, dialled directly.
+#
+# provider.toml's [anon.settlement.*] carries the same two values, so the
+# app's hiding gate judges exactly what is written here.
 
 [settlement.evm]
-rpc_url          = "${SETTLEMENT_EVM_RPC_URL}"
-contract_address = "${SETTLEMENT_EVM_REGISTRY}"  # TokenNetworkRegistry
-token_address    = "${SETTLEMENT_EVM_TOKEN}"
-decimals         = ${SETTLEMENT_EVM_DECIMALS}
+rpc_url             = "${SETTLEMENT_EVM_RPC_URL}"
+rpc_via_socks_proxy = ${SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY}
+contract_address    = "${SETTLEMENT_EVM_REGISTRY}"  # TokenNetworkRegistry
+token_address       = "${SETTLEMENT_EVM_TOKEN}"
+decimals            = ${SETTLEMENT_EVM_DECIMALS}
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"
 
 [settlement.solana]
-rpc_url       = "${SETTLEMENT_SOLANA_RPC_URL}"
-program_id    = "${SETTLEMENT_SOLANA_PROGRAM_ID}"
-token_address = "${SETTLEMENT_SOLANA_TOKEN}"
-decimals      = ${SETTLEMENT_SOLANA_DECIMALS}
+rpc_url             = "${SETTLEMENT_SOLANA_RPC_URL}"
+rpc_via_socks_proxy = ${SETTLEMENT_SOLANA_RPC_VIA_SOCKS_PROXY}
+program_id          = "${SETTLEMENT_SOLANA_PROGRAM_ID}"
+token_address       = "${SETTLEMENT_SOLANA_TOKEN}"
+decimals            = ${SETTLEMENT_SOLANA_DECIMALS}
 
 [settlement.solana.key]
 key_file = "/app/data/settlement-solana.key"

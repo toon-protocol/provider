@@ -203,7 +203,7 @@ max_image_bytes = 5000000000
 
 # @hidden-only:begin
 # ═════════════════════════════════════════════════════════════════════════════
-# What a Hidden Provider needs from its anon daemon (spec §10, ADR 0008)
+# What a Hidden Provider needs from its anon daemon (spec §10, ADR 0008/0030)
 # ═════════════════════════════════════════════════════════════════════════════
 # Each key is a HIDING CONDITION: a missing one is a refusal to load, naming
 # it. Every address is fixed, and is the same one anon/anonrc binds and
@@ -215,23 +215,34 @@ max_image_bytes = 5000000000
 # this box.
 socks_proxy = "socks5h://172.30.2.2:9050"
 
-# THE SETTLEMENT RPC THIS BOX RUNS ITSELF, and the one line here that is the
-# operator's. It must be loopback, private, or a name resolving only to such
-# addresses: an unproxied read of a public RPC links this box's network
-# location to its on-chain identity, and the app refuses one at load. The
-# connector's own two RPCs are the same self-hosted endpoints (render.sh puts
-# HIDDEN_SETTLEMENT_EVM_RPC_URL and HIDDEN_SETTLEMENT_SOLANA_RPC_URL into its
-# [settlement.*] tables), because the connector is what actually reads the
-# chain. This field holds one URL, so it names the Solana one, the RPC the
-# connector transacts on at boot; render.sh puts the EVM one through the same
-# loader check before it writes anything.
-settlement_rpc_url = "${HIDDEN_SETTLEMENT_SOLANA_RPC_URL}"
-
 # The host as the daemon sees it: the gateway of `toon-provider-hidden`. A
 # hidden lease's ports are published on the host by its ingress forwarder,
 # and the daemon forwards the lease's `.anyone` address to them here. An IP,
 # because anon resolves an ADD_ONION target when it parses the command.
 forward_host = "172.30.2.1"
+
+# EVERY SETTLEMENT RPC THIS BOX'S CONNECTOR DIALS, one table per chain in the
+# connector's own two keys: render.sh writes these from the same .env values
+# it writes into connector.toml's [settlement.evm] and [settlement.solana], so
+# the app's hiding gate judges exactly what the connector is handed (spec §10,
+# ADR 0030). Each is one of two things:
+#
+#   rpc_via_socks_proxy = true    the DEFAULT: the preset's public, keyless
+#                                 RPC, reached only through anon on one pinned
+#                                 circuit per chain, never direct. https only.
+#   rpc_via_socks_proxy = false   a node you run yourself, on a private
+#                                 address, dialled directly
+#                                 (HIDDEN_SETTLEMENT_<CHAIN>_RPC_URL in .env).
+#
+# The app refuses a public RPC dialled direct, a proxied one over plain http,
+# and a proxied one on a private address no exit relay could reach.
+[anon.settlement.evm]
+rpc_url = "${SETTLEMENT_EVM_RPC_URL}"
+rpc_via_socks_proxy = ${SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY}
+
+[anon.settlement.solana]
+rpc_url = "${SETTLEMENT_SOLANA_RPC_URL}"
+rpc_via_socks_proxy = ${SETTLEMENT_SOLANA_RPC_VIA_SOCKS_PROXY}
 
 # The control port, over which each lease's `.anyone` address is made and
 # destroyed. Cookie authentication: the daemon writes the cookie onto a

@@ -614,6 +614,30 @@ fn a_hidden_box_asks_only_its_own_solana_node() {
 }
 
 #[test]
+fn a_hidden_box_on_the_proxied_preset_asks_no_rpc_at_all() {
+    // ADR 0030's default: the preset's public Solana RPC, reached only
+    // through anon. bootstrap.sh checks funding before the daemon is up, so
+    // there is no circuit to ask through yet, and a direct getBalance would
+    // link this box's address to its settlement keys. Not asked, and said so
+    // — the "could not ask" exit, which bootstrap.sh carries on past.
+    let (url, asked) = stub_rpc(BTreeMap::new());
+    let dir = funded_bundle(&format!(
+        "SETTLEMENT_SOLANA_RPC_URL={url}\nSOLANA_RPC_URL={url}\nHIDDEN=1\n"
+    ));
+    let output = keys_sh(dir.path(), &["check-funded"]);
+    assert_eq!(output.status.code(), Some(3), "{}", stdout(&output));
+    assert!(
+        stdout(&output).contains("through anon"),
+        "{}",
+        stdout(&output)
+    );
+    assert!(
+        asked.lock().unwrap().is_empty(),
+        "a hidden box asked the public RPC"
+    );
+}
+
+#[test]
 fn bootstrap_checks_funding_before_it_touches_the_host() {
     let bootstrap = fs::read_to_string(deploy_dir().join("bootstrap.sh")).unwrap();
     let check = bootstrap
