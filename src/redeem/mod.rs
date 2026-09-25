@@ -43,6 +43,7 @@ use anyhow::{bail, Context, Result};
 use ed25519_dalek::SigningKey;
 use serde_json::Value;
 
+use crate::outbound_proxy::{SettlementChain, SettlementRpcRoute};
 use crate::status::{connector_operator_url, error_chain, read_earnings_from, ChannelEarnings};
 use gas::{chain_of, estimate, Chain, Estimate};
 use sign::{keyid_hex, sign_write, SIGNATURE_TTL_SECONDS};
@@ -104,7 +105,9 @@ pub struct RedeemArgs {
     pub bearer_file: Option<PathBuf>,
 
     /// The EVM RPC to read a gas price from, for the EVM estimate. Unset,
-    /// the EVM estimate is "unknown"; nothing else changes.
+    /// the EVM estimate is "unknown"; nothing else changes. A Hidden
+    /// Provider whose config names `[anon.settlement.evm]` reads that one
+    /// instead, by the route it names.
     #[arg(long, env = "TOON_SETTLEMENT_EVM_RPC_URL", value_name = "URL")]
     pub evm_rpc_url: Option<String>,
 
@@ -466,13 +469,41 @@ pub async fn run(config_path: &str, args: &RedeemArgs) -> Result<i32> {
     }
     let candidates = select::redeemable(&earnings.channels);
 
+    // A Hidden Provider's EVM RPC is the one its config names, by the route
+    // it names (spec §10, ADR 0030): a public one only through anon, on the
+    // EVM settlement circuit. Anywhere else, the flag or its env var.
+    let evm_rpc = match config
+        .as_ref()
+        .filter(|c| c.hidden)
+        .and_then(|c| c.anon.settlement.evm.as_ref().map(|rpc| (c, rpc)))
+    {
+        Some((config, rpc)) => Some(SettlementRpcRoute::of(
+            rpc,
+            config.anon.socks_proxy.as_deref(),
+            SettlementChain::Evm,
+        )),
+        None => args
+            .evm_rpc_url
+            .as_deref()
+            .map(|url| Ok(SettlementRpcRoute::direct(url))),
+    };
     let mut estimates = BTreeMap::new();
     let chains: BTreeSet<Chain> = candidates.iter().map(|c| chain_of(&c.channel_id)).collect();
     for chain in chains {
-        estimates.insert(
-            chain,
-            estimate(chain, args.evm_rpc_url.as_deref(), hidden).await,
-        );
+        // A route that cannot be built is an estimate nobody asked for, never
+        // a direct dial and never a reason to stop redeeming.
+        let estimated = match (&evm_rpc, chain) {
+            (Some(Err(e)), Chain::Evm) => Estimate::Unknown(format!("not asked: {e:#}")),
+            _ => {
+                estimate(
+                    chain,
+                    evm_rpc.as_ref().and_then(|r| r.as_ref().ok()),
+                    hidden,
+                )
+                .await
+            }
+        };
+        estimates.insert(chain, estimated);
     }
     print!("{}", render_table(&base, &candidates, &estimates));
     if candidates.is_empty() || args.list {

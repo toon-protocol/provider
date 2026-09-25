@@ -225,7 +225,7 @@ deny_references = []
 exempt_registries = []
 # exempt_registries = ["registry.internal", "10.0.0.0/8"]
 
-# ── Hidden Provider (spec §10, ADR 0008) ─────────────────────────────────────
+# ── Hidden Provider (spec §10, ADR 0008, ADR 0030) ───────────────────────────
 # Everything a Hidden Provider needs from its `anon` daemon. Ignored unless
 # `hidden = true`; with it, EACH key below is a hiding condition and a missing
 # one is a startup refusal naming it. The values are the sandbox's `hs`
@@ -242,22 +242,50 @@ exempt_registries = []
 # # startup, and a provider that cannot resolve it refuses to start.
 # socks_proxy = "socks5h://anon-hs:9050"
 #
-# # The settlement RPC this provider's connector settles against. A Hidden
-# # Provider runs its own: the host MUST be loopback, a private range
-# # (RFC 1918, ULA, link-local) or a name resolving ONLY to such addresses —
-# # a public RPC provider is refused at load, because an unproxied read of one
-# # links this host's network location to its on-chain identity. A name that
-# # does not resolve where the config is loaded (a compose service name such
-# # as `anvil`, rendered on the host by `toon-provider routes`) is accepted
-# # with a warning; the RUNNING provider checks it again and refuses to start
-# # if it still does not resolve there.
-# settlement_rpc_url = "http://anvil:8545"
+# # The older, single-URL settlement-RPC condition (the sandbox's `hs`
+# # profile still writes it): one self-hosted RPC, held to the rule below for
+# # `rpc_via_socks_proxy = false`. It names ONE RPC while a connector dials one
+# # per chain, so prefer the per-chain tables after `forward_host`; the two
+# # forms are one or the other, never both.
+# # settlement_rpc_url = "http://anvil:8545"
 #
 # # The host the daemon forwards a per-lease address's ports to: where this
 # # provider's SSH forwards and published ports are, AS THE DAEMON SEES THEM.
 # # Default 127.0.0.1 (a daemon on this host's network); inside compose, the
 # # address the provider's host daemon is reachable at from the anon container.
 # # forward_host = "127.0.0.1"
+#
+# # EVERY settlement RPC this box's connector dials, one table per chain, in
+# # the connector's own two keys, so the gate judges what the connector is
+# # handed (spec §10, ADR 0030). A Hidden Provider needs a table for every
+# # chain family its [[settlement]] legs name (`evm:<id>`, `solana`). Each is
+# # one of two things:
+# #
+# # - `rpc_via_socks_proxy = true`: a PUBLIC, keyless endpoint reached ONLY
+# #   through `socks_proxy`, on one pinned circuit per chain, never direct. It
+# #   must be https (plain http only to an .anyone host, since an exit
+# #   relay could rewrite the answers) and must not be a private address no
+# #   exit could reach. Its name is never resolved here.
+# # - `rpc_via_socks_proxy = false` (the default): SELF-HOSTED, dialled
+# #   directly. The host MUST be loopback, a private range (RFC 1918, ULA,
+# #   link-local) or a name resolving ONLY to such addresses — a public RPC
+# #   dialled directly is refused at load, because an unproxied read of one
+# #   links this host's network location to its on-chain identity. A name
+# #   that does not resolve where the config is loaded (a compose service name
+# #   such as `anvil`, rendered on the host by `toon-provider routes`) is
+# #   accepted with a warning; the RUNNING provider checks it again and refuses
+# #   to start if it still does not resolve there.
+# #
+# # The connector's config must say the same: its `[settlement.<chain>]`
+# # `rpc_url` and `rpc_via_socks_proxy`, and a root `socks_proxy` naming this
+# # daemon (deploy/render.sh writes both files from the same values).
+# # `toon-provider status` and `redeem` read these RPCs by the same routes.
+# [anon.settlement.evm]
+# rpc_url = "http://anvil:8545"
+#
+# [anon.settlement.solana]
+# rpc_url = "https://api.devnet.solana.com"
+# rpc_via_socks_proxy = true
 #
 # # The daemon's control port, over which the provider creates one .anyone
 # # address per lease (ADD_ONION) and destroys it when the lease ends.

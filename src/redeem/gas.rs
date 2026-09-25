@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::outbound_proxy::is_private_url;
+use crate::outbound_proxy::{is_private_url, SettlementRpcRoute};
 
 /// Gas for one `claimFromChannel`, rounded up: the connector's own
 /// `forge test --gas-report` for `TokenNetwork` (tag 2026.09.11.1) puts the
@@ -147,9 +147,14 @@ pub fn format_units(amount: u128, decimals: u32) -> String {
     format!("{whole}.{}", fraction.trim_end_matches('0'))
 }
 
-/// The estimate for `chain`. EVM asks `evm_rpc_url` for its gas price
-/// (never a public one from a hidden box); Solana needs no RPC.
-pub async fn estimate(chain: Chain, evm_rpc_url: Option<&str>, hidden: bool) -> Estimate {
+/// The estimate for `chain`. EVM asks `evm_rpc` for its gas price — by the
+/// route it names, and never a public RPC dialled directly from a hidden
+/// box; Solana needs no RPC.
+pub async fn estimate(
+    chain: Chain,
+    evm_rpc: Option<&SettlementRpcRoute>,
+    hidden: bool,
+) -> Estimate {
     match chain {
         Chain::Solana => Estimate::Solana {
             lamports: SOLANA_REDEEM_LAMPORTS,
@@ -157,18 +162,20 @@ pub async fn estimate(chain: Chain, evm_rpc_url: Option<&str>, hidden: bool) -> 
         Chain::Unknown => {
             Estimate::Unknown("the channel id is neither an EVM nor a Solana id".into())
         }
-        Chain::Evm => match evm_rpc_url.map(str::trim).filter(|u| !u.is_empty()) {
+        Chain::Evm => match evm_rpc.filter(|r| !r.url.trim().is_empty()) {
             None => Estimate::Unknown(
                 "no EVM RPC to ask for a gas price: set TOON_SETTLEMENT_EVM_RPC_URL or \
                  --evm-rpc-url"
                     .into(),
             ),
-            Some(url) if hidden && !is_private_url(url) => Estimate::Unknown(format!(
-                "not asked: the EVM RPC is not on this box's private network, and a hidden \
-                 provider dials nothing else directly ({})",
-                crate::status::origin(url).unwrap_or_default()
-            )),
-            Some(url) => match gas_price(url).await {
+            Some(route) if hidden && route.via.is_none() && !is_private_url(&route.url) => {
+                Estimate::Unknown(format!(
+                    "not asked: the EVM RPC is not on this box's private network, and a hidden \
+                     provider dials nothing else directly ({})",
+                    crate::status::origin(&route.url).unwrap_or_default()
+                ))
+            }
+            Some(route) => match gas_price(route).await {
                 Ok(wei_per_gas) => Estimate::Evm {
                     gas: EVM_REDEEM_GAS,
                     wei_per_gas,
@@ -179,14 +186,12 @@ pub async fn estimate(chain: Chain, evm_rpc_url: Option<&str>, hidden: bool) -> 
     }
 }
 
-/// `eth_gasPrice` at `url`, in wei.
-async fn gas_price(url: &str) -> Result<u128, String> {
+/// `eth_gasPrice` at `route`'s RPC, by the route it names, in wei.
+async fn gas_price(route: &SettlementRpcRoute) -> Result<u128, String> {
+    let url = route.url.trim();
     let shown = crate::status::origin(url).unwrap_or_else(|| "the EVM RPC".into());
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let timeout = route.timeout(Duration::from_secs(10));
+    let client = route.client(timeout).map_err(|e| format!("{e:#}"))?;
     let answer: Value = client
         .post(url)
         .json(&serde_json::json!({
@@ -254,7 +259,8 @@ mod tests {
             estimate(Chain::Evm, None, false).await,
             Estimate::Unknown(_)
         ));
-        let hidden = estimate(Chain::Evm, Some("https://base-sepolia.example"), true).await;
+        let public = SettlementRpcRoute::direct("https://base-sepolia.example");
+        let hidden = estimate(Chain::Evm, Some(&public), true).await;
         assert!(
             matches!(&hidden, Estimate::Unknown(why) if why.contains("not asked")),
             "{hidden:?}"
