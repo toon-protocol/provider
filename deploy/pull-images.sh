@@ -18,13 +18,15 @@
 # needs at least 4 GB of RAM (README § "Sizing the box"); once the pin is a
 # real published tag, none of this runs and the box only pulls.
 #
-# ── And one service that is always built: the hidden box's anon daemon ─────
-# docker-compose.hidden.yml's `anon` has a `build:` of its own, because no
-# registry publishes the anon release a hidden provider needs (anon/Dockerfile
-# says why, and pins what it builds from by digest and sha256). A service
-# with a `build:` is built, never pulled: a pull would ask a registry for a
-# name that only exists on this box. The layer cache makes a rebuild of an
-# unchanged Dockerfile a no-op.
+# ── And two services that are always built: the hidden box's own ───────────
+# docker-compose.hidden.yml's `anon` and `dns-shim` each have a `build:` of
+# their own: no registry publishes the anon release a hidden provider needs
+# (anon/Dockerfile says why), and dns-shim is pinned by its OWN base image
+# digest rather than the published `provider` image's floating tag
+# (dns-shim/Dockerfile says why; TOON_Network#166). A service with a `build:`
+# is built, never pulled: a pull would ask a registry for a name that only
+# exists on this box. The layer cache makes a rebuild of an unchanged
+# Dockerfile a no-op.
 set -euo pipefail
 cd "$(dirname "$0")"
 

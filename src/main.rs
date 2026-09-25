@@ -102,6 +102,17 @@ enum Command {
     /// at a prompt that does not echo it, or piped in. It is never written
     /// anywhere, and one given on the command line is refused.
     Redeem(toon_provider::redeem::RedeemArgs),
+
+    /// Run the Hidden Provider's DNS shim (TOON_Network#166): forward A (and
+    /// any non-AAAA) queries to `anon`'s `DNSPort` unchanged, and answer
+    /// every AAAA query itself with NOERROR and no records, so a musl
+    /// workload's parallel A/AAAA lookup never sees the NXDOMAIN `anon`'s
+    /// `DNSPort` answers AAAA with (`src/dns_shim.rs` has the full account).
+    /// Takes no config file — its two addresses are the ones
+    /// `docker-compose.hidden.yml` commits — and runs forever, so it is what
+    /// a `dns-shim` compose service's entrypoint is, not something an
+    /// operator runs by hand.
+    DnsShim(toon_provider::dns_shim::DnsShimArgs),
 }
 
 /// `EvictionReason` as a `clap` value: `toon_provider::nostr::wire` stays
@@ -144,6 +155,12 @@ async fn main() -> Result<()> {
     if let Some(Command::Redeem(args)) = &cli.command {
         let code = toon_provider::redeem::run(&cli.config, args).await?;
         std::process::exit(code)
+    }
+    // Also before the config is loaded: the DNS shim is not this provider's
+    // config at all, it is a compose service of its own on the egress
+    // network, and provider.toml is not even mounted where it runs.
+    if let Some(Command::DnsShim(args)) = &cli.command {
+        return toon_provider::dns_shim::run(args).await;
     }
     let config = load_config(&cli.config).with_context(|| format!("config: {}", cli.config))?;
 
@@ -252,6 +269,7 @@ async fn main() -> Result<()> {
             std::process::exit(code)
         }
         Some(Command::Redeem(_)) => unreachable!("handled before the config is loaded"),
+        Some(Command::DnsShim(_)) => unreachable!("handled before the config is loaded"),
         None => ProviderService::new(config)?.run().await,
     }
 }

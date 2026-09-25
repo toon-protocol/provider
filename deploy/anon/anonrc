@@ -102,7 +102,8 @@ SocksPort 172.30.2.2:9050
 # be accepted here or a workload's DNS comes back REFUSED and nothing about
 # the transparent proxy works. Two subnets, the two ways in:
 #   172.30.2.0/24  the provider and its publisher, dialling SOCKS
-#   10.204.0.0/24  the workloads, arriving at the TransPort and the DNSPort
+#   10.204.0.0/24  the workloads, arriving at the TransPort, and dns-shim,
+#                  arriving at the DNSPort (TOON_Network#166)
 SocksPolicy accept 172.30.2.0/24
 SocksPolicy accept 10.204.0.0/24
 SocksPolicy accept 127.0.0.0/8
@@ -116,11 +117,20 @@ SocksPolicy reject *
 # daemon's fixed address there, 10.204.0.2 (`[anon.egress].gateway`). The
 # container's entrypoint redirects what arrives from that subnet:
 #
-#     udp/tcp dport 53        -> 5353  (the DNSPort)
-#     tcp, leaving the subnet -> 9040  (the TransPort)
+#     udp/tcp dport 53        -> 10.204.0.3:53  (dns-shim, TOON_Network#166)
+#     tcp, leaving the subnet -> 9040           (the TransPort)
 #
 # so the workload needs no proxy settings, cannot opt out, and has no second
 # route to try. UDP other than DNS has nowhere to go: anon carries TCP.
+#
+# PORT 53 GOES TO dns-shim, NOT TO THIS DAEMON'S OWN DNSPort DIRECTLY. This
+# daemon's DNSPort answers an AAAA query with NXDOMAIN even when the name has
+# a good A record, which breaks a musl workload's (Alpine's) resolution
+# outright — confirmed against this very daemon, over the real Anyone
+# network — and no option on this file changes it. dns-shim forwards an A
+# query on to the DNSPort below unchanged (still resolved only through
+# Anyone) and answers every AAAA query itself; README § "Workload egress on a
+# Hidden Provider" and src/dns_shim.rs have the full account.
 TransPort 10.204.0.2:9040
 DNSPort 10.204.0.2:5353
 

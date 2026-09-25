@@ -10,6 +10,7 @@ pub mod capabilities;
 pub mod clock;
 pub mod compute;
 pub mod directory;
+pub mod dns_shim;
 pub mod docker;
 pub mod hidden_service;
 pub mod nostr;

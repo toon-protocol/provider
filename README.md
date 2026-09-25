@@ -418,11 +418,11 @@ only attaches to it and never removes it. It is a Docker bridge network
 created **`--internal`** (compose: `internal: true`) with a fixed subnet,
 and the `anon` daemon is attached to it at the fixed address that is
 `[anon.egress].gateway`, running a **transparent egress** there: `TransPort`
-and `DNSPort` bound on that address, with the daemon's container holding
+bound on that address, with the daemon's container holding
 `NET_ADMIN` and redirecting, in its own `nat PREROUTING`, every TCP
-connection arriving from the network's subnet to the `TransPort` and every
-port-53 query (UDP and TCP) to the `DNSPort` — and accepting nothing else
-from that subnet, so its control and SOCKS ports face the provider only.
+connection arriving from the network's subnet to the `TransPort` — and
+accepting nothing else from that subnet but what is named below, so its
+control and SOCKS ports face the provider only.
 The daemon's own way out to the Anyone network is another, ordinary network
 of its own. A host with `br_netfilter` loaded (`bridge-nf-call-iptables =
 1`) runs bridged frames through Docker's isolation of internal networks,
@@ -433,6 +433,35 @@ sandbox's `hs` profile (infra/sandbox) is the worked example: compose
 network `hs-egress` (`toon-sandbox_hs-egress` on the host daemon) on
 `10.203.0.0/24`, the daemon at `10.203.0.2`, which is what
 `provider.example.toml` shows.
+
+**DNS is not the daemon's `DNSPort` directly (TOON_Network#166).** `anon`
+v0.4.10.2-live's `DNSPort` answers an AAAA query with NXDOMAIN even when the
+name has a perfectly good A record — confirmed against a real daemon, over
+the real Anyone network — and musl's `getaddrinfo` (Alpine's libc, and
+BusyBox's) asks for A and AAAA in parallel and discards a good A answer the
+moment the AAAA one comes back NXDOMAIN, so an Alpine workload cannot resolve
+any name at all. No `anonrc` option changes it: `DNSPort` takes only
+`SocksPort`-style isolation flags, and `ClientUseIPv6` /
+`ClientPreferIPv6ORPort` govern the daemon's own connections to relays and
+directories, never what it answers a client. So `anon`'s own `nat` rule hands
+port 53 to **`dns-shim`**, a small process of its own on the egress network
+(pinned at the address next to the daemon's), rather than redirecting it to
+the `DNSPort` locally: the shim forwards an A query to the `DNSPort`
+unchanged, over Anyone exactly as before, and answers every AAAA query
+itself, unconditionally, with NOERROR and no records — decided by the
+query's type alone, before anything is forwarded anywhere, which is why it
+closes the bug a bare `dnsmasq --filter-AAAA` sidecar does not: that filters
+records out of a forwarded answer, so the FIRST query for a name, if it
+happens to be the AAAA one — exactly the race musl's parallel lookup can
+produce — is still forwarded and comes back NXDOMAIN regardless (confirmed
+against a real `dnsmasq` 2.90). `src/dns_shim.rs` has the full account, and
+`cargo test --test hidden_dns_shim -- --ignored` resolves a name from a real
+`alpine` and a real `debian` workload against the real daemon to prove it.
+Enabling this one relay needs `net.ipv4.ip_forward` on in the daemon's own
+container — off by default, which is what makes its `INPUT` `DROP` a true
+catch-all today — so its `FORWARD` chain narrows what that now allows
+through back down to exactly this one destination and port
+(`docker-compose.hidden.yml`'s own comments have the account).
 
 ## Routes and the connector
 

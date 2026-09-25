@@ -912,13 +912,49 @@ curl --socks5-hostname 127.0.0.1:9050 http://<HIDDEN_ADDRESS>/ilp/identity
 
 ### Other limits, stated plainly
 
-- **Workloads on musl cannot resolve names.** The daemon's DNSPort answers an
-  `AAAA` query with NXDOMAIN, and musl's resolver (Alpine, BusyBox) takes
-  that as "no such name" for the `A` answer too. glibc images resolve and
-  connect normally. Connecting by IP works on both. Observed with this
-  bundle's daemon; fixing it is a provider or anon change, not a bundle one.
 - **The IP-to-chain linkage is public either way.** Hiding hides where the
   box is, not that it was paid: every claim names an on-chain channel.
+
+### Workloads on musl, fixed (TOON_Network#166)
+
+**Was:** the daemon's `DNSPort` answers an `AAAA` query with NXDOMAIN even
+when the name has a good `A` record, and musl's resolver (Alpine, BusyBox)
+takes an NXDOMAIN on either the `A` or the `AAAA` half of its parallel lookup
+as "no such name" for both — so an Alpine workload could not resolve any
+name at all. glibc images resolved and connected normally throughout;
+connecting by IP worked on both. Confirmed directly against this bundle's
+real daemon (`anon` v0.4.10.2-live) over the real Anyone network: `dig
+@<DNSPort> example.com A` answered the real address, `dig @<DNSPort>
+example.com AAAA` answered NXDOMAIN. No `anonrc` option changes it —
+`DNSPort` takes only `SocksPort`-style isolation flags, and neither
+`ClientUseIPv6` nor `ClientPreferIPv6ORPort` touches what the daemon answers
+a client asking it something, only its own connections to relays and
+directories.
+
+**Now:** a small shim, `dns-shim`, sits on the egress network between a
+workload and the daemon's `DNSPort` (README § "Workload egress on a Hidden
+Provider" has the full account, `src/dns_shim.rs` the implementation). It
+forwards an `A` query to the `DNSPort` unchanged — still resolved only
+through Anyone — and answers every `AAAA` query itself, unconditionally,
+with NOERROR and no records, decided by the query's type alone before
+anything is forwarded anywhere. That "before anything is forwarded" is
+deliberate: a bare `dnsmasq --filter-AAAA` sidecar was tried first and
+rejected — confirmed against a real `dnsmasq` 2.90, it forwards the FIRST
+query for a name it has not seen before regardless of type, so an AAAA
+query that happens to arrive before any `A` query for the same name (exactly
+what a musl resolver's parallel lookup can produce) still comes back
+NXDOMAIN. This shim decides before ever asking anyone. `cargo test --test
+hidden_dns_shim -- --ignored` runs the whole thing against real `anon` and
+`dns-shim` images, and resolves a name from a real `alpine` container and a
+real `debian` one.
+
+If the fix belongs upstream in `anon` instead of as a bundle workaround —
+plausible, since the behaviour is a well-known Tor `DNSPort` bug the wider
+Tor project appears to have fixed independently
+(gitlab.torproject.org/tpo/core/tor/-/issues/40248, closed 2025-03-27, well
+after `anon`'s v0.4.10.2-live fork point) — is a decision for whoever owns
+that report to make; see TOON_Network#166 for the drafted upstream issue
+text.
 
 ### What has been run, and what has not
 
@@ -937,6 +973,15 @@ authenticates to the control port and hands directory events to the
 publisher, which opens its channel through the proxy (and stops there,
 unfunded). The DOCKER-USER rule and the ufw allowance were checked in an
 isolated dind. The rendered `connector.toml` loads in the pinned connector.
+`dns-shim` (TOON_Network#166) was run against the same real anon image, on
+the same fixed addresses: an `A` query for a real name came back the real
+address, forwarded through the daemon's `DNSPort` over Anyone; a cold `AAAA`
+query for a name never asked about before — the shape of musl's own race —
+came back NOERROR with no records, answered locally, never forwarded; and
+`getent hosts` for a real name succeeded from both a real `alpine` (musl)
+container and a real `debian` (glibc) one, on the egress network alone, `dns`
+set to the shim. `cargo test --test hidden_dns_shim -- --ignored` runs the
+whole thing.
 
 **Not run end to end:** a connector booted against real self-hosted RPCs, a
 paid spawn of a hidden lease, a tenant paying over the circuit, and
