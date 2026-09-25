@@ -32,7 +32,7 @@
 #                  per-lease .anyone │ ADD_ONION (control port)  ◀───────────┘
 #                                   │
 #   toon-<id> (internal egress network only) ── default route ──▶ anon :9040
-#                                              └─ port 53 ──▶ dns-shim :53 ──▶ anon :5353 (A only)
+#                                            └─ port 53 ──▶ dns-shim :53 ──▶ anon :5353 (A only)
 #
 # It is used by naming it in .env, beside the switch:
 #

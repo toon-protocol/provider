@@ -31,8 +31,9 @@ One host, five containers, and the workloads it sells.
 | `init-letsencrypt.sh` | Issues or reuses the certificate. Idempotent. |
 | `auto-apply.sh` + the two units | The box half of GitOps: follow the branch, apply what merged. |
 | `toon-provider-check.service` + `.timer` | Runs `toon-provider status --check` every five minutes, into the journal. § "Is it working?". |
-| `docker-compose.hidden.yml` | The overlay a **hidden** box adds (`HIDDEN=1`): the anon daemon, its two pinned networks, and no nginx. § "Running hidden". |
+| `docker-compose.hidden.yml` | The overlay a **hidden** box adds (`HIDDEN=1`): the anon daemon, its DNS shim, their two pinned networks, and no nginx. § "Running hidden". |
 | `anon/Dockerfile`, `anon/anonrc` | The hidden box's anon daemon, built here from a digest-pinned base and a checksummed release, and its config. Committed, not rendered. |
+| `dns-shim/Dockerfile` | `toon-provider dns-shim` (TOON_Network#166), built here from a digest-pinned base: works around `anon`'s DNSPort answering AAAA with NXDOMAIN, which breaks musl workloads. |
 | `hidden-firewall.sh` + `toon-hidden-firewall.service` | A hidden box's DOCKER-USER rules: no lease port reachable from outside. |
 | `.env.example` | Every variable, with what it is and how to generate it, and the devnet's relay and settlement values as a preset. |
 
@@ -953,8 +954,10 @@ plausible, since the behaviour is a well-known Tor `DNSPort` bug the wider
 Tor project appears to have fixed independently
 (gitlab.torproject.org/tpo/core/tor/-/issues/40248, closed 2025-03-27, well
 after `anon`'s v0.4.10.2-live fork point) — is a decision for whoever owns
-that report to make; see TOON_Network#166 for the drafted upstream issue
-text.
+that report to make. This is deliberately not filed against `anon` from
+here: an upstream report speaks for the project, not one contributor, so a
+draft of it was handed to the human who owns TOON_Network#166 to review
+and file (or not) themselves.
 
 ### What has been run, and what has not
 
