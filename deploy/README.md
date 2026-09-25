@@ -948,6 +948,17 @@ publisher, which opens its channel through the proxy (and stops there,
 unfunded). The DOCKER-USER rule and the ufw allowance were checked in an
 isolated dind. The rendered `connector.toml` loads in the pinned connector.
 
+The publisher's BTP socket through the proxy (TOON_Network#165) was run in
+the sandbox's `hs` profile, with this repository's publisher image and
+`TOON_TRANSPORT=btp`, against the real Anyone network. A capture on the
+publisher's SOCKS leg showed its `GET /ilp` and then `GET /ilp/btp` with
+`Upgrade: websocket`, both to the hub's `.anyone` address and with no
+`POST /ilp`. The hidden provider logged "Provider Profile published: 1
+relay(s) accepted", and the Profile was read back from the sandbox relay.
+The publisher's only outbound connection was to the daemon's SOCKS port. The
+sandbox hub does not pin `g.toon.relay`, so this proves the carriage and not
+the devnet relay's refusal of HTTP. Not run against the devnet relay.
+
 **Not run end to end:** a connector booted against real self-hosted RPCs, a
 paid spawn of a hidden lease, a tenant paying over the circuit, and
 `make smoke-m4`. The sandbox's `hs` profile (infra/sandbox), which this
