@@ -616,7 +616,7 @@ fn the_templates_name_no_operator() {
         for devnet in [
             "g.toon",
             "devnet",
-            "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce",
+            "0x0C996d7c934c79a6255254875607Fe69df25C0E1",
             "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU",
             "[[listings]]",
             "[[routes]]",
@@ -1289,7 +1289,7 @@ fn a_hidden_connector_publishes_the_circuit_and_settles_on_the_operators_own_nod
         value["settlement"]["evm"]["token_address"]
             .as_str()
             .unwrap(),
-        "0x49beE1Bca5d15Fb0963117923403F9498119a9Ce"
+        "0x0C996d7c934c79a6255254875607Fe69df25C0E1"
     );
     assert_eq!(
         value["settlement"]["solana"]["program_id"]
