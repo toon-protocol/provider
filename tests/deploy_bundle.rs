@@ -1067,26 +1067,6 @@ fn the_publisher_pays_over_a_carriage_the_relay_will_accept() {
     // publishes the pin it enforces, this may go back to `auto`.
     let compose = deploy("docker-compose.yml");
     assert!(compose.contains("TOON_TRANSPORT: btp"));
-
-    // And the two things a websocket carriage cannot carry are absent, which
-    // is what makes this carriage safe here rather than a silent leak: the SOCKS5h
-    // proxy and the endpoint rewrite both live inside the publisher's `fetch`.
-    // Settings only — the comments beside them say why they are absent, and
-    // saying so is not setting them.
-    let set: Vec<&str> = compose
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.starts_with('#'))
-        .filter(|l| {
-            ["TOON_ENDPOINT_REWRITE", "TOON_SOCKS_PROXY", "TOON_HIDDEN"]
-                .iter()
-                .any(|name| l.starts_with(&format!("{name}:")))
-        })
-        .collect();
-    assert!(
-        set.is_empty(),
-        "docker-compose.yml sets something `auto` cannot carry: {set:?}"
-    );
 }
 
 // ── A Hidden Provider from the same bundle (TOON_Network#159) ───────────────
@@ -1525,9 +1505,13 @@ fn the_hidden_overlay_publishes_nothing_and_switches_the_tls_edge_off() {
             "the overlay leaves {service} running"
         );
     }
-    // The publisher: hidden, proxied, and on the one carriage that rides the
-    // proxy. `btp` or `auto` beside a proxy is a refusal to start.
+    // The publisher: hidden, proxied, and paying through this box's own chain
+    // RPC. Its channel dials that RPC directly, never through the proxy, so
+    // the base file's public one would see this box's real address.
     assert!(overlay.contains("TOON_HIDDEN: 'true'"));
+    assert!(overlay.contains("TOON_RPC_URL: ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-}"));
+    // Still HTTP: the pinned publisher image predates TOON_Network#165 and
+    // refuses `btp` beside a proxy. This flips to `btp` with the pin bump.
     assert!(overlay.contains("TOON_TRANSPORT: http"));
 }
 

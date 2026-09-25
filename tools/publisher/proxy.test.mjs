@@ -5,11 +5,14 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 
 import {
+  carriageThrough,
+  hiddenRpcRefusal,
   isNearUrl,
   isPrivateAddress,
   isRpcTarget,
   isTrue,
   proxyFor,
+  rewriteUrl,
   startupRefusal,
   TRANSPORTS,
   transportRefusal,
@@ -73,9 +76,19 @@ describe('startupRefusal', () => {
 
   it('carries the transport refusal, so one call is the whole of "may this start"', () => {
     assert.match(
-      startupRefusal({ hidden: true, socksProxy: 'socks5h://anon:9050', transport: 'auto' }),
-      /cannot be used with a proxy/,
+      startupRefusal({ hidden: true, socksProxy: 'socks5h://anon:9050', transport: 'websocket' }),
+      /must be one of/,
     );
+  });
+
+  it('lets a hidden publisher pay over BTP, which the devnet relay pins (TOON_Network#165)', () => {
+    for (const transport of ['btp', 'auto']) {
+      assert.equal(
+        startupRefusal({ hidden: true, socksProxy: 'socks5h://anon:9050', transport }),
+        null,
+        transport,
+      );
+    }
   });
 });
 
@@ -98,25 +111,115 @@ describe('transportRefusal', () => {
     assert.equal(transportRefusal({ transport: 'btp', endpointRewrite: {} }), null);
   });
 
-  it('refuses a websocket beside a proxy, because the proxy IS a fetch', () => {
-    // The SOCKS5h carriage is installed as this process's `fetch`; BTP opens a
-    // websocket that never passes through it. Refusing beats reaching the
-    // connector from this host's real address while the logs say otherwise.
-    assert.match(
-      transportRefusal({ transport: 'auto', socksProxy: 'socks5h://anon:9050' }),
-      /cannot be used with a proxy/,
-    );
-    assert.match(transportRefusal({ transport: 'btp', hidden: true }), /ADR 0008/);
+  it('lets a websocket ride beside a proxy, because the socket rides it too', () => {
+    // Until TOON_Network#165 this was a refusal: the proxy was only this
+    // process's `fetch`, and a BTP socket went round it. The carriage now
+    // hands the client the proxy's `createWebSocket` as well (`carriageThrough`).
+    assert.equal(transportRefusal({ transport: 'auto', socksProxy: 'socks5h://anon:9050' }), null);
+    assert.equal(transportRefusal({ transport: 'btp', hidden: true }), null);
+  });
+});
+
+describe('rewriteUrl', () => {
+  const rewrite = [['http://127.0.0.1:3200', 'http://relay-connector:3000']];
+
+  it('swaps an advertised prefix for the address this process reaches', () => {
+    assert.equal(rewriteUrl('http://127.0.0.1:3200/ilp', rewrite), 'http://relay-connector:3000/ilp');
   });
 
-  it('refuses a websocket beside an endpoint rewrite, for the same reason', () => {
-    assert.match(
-      transportRefusal({
-        transport: 'auto',
-        endpointRewrite: { 'http://127.0.0.1:3200': 'http://relay-connector:3000' },
-      }),
-      /TOON_ENDPOINT_REWRITE/,
+  it('rewrites the websocket to the same node, keeping its scheme', () => {
+    // The node advertises its BTP endpoint as `ws://` beside an `http://` one;
+    // the operator names the node once, by its http address.
+    assert.equal(
+      rewriteUrl('ws://127.0.0.1:3200/ilp/btp', rewrite),
+      'ws://relay-connector:3000/ilp/btp',
     );
+    assert.equal(
+      rewriteUrl('wss://relay.example/btp', [['https://relay.example', 'https://10.0.0.9:8443']]),
+      'wss://10.0.0.9:8443/btp',
+    );
+  });
+
+  it('does not cross http and https', () => {
+    assert.equal(rewriteUrl('wss://127.0.0.1:3200/btp', rewrite), 'wss://127.0.0.1:3200/btp');
+  });
+
+  it('leaves everything else alone', () => {
+    assert.equal(rewriteUrl('http://elsewhere:3200/ilp', rewrite), 'http://elsewhere:3200/ilp');
+    assert.equal(rewriteUrl('ws://elsewhere/btp', []), 'ws://elsewhere/btp');
+  });
+});
+
+describe('carriageThrough', () => {
+  const RPC = 'http://solana-validator:8899';
+  const rewrite = [['http://127.0.0.1:3200', 'http://relay-connector:3000']];
+
+  /** Records where each dial went, instead of dialling. */
+  function world() {
+    const dialled = [];
+    const hs = {
+      fetch: async (url) => dialled.push(['proxy fetch', url]),
+      createWebSocket: (url) => dialled.push(['proxy socket', url]) && 'proxied socket',
+      close: async () => dialled.push(['proxy closed']),
+    };
+    return {
+      dialled,
+      deps: {
+        rpcUrl: RPC,
+        rpcNear: async () => true,
+        createHiddenServiceTransport: (proxy) => {
+          dialled.push(['proxy built', proxy]);
+          return hs;
+        },
+        fetch: async (url) => dialled.push(['direct fetch', url]),
+        WebSocket: class {
+          constructor(url) {
+            dialled.push(['direct socket', url]);
+          }
+        },
+      },
+    };
+  }
+
+  it('sends the BTP socket through the proxy, rewritten, beside a proxy', async () => {
+    const { dialled, deps } = world();
+    const carriage = carriageThrough('socks5h://anon:9050', rewrite, deps);
+
+    assert.equal(carriage.createWebSocket('ws://127.0.0.1:3200/ilp/btp'), 'proxied socket');
+    await carriage.fetch('http://127.0.0.1:3200/ilp');
+    await carriage.close();
+
+    assert.deepEqual(dialled, [
+      ['proxy built', 'socks5h://anon:9050'],
+      ['proxy socket', 'ws://relay-connector:3000/ilp/btp'],
+      ['proxy fetch', 'http://relay-connector:3000/ilp'],
+      ['proxy closed'],
+    ]);
+  });
+
+  it('still dials a near chain RPC directly beside a proxy, and a far one through it', async () => {
+    const near = world();
+    await carriageThrough('socks5h://anon:9050', [], near.deps).fetch(`${RPC}/`);
+    assert.deepEqual(near.dialled.at(-1), ['direct fetch', `${RPC}/`]);
+
+    const far = world();
+    far.deps.rpcNear = async () => false;
+    await carriageThrough('socks5h://anon:9050', [], far.deps).fetch(`${RPC}/`);
+    assert.deepEqual(far.dialled.at(-1), ['proxy fetch', `${RPC}/`]);
+  });
+
+  it('with no proxy dials directly, the socket rewritten like the fetch', async () => {
+    const { dialled, deps } = world();
+    const carriage = carriageThrough(undefined, rewrite, deps);
+
+    carriage.createWebSocket('ws://127.0.0.1:3200/ilp/btp');
+    await carriage.fetch('http://127.0.0.1:3200/ilp');
+    await carriage.close();
+
+    assert.deepEqual(dialled, [
+      ['direct socket', 'ws://relay-connector:3000/ilp/btp'],
+      ['direct fetch', 'http://relay-connector:3000/ilp'],
+    ]);
   });
 });
 
@@ -175,6 +278,29 @@ describe('isNearUrl', () => {
 
   it('is not near when the name does not resolve — the safe way to be wrong', async () => {
     assert.equal(await isNearUrl('http://gone:8899', failing), false);
+  });
+});
+
+describe('hiddenRpcRefusal', () => {
+  const near = async () => [{ address: '10.0.0.5' }];
+  const far = async () => [{ address: '203.0.113.7' }];
+
+  it('refuses a hidden publisher whose chain RPC is not near', async () => {
+    // The client dials its channel's chain RPC itself (open, deposit), not
+    // through the `fetch` it is handed, so no proxy covers a far one: it would
+    // see this host's real address.
+    const why = await hiddenRpcRefusal({ hidden: true, rpcUrl: 'https://api.devnet.solana.com' }, far);
+    assert.match(why, /TOON_RPC_URL/);
+    assert.match(why, /private address/);
+  });
+
+  it('lets a hidden publisher start beside its own private RPC', async () => {
+    assert.equal(await hiddenRpcRefusal({ hidden: true, rpcUrl: 'http://10.0.0.5:8899' }, far), null);
+    assert.equal(await hiddenRpcRefusal({ hidden: true, rpcUrl: 'http://solana:8899' }, near), null);
+  });
+
+  it('has nothing to say about a publisher that is not hidden', async () => {
+    assert.equal(await hiddenRpcRefusal({ hidden: false, rpcUrl: 'https://api.devnet.solana.com' }, far), null);
   });
 });
 

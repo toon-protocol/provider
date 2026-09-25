@@ -187,12 +187,19 @@ services:
       # § "Publishing from a hidden provider").
       TOON_HIDDEN: 'true'
       TOON_SOCKS_PROXY: socks5h://172.30.2.2:9050
-      # HTTP, and it has to be: the SOCKS carriage is the publisher's `fetch`,
-      # a BTP websocket never passes through it, and so the publisher refuses
-      # to start with a proxy and `btp` or `auto`. The devnet relay PINS
-      # `g.toon.relay` to BTP and refuses an HTTP write, so ON THE DEVNET TODAY
-      # A HIDDEN PROVIDER'S DIRECTORY WRITES ARE REFUSED. README § "Running
-      # hidden" has the check and what closes it.
+      # ITS OWN CHAIN RPC, the one this box runs, never the public one the base
+      # file names. The payment channel dials its RPC directly, not through the
+      # proxy, so a public RPC would see every channel open and deposit arrive
+      # from this box's real address. A publisher carrying TOON_Network#165
+      # refuses to start hidden beside anything but a private one.
+      TOON_RPC_URL: ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-}
+      # STILL HTTP, UNTIL THE PUBLISHER PIN MOVES. The devnet relay PINS
+      # `g.toon.relay` to BTP and refuses an HTTP write, so on the devnet these
+      # directory writes are refused. TOON_Network#165 lets the publisher carry
+      # its BTP socket through the proxy, but the image pinned in
+      # docker-compose.yml predates it and refuses `btp` beside a proxy. Flip
+      # this to `btp` in the same commit that bumps that pin to a build
+      # carrying #165. README § "Running hidden" has the check.
       TOON_TRANSPORT: http
     networks:
       default: {}
