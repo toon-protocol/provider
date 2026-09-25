@@ -845,12 +845,9 @@ The publisher can pay over BTP beside the proxy since TOON_Network#165: it
 hands its client the proxy's `createWebSocket` beside its `fetch`, so the
 socket rides the daemon's SOCKS port with the rest of its traffic and the
 relay's connector sees an exit address, never this box's
-(tools/publisher/README.md § "Which carriage the packets ride"). **The
-overlay still says `TOON_TRANSPORT: http`**, because the publisher image
-pinned in `docker-compose.yml` predates that change and refuses `btp` beside
-a proxy. It moves to `btp` in the same commit that bumps that pin to a build
-carrying #165. Until then, this box is not listed on the devnet. Whether the
-relay's pin still stands:
+(tools/publisher/README.md § "Which carriage the packets ride"). The
+overlay sets `TOON_TRANSPORT: btp` for that reason. Whether the relay's pin
+still stands:
 
 ```bash
 curl -s https://proxy.relay.devnet.toonprotocol.dev/ilp \

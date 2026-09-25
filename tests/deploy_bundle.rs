@@ -1510,9 +1510,10 @@ fn the_hidden_overlay_publishes_nothing_and_switches_the_tls_edge_off() {
     // the base file's public one would see this box's real address.
     assert!(overlay.contains("TOON_HIDDEN: 'true'"));
     assert!(overlay.contains("TOON_RPC_URL: ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-}"));
-    // Still HTTP: the pinned publisher image predates TOON_Network#165 and
-    // refuses `btp` beside a proxy. This flips to `btp` with the pin bump.
-    assert!(overlay.contains("TOON_TRANSPORT: http"));
+    // BTP, as the devnet relay's pin requires, its socket riding the proxy
+    // (TOON_Network#165). Over HTTP the box would run and never be listed.
+    assert!(overlay.contains("TOON_TRANSPORT: btp"));
+    assert!(!overlay.contains("TOON_TRANSPORT: http"));
 }
 
 #[test]
