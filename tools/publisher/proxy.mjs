@@ -3,7 +3,8 @@
 // Kept apart from `publish.mjs` because that file starts a server and demands
 // a mnemonic the moment it is imported: these are the decisions worth testing
 // on their own (`node --test`). They are pure; the one that builds the
-// carriage, `carriageThrough`, is handed everything it dials with.
+// carriage, `carriageThrough`, is handed everything it dials with, and the
+// two that look at the chain RPC are handed the DNS lookup.
 
 /** Truthy env flags, as compose writes them. */
 export function isTrue(value) {
@@ -88,28 +89,109 @@ export function startupRefusal({ hidden, socksProxy, transport }) {
 }
 
 /**
- * Why a hidden publisher must not start with this chain RPC, or `null`.
+ * Whether the client's chain RPC rides the proxy (`{ proxyRpc: true }`), is
+ * dialled directly (`{ proxyRpc: false }`), or must not be used at all
+ * (`{ refusal }`). It matters only beside a proxy: with none, every dial is
+ * direct, as it always was.
  *
- * `carriageThrough` covers what the client sends through the `fetch` and the
- * socket it is handed. The client's channel does not use either: opening,
- * depositing and the chain reads behind them dial `TOON_RPC_URL` with the
- * platform's own `fetch` (`@toon-protocol/client` routes chain RPC through a
- * proxy only under its own `socksProxy:` option, which refuses a clearnet
- * connector). So beside a hidden provider the RPC must be near: its own
- * node on a private address, which no exit could reach and whose traffic
- * crosses no watched network. A far one would see this host's real address
- * on every channel operation, so it is a refusal to start.
+ * Beside a proxy the client is a HIDDEN PAYER (`@toon-protocol/client` 3.3,
+ * TOON_Network#167): its chain RPC rides the proxy too, on a circuit pinned
+ * per chain, and fails closed. That is the default, and what a Hidden
+ * Provider's publisher does with the public preset RPC (spec §10, ADR 0030).
+ * The one exception is an RPC the operator runs on a private address, which
+ * no exit could reach — `proxyRpc: false` sends it directly.
  *
- * `lookup` is `dns.promises.lookup`, as for `isNearUrl`.
+ * `TOON_PROXY_RPC` (`proxyRpc` here) says which outright; the deploy
+ * bundle's hidden overlay sets it `false` exactly when the operator
+ * self-hosts. Unset, it is decided by where the RPC is, WITHOUT a lookup of
+ * any name with a dot in it: a lookup from this host of the public RPC it
+ * hides its address from is a leak of its own. So only an address literal,
+ * `localhost`, or a one-label compose-network name (`solana-validator`) can
+ * be near; anything else rides the proxy, the safe way to be wrong.
+ *
+ * A hidden publisher TOLD to dial directly is refused unless the RPC really
+ * is near: a public RPC would see every channel open and deposit arrive from
+ * this host's real address. `lookup` is `dns.promises.lookup`, as for
+ * `isNearUrl`.
  */
-export async function hiddenRpcRefusal({ hidden, rpcUrl }, lookup) {
-  if (!hidden || (await isNearUrl(rpcUrl, lookup))) return null;
-  return (
-    `TOON_HIDDEN is set, so TOON_RPC_URL must be your own node on a private address, not ` +
-    `${JSON.stringify(rpcUrl)}: the payment channel dials its chain RPC directly, never ` +
-    "through the proxy, and a public RPC would see this host's real address (spec §10, " +
-    'ADR 0008).'
-  );
+export async function chainRpcRoute({ hidden, rpcUrl, proxyRpc }, lookup) {
+  const said = String(proxyRpc ?? '').trim();
+  if (said !== '' && !isTrue(said) && !isFalse(said)) {
+    return { refusal: `TOON_PROXY_RPC must be true or false, not ${JSON.stringify(proxyRpc)}.` };
+  }
+  if (isTrue(said)) return proxied(rpcUrl);
+  if (isFalse(said)) {
+    if (hidden && !(await isNearUrl(rpcUrl, lookup))) {
+      return {
+        refusal:
+          `TOON_HIDDEN is set and TOON_PROXY_RPC=false, so TOON_RPC_URL must be your own node on a ` +
+          `private address, not ${JSON.stringify(rpcUrl)}: dialled directly, a public RPC would see ` +
+          "this host's real address on every channel operation. Leave TOON_PROXY_RPC unset to " +
+          'reach it through the proxy instead (spec §10, ADR 0030).',
+      };
+    }
+    return { proxyRpc: false };
+  }
+  let host;
+  try {
+    host = new URL(rpcUrl).hostname.replace(/^\[|\]$/g, '');
+  } catch {
+    return { proxyRpc: true };
+  }
+  const literal = host.toLowerCase() === 'localhost' || /^[\d.]+$/.test(host) || host.includes(':');
+  if (!literal && host.includes('.')) return proxied(rpcUrl);
+  return (await isNearUrl(rpcUrl, lookup)) ? { proxyRpc: false } : proxied(rpcUrl);
+}
+
+/**
+ * `{ proxyRpc: true }`, unless `rpcUrl` is plain `http://` to a clearnet
+ * host: through an exit relay, every answer — a deposit, a receipt — could be
+ * read and rewritten. The provider's gate and the connector refuse the same
+ * thing; `@toon-protocol/client` does not, so it is refused here. Plain http
+ * to an `.anyone` host is fine: its address authenticates the service.
+ */
+function proxied(rpcUrl) {
+  let url;
+  try {
+    url = new URL(rpcUrl);
+  } catch {
+    return { refusal: `TOON_RPC_URL is not a URL: ${JSON.stringify(rpcUrl)}` };
+  }
+  if (url.protocol === 'http:' && !url.hostname.toLowerCase().endsWith('.anyone')) {
+    return {
+      refusal:
+        `TOON_RPC_URL ${JSON.stringify(rpcUrl)} is plain http, and it would ride the proxy through ` +
+        "an exit relay that can read and rewrite every answer. Use the RPC's https URL " +
+        '(spec §10, ADR 0030).',
+    };
+  }
+  return { proxyRpc: true };
+}
+
+/** Falsy env flags, as an operator writes them. */
+function isFalse(value) {
+  return /^(0|false|no|off)$/i.test(String(value ?? '').trim());
+}
+
+/**
+ * What the client is handed about its route, for `ToonClient.create`.
+ *
+ * With no proxy: the direct carriage (`carriageThrough`), rewritten. Beside
+ * one: `socksProxy`, which makes the client a hidden payer, plus
+ * `proxyRpc: false` only when the chain RPC is to be dialled directly
+ * (`chainRpcRoute`); and the carriage only when there is one, which is when
+ * `TOON_ENDPOINT_REWRITE` needs its own `fetch` — itself built on
+ * `createHiddenServiceTransport`, so the edge still rides the proxy.
+ */
+export function clientRouteOptions(socksProxy, carriage, proxyRpc) {
+  const options = {};
+  if (socksProxy !== undefined) {
+    options.socksProxy = socksProxy;
+    if (proxyRpc === false) options.proxyRpc = false;
+  }
+  if (carriage.fetch !== undefined) options.fetch = carriage.fetch;
+  if (carriage.createWebSocket !== undefined) options.createWebSocket = carriage.createWebSocket;
+  return options;
 }
 
 /** The carriages this publisher may pay over. `auto` lets the node's own route policy decide. */
@@ -168,19 +250,20 @@ export function rewriteUrl(url, rewrite) {
  * route, and how to shut them down.
  *
  * With no proxy both are this host's own, rewritten — what this process did
- * before hidden providers existed. With one, both are the client library's
- * SOCKS5h carriage (`createHiddenServiceTransport`), for EVERY host, not only
- * `.anyone` ones: a hidden provider whose payer reached a clearnet relay
- * directly would have named this host to it, whatever the connector's address
- * looked like. Handing over only the `fetch` is not enough, and was the gap
- * TOON_Network#165 closed: the client would open its BTP socket itself, from
- * this host's real address.
+ * before hidden providers existed.
  *
- * The chain RPC is the one exception to the proxy, and `isNearUrl` says why.
+ * Beside a proxy the client's own `socksProxy` carries everything
+ * (`clientRouteOptions`): the edge, the BTP socket and the chain RPC. So
+ * there is nothing to hand it, and handing it a `fetch` anyway would win over
+ * its own for the edge. The one case that needs a carriage is
+ * `TOON_ENDPOINT_REWRITE`, which the client does not know about: then both
+ * halves are the client library's SOCKS5h carriage
+ * (`createHiddenServiceTransport`), rewritten, for EVERY host — a `fetch`
+ * alone is not enough, because the client would open its BTP socket itself
+ * (TOON_Network#165). Chain RPC never goes through either under a proxy.
  *
- * `deps` is what it dials with — `createHiddenServiceTransport`, `fetch`,
- * `WebSocket`, the configured `rpcUrl` and `rpcNear()` (whether that RPC is
- * near) — so the routing is testable without a network.
+ * `deps` is what it dials with — `createHiddenServiceTransport`, `fetch` and
+ * `WebSocket` — so the routing is testable without a network.
  */
 export function carriageThrough(socksProxy, rewrite, deps) {
   const url = (input) => rewriteUrl(typeof input === 'string' ? input : input?.url ?? String(input), rewrite);
@@ -191,25 +274,15 @@ export function carriageThrough(socksProxy, rewrite, deps) {
       close: async () => {},
     };
   }
+  if (rewrite.length === 0) {
+    return { fetch: undefined, createWebSocket: undefined, close: async () => {} };
+  }
   const transport = deps.createHiddenServiceTransport(socksProxy);
   return {
-    fetch: async (input, init) => {
-      const target = url(input);
-      if (isRpcTarget(target, deps.rpcUrl) && (await deps.rpcNear())) return deps.fetch(target, init);
-      return transport.fetch(target, init);
-    },
+    fetch: (input, init) => transport.fetch(url(input), init),
     createWebSocket: (target) => transport.createWebSocket(url(target)),
     close: () => transport.close(),
   };
-}
-
-/** Whether `url` is the chain RPC this process was configured with. */
-export function isRpcTarget(url, rpcUrl) {
-  try {
-    return new URL(url).origin === new URL(rpcUrl).origin;
-  } catch {
-    return false;
-  }
 }
 
 /** Loopback, an RFC 1918 or link-local range, ULA, or the unspecified address. */
@@ -237,15 +310,11 @@ export function isPrivateAddress(ip) {
  * network — the same rule the provider applies to its directory publisher
  * (`is_private_url`, spec §10), and the same reason.
  *
- * This is the ONE destination a proxied publisher still dials directly, and
- * it is decided by where the destination IS rather than by a flag. A hidden
- * provider runs its own settlement RPC on loopback or a private address (ADR
- * 0008) — the provider refuses to start otherwise — and `anon` builds no
- * circuit to such an address, so proxying it would fail rather than hide
- * anything: the packet never crosses a network anyone outside can watch. An
- * RPC that is anywhere else DOES leave: what reaches it through the `fetch`
- * rides the proxy, and the channel's own calls, which do not, are why a
- * hidden publisher refuses to start beside one (`hiddenRpcRefusal`).
+ * The one destination a proxied publisher may still dial directly is a chain
+ * RPC the operator runs on loopback or a private address (spec §10, ADR 0030):
+ * `anon` builds no circuit to such an address, so proxying it would fail
+ * rather than hide anything, and the packet never crosses a network anyone
+ * outside can watch (`chainRpcRoute`).
  *
  * `lookup` is `dns.promises.lookup`, passed in so this is testable without
  * DNS. A name that does not resolve is not near: the safe way to be wrong
