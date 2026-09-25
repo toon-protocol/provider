@@ -12,6 +12,12 @@
 #                        SOCKS port the provider and the publisher dial out
 #                        through, and the transparent egress of every hidden
 #                        workload. anon/anonrc explains each.
+#   dns-shim             NEW (TOON_Network#166). `anon`'s own DNSPort answers
+#                        an AAAA query with NXDOMAIN, which breaks a musl
+#                        workload's (Alpine's) name resolution outright. This
+#                        forwards A queries to `anon`'s DNSPort unchanged and
+#                        answers AAAA itself with NOERROR and no records; see
+#                        dns-shim/Dockerfile and src/dns_shim.rs.
 #   provider-connector   pinned on the hidden network, where the daemon's
 #                        hidden service points. Still on 127.0.0.1:4000 for
 #                        bootstrap.sh and auto-apply.sh; never public.
@@ -26,6 +32,7 @@
 #                  per-lease .anyone │ ADD_ONION (control port)  ◀───────────┘
 #                                   │
 #   toon-<id> (internal egress network only) ── default route ──▶ anon :9040
+#                                            └─ port 53 ──▶ dns-shim :53 ──▶ anon :5353 (A only)
 #
 # It is used by naming it in .env, beside the switch:
 #
@@ -81,25 +88,55 @@ services:
     init: true
     cap_add:
       - NET_ADMIN
+    # ONLY for the DNS shim's sake (TOON_Network#166): with `ip_forward` off,
+    # every packet from the egress subnet that this container's `nat` rules do
+    # not REDIRECT to one of ITS OWN ports is simply dropped by the kernel
+    # before it reaches any chain at all — which is what makes the INPUT DROP
+    # below a true catch-all with no help from `ip_forward` today. Handing a
+    # DNS query on to `dns-shim`, a SEPARATE container, needs the kernel to
+    # forward it there, so this reopens exactly that one hole; the `fwd`
+    # rules below close it back down to the one destination and ports this
+    # daemon now relays anywhere.
+    sysctls:
+      - net.ipv4.ip_forward=1
     entrypoint: ['/bin/sh', '-c']
     command:
       - |
         set -e
         nat() { iptables -t nat -C PREROUTING "$$@" 2>/dev/null || iptables -t nat -A PREROUTING "$$@"; }
         inp() { iptables -C INPUT "$$@" 2>/dev/null || iptables -A INPUT "$$@"; }
+        fwd() { iptables -C FORWARD "$$@" 2>/dev/null || iptables -A FORWARD "$$@"; }
         # DNS first, then the catch-all: a tcp/53 packet must reach the
         # DNSPort, not the TransPort, and -A appends in order. The catch-all
         # leaves traffic INSIDE the egress subnet alone, so two workloads on
         # it still reach each other directly.
-        nat -s 10.204.0.0/24 -p udp --dport 53 -j REDIRECT --to-ports 5353
-        nat -s 10.204.0.0/24 -p tcp --dport 53 -j REDIRECT --to-ports 5353
+        #
+        # Port 53 is handed to `dns-shim` (TOON_Network#166), on the same
+        # subnet at .3, rather than redirected to this daemon's own DNSPort:
+        # `anon`'s DNSPort answers an AAAA query with NXDOMAIN even when the
+        # name has a good A record, which breaks a musl workload's
+        # (Alpine's) resolution outright (src/dns_shim.rs has the account).
+        # The shim forwards A queries on to the DNSPort itself — at 5353,
+        # unredirected — and answers AAAA on its own.
+        nat -s 10.204.0.0/24 -p udp --dport 53 -j DNAT --to-destination 10.204.0.3:53
+        nat -s 10.204.0.0/24 -p tcp --dport 53 -j DNAT --to-destination 10.204.0.3:53
         nat -s 10.204.0.0/24 ! -d 10.204.0.0/24 -p tcp --syn -j REDIRECT --to-ports 9040
+        # What `ip_forward` above now allows through is narrowed right back
+        # down: only the DNS DNAT just above, to the one host and the one
+        # port it names; every OTHER packet the nat rules left alone (there
+        # is no third one) is dropped rather than actually routed anywhere
+        # this daemon's own network reaches.
+        fwd -s 10.204.0.0/24 -d 10.204.0.3/32 -p udp --dport 53 -j ACCEPT
+        fwd -s 10.204.0.0/24 -d 10.204.0.3/32 -p tcp --dport 53 -j ACCEPT
+        fwd -s 10.204.0.0/24 -j DROP
         # AND THEN ONLY THOSE TWO PORTS. Without the DROP a workload could dial
         # anything this daemon listens on. Redirected packets arrive already
-        # rewritten to 9040/5353, which is why the ACCEPTs come first.
+        # rewritten to 9040, which is why its ACCEPT comes first; the DNSPort
+        # at 5353 is no longer reachable from the whole subnet, only from
+        # dns-shim, the one thing that still asks it directly.
         inp -s 10.204.0.0/24 -p tcp --dport 9040 -j ACCEPT
-        inp -s 10.204.0.0/24 -p tcp --dport 5353 -j ACCEPT
-        inp -s 10.204.0.0/24 -p udp --dport 5353 -j ACCEPT
+        inp -s 10.204.0.3/32 -p udp --dport 5353 -j ACCEPT
+        inp -s 10.204.0.3/32 -p tcp --dport 5353 -j ACCEPT
         inp -s 10.204.0.0/24 -j DROP
         exec docker-entrypoint anon -f /etc/anon/anonrc
     volumes:
@@ -129,6 +166,42 @@ services:
       timeout: 5s
       retries: 60
       start_period: 30s
+    restart: unless-stopped
+
+  # ── The DNS shim (TOON_Network#166) ─────────────────────────────────────────
+  # `anon`'s own DNSPort answers an AAAA query with NXDOMAIN even when the
+  # name has a good A record, which breaks a musl workload's (Alpine's)
+  # `getaddrinfo` outright — it asks for A and AAAA in parallel and discards
+  # the good A answer the moment the AAAA one comes back NXDOMAIN. No
+  # `anonrc` option changes it (deploy/README.md § "Other limits, stated
+  # plainly" has the confirmation). This forwards A queries to `anon`'s real
+  # DNSPort unchanged and answers every AAAA query itself, unconditionally,
+  # with NOERROR and no records — decided by query type alone, before
+  # anything is forwarded anywhere, so there is no "first query for this
+  # name" race to lose the way a bare `dnsmasq --filter-AAAA` sidecar does
+  # (src/dns_shim.rs's module doc has that finding).
+  #
+  # PINNED AT .2's NEIGHBOUR, .3, ON THE EGRESS NETWORK ONLY: no `default`, no
+  # `hidden`, and no published port. It has no path anywhere but to `anon`'s
+  # DNSPort, on the one subnet every hidden workload and this daemon share;
+  # `anon`'s own `nat` rule above hands it port 53 rather than answering
+  # there itself.
+  #
+  # BUILT HERE, like `anon`, and pinned by BASE IMAGE DIGEST rather than the
+  # published `provider` image's floating `sha-<short>` tag: dns-shim/Dockerfile
+  # says why.
+  dns-shim:
+    build:
+      context: ..
+      dockerfile: deploy/dns-shim/Dockerfile
+    image: toon-provider-dns-shim:latest
+    command: ['dns-shim', '--listen', '10.204.0.3:53', '--upstream', '10.204.0.2:5353']
+    networks:
+      hidden-egress:
+        ipv4_address: 10.204.0.3
+    depends_on:
+      anon:
+        condition: service_healthy
     restart: unless-stopped
 
   # PINNED AT .3, because anon/anonrc forwards the address's port 80 here by IP

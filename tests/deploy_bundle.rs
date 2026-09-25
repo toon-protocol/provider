@@ -1573,6 +1573,90 @@ fn the_hidden_images_are_pinned() {
     );
 }
 
+#[test]
+fn the_dns_shim_is_pinned_and_answers_only_from_the_egress_network() {
+    // TOON_Network#166: `anon`'s own DNSPort answers an AAAA query with
+    // NXDOMAIN even when the name has a good A record — confirmed against
+    // the real v0.4.10.2-live daemon over the real Anyone network — which
+    // breaks a musl workload's (Alpine's) parallel A/AAAA lookup outright.
+    // `dns-shim` forwards A to the real DNSPort and answers AAAA itself.
+    let dockerfile = deploy("dns-shim/Dockerfile");
+    let froms: Vec<&str> = dockerfile
+        .lines()
+        .filter_map(|l| l.strip_prefix("FROM "))
+        .collect();
+    assert_eq!(
+        froms.len(),
+        2,
+        "dns-shim/Dockerfile should have exactly a builder stage and a runtime stage"
+    );
+    for from in &froms {
+        assert!(
+            from.contains("@sha256:") && from.len() > from.find("@sha256:").unwrap() + 8 + 63,
+            "a dns-shim base image is not pinned by digest: {from}"
+        );
+    }
+    assert!(dockerfile.contains("ENTRYPOINT [\"toon-provider\"]"));
+
+    let overlay = deploy("docker-compose.hidden.yml");
+    let shim = service_block(&overlay, "dns-shim");
+
+    // Built from THIS checkout, on its own schedule — never the published
+    // `provider` image's floating `sha-<short>` tag.
+    assert!(
+        shim.contains("dockerfile: deploy/dns-shim/Dockerfile"),
+        "dns-shim is not built from its own Dockerfile"
+    );
+
+    // No clearnet path: the ONLY network it names is the internal egress
+    // one, and it publishes no port.
+    assert!(
+        shim.contains("hidden-egress:"),
+        "dns-shim is not on the egress network"
+    );
+    assert!(
+        !shim.contains("default:"),
+        "dns-shim has a path off the egress network"
+    );
+    assert!(
+        !shim.contains("  hidden:"),
+        "dns-shim can reach the control/socks network"
+    );
+    assert!(!shim.contains("ports:"), "dns-shim publishes a port");
+    assert!(overlay.contains("ipv4_address: 10.204.0.3\n"));
+
+    // Forwards A to anon's real DNSPort, and listens where anon's own NAT
+    // rule now sends port 53.
+    assert!(shim.contains("--listen") && shim.contains("10.204.0.3:53"));
+    assert!(shim.contains("--upstream") && shim.contains("10.204.0.2:5353"));
+
+    // anon hands port 53 to the shim rather than answering it itself, and
+    // narrows what turning `ip_forward` on for that now lets through right
+    // back down to exactly that one destination and those two ports — the
+    // same "and then only those two ports" discipline the INPUT chain
+    // already keeps, now needed for FORWARD too.
+    let anon = service_block(&overlay, "anon");
+    assert!(anon
+        .contains("nat -s 10.204.0.0/24 -p udp --dport 53 -j DNAT --to-destination 10.204.0.3:53"));
+    assert!(anon
+        .contains("nat -s 10.204.0.0/24 -p tcp --dport 53 -j DNAT --to-destination 10.204.0.3:53"));
+    assert!(
+        anon.contains("net.ipv4.ip_forward=1"),
+        "anon does not enable forwarding, so its own DNAT to the shim would be dropped"
+    );
+    assert!(
+        anon.contains("fwd -s 10.204.0.0/24 -d 10.204.0.3/32 -p udp --dport 53 -j ACCEPT")
+            && anon.contains("fwd -s 10.204.0.0/24 -d 10.204.0.3/32 -p tcp --dport 53 -j ACCEPT")
+            && anon.contains("fwd -s 10.204.0.0/24 -j DROP"),
+        "anon does not narrow what ip_forward now lets it relay back down to the shim alone"
+    );
+    // The DNSPort itself is reachable only from the shim now, not from the
+    // whole subnet as before: a workload's own query never lands there
+    // directly, only through the shim's decision.
+    assert!(anon.contains("inp -s 10.204.0.3/32 -p udp --dport 5353 -j ACCEPT"));
+    assert!(anon.contains("inp -s 10.204.0.3/32 -p tcp --dport 5353 -j ACCEPT"));
+}
+
 // ── `toon-provider status` and its check timer (TOON_Network#172) ───────────
 
 /// One service's block of a compose file: its `  name:` line up to the next
