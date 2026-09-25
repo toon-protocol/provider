@@ -266,14 +266,12 @@ services:
       # from this box's real address. A publisher carrying TOON_Network#165
       # refuses to start hidden beside anything but a private one.
       TOON_RPC_URL: ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-}
-      # STILL HTTP, UNTIL THE PUBLISHER PIN MOVES. The devnet relay PINS
-      # `g.toon.relay` to BTP and refuses an HTTP write, so on the devnet these
-      # directory writes are refused. TOON_Network#165 lets the publisher carry
-      # its BTP socket through the proxy, but the image pinned in
-      # docker-compose.yml predates it and refuses `btp` beside a proxy. Flip
-      # this to `btp` in the same commit that bumps that pin to a build
-      # carrying #165. README § "Running hidden" has the check.
-      TOON_TRANSPORT: http
+      # BTP, THROUGH THE PROXY. The devnet relay PINS `g.toon.relay` to BTP and
+      # refuses an HTTP write, so over HTTP this box would never be listed.
+      # Since TOON_Network#165 the publisher hands its client the proxy's
+      # `createWebSocket` beside its `fetch`, so the socket rides the daemon's
+      # SOCKS port like every other byte. README § "Running hidden".
+      TOON_TRANSPORT: btp
     networks:
       default: {}
       hidden: {}
