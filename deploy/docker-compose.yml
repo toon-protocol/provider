@@ -46,7 +46,7 @@ services:
     # so the connector moves by a reviewed commit here: this tag and the
     # matching literal in tests/deploy_bundle.rs, together.
     # README § "Bumping the connector pin".
-    image: ghcr.io/toon-protocol/connector:rust-sha-854d199
+    image: ghcr.io/toon-protocol/connector:rust-2026.09.27.1
     command: ['/app/config/connector.toml']
     volumes:
       - ./connector.toml:/app/config/connector.toml:ro
