@@ -2385,3 +2385,24 @@ fn no_script_asks_compose_for_one_services_images() {
         );
     }
 }
+
+#[test]
+fn every_apply_puts_pinned_addresses_back_after_its_up() {
+    // Compose reconnects a container to a network it recreated without the
+    // container's `ipv4_address` (tests/pin_addresses.rs), so each full
+    // `up -d` is followed by the script that checks and restores them.
+    for script in ["bootstrap.sh", "auto-apply.sh"] {
+        let text = deploy(script);
+        let up = text
+            .rfind("docker compose up -d\n")
+            .or_else(|| text.rfind("up -d; then"))
+            .unwrap_or_else(|| panic!("{script} runs no full `up -d`"));
+        let pin = text
+            .find("./pin-addresses.sh")
+            .unwrap_or_else(|| panic!("{script} never runs ./pin-addresses.sh"));
+        assert!(
+            pin > up,
+            "{script} runs ./pin-addresses.sh before its `up -d`"
+        );
+    }
+}

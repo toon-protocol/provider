@@ -89,6 +89,7 @@ fn fresh_origin() -> (tempfile::TempDir, String) {
     for name in [
         "render.sh",
         "pull-images.sh",
+        "pin-addresses.sh",
         "auto-apply.sh",
         "provider.toml.template",
         "connector.toml.template",
@@ -108,7 +109,12 @@ fn fresh_origin() -> (tempfile::TempDir, String) {
         deploy.join("nginx/node.conf.template"),
     )
     .unwrap();
-    for name in ["render.sh", "pull-images.sh", "auto-apply.sh"] {
+    for name in [
+        "render.sh",
+        "pull-images.sh",
+        "pin-addresses.sh",
+        "auto-apply.sh",
+    ] {
         let path = deploy.join(name);
         let mut perms = fs::metadata(&path).unwrap().permissions();
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);

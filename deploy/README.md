@@ -846,9 +846,15 @@ so the overlay also **enforces** it (TOON_Network#181):
   because it is dialled directly and nothing else is reachable.
 - **Upgrading a box brought up before this.** `docker compose up` (and so
   `auto-apply.sh`) sees that `toon-provider-hidden` is now `internal`,
-  recreates the network and the containers on it, and moves the loopback port
-  from the connector to the relay by itself. Expect the connector, the
-  provider and the publisher to restart once.
+  recreates the network, and moves the loopback port from the connector to
+  the relay by itself. It does NOT recreate `anon`, whose own config did not
+  change: it reconnects it to the new network without its pinned
+  `172.30.2.2`, where the daemon cannot bind its SOCKS port and aborts in a
+  loop. `pin-addresses.sh`, which `bootstrap.sh` and `auto-apply.sh` run after
+  every `up -d`, recreates any container that is off its pinned address, so
+  an apply heals it. If you run `docker compose up -d` by hand, run
+  `./pin-addresses.sh` after it. Expect anon, the connector, the provider and
+  the publisher to restart once.
 
 `keys.sh check-funded` runs on the host, not in these containers, and is
 unaffected: on the proxied default it asks nothing, and a self-hosted node it
