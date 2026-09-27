@@ -790,11 +790,11 @@ is not hidden about getting paid.
 | The connector is reached at | `https://proxy.provider.<DOMAIN>/ilp`, through nginx | `http://<HIDDEN_ADDRESS>/ilp`, through the anon daemon's hidden service |
 | A lease is reached at | `PUBLIC_IP:<port>` | its own `.anyone` address, made per lease over the daemon's control port |
 | A workload's own traffic | the host's network | an internal network whose only way out is the daemon's transparent proxy |
-| The provider's and publisher's outbound | direct | through the daemon's SOCKS port (`socks5h`) |
+| The connector's, provider's and publisher's outbound | direct | through the daemon's SOCKS port (`socks5h`), **enforced by the network**: they are on an internal network whose only way off the box is that port |
 | Settlement RPCs | the preset's public ones, direct | the preset's public ones **through the anon daemon**, one pinned circuit per chain; or your own node, direct |
 | DNS, nginx, Let's Encrypt | yes | none: `DOMAIN` and `PUBLIC_IP` are never rendered |
 | ufw | 22, 80, 443 and both workload ranges | 22, and the workload ranges from the daemon's address only |
-| Extra services | none | `anon` |
+| Extra services | none | `anon`, `dns-shim`, `connector-loopback` |
 
 It is one bundle, not two. `HIDDEN=1` in `.env` is the switch and
 `COMPOSE_FILE=docker-compose.yml:docker-compose.hidden.yml` beside it adds the
@@ -805,6 +805,54 @@ both shapes, and `render.sh` keeps the `@hidden-only` blocks (`hidden = true`
 and the `[anon]` tables in `provider.toml`, the root `socks_proxy` in
 `connector.toml`) and drops the `@public-only` one (`public_ip`). The listings, the routes, the keys and `auto-apply.sh` work the
 same way on both.
+
+### Anon-only egress, enforced rather than configured
+
+The connector, the provider and the publisher are each **configured** to dial
+out only through the daemon: the connector's `socks_proxy` and
+`rpc_via_socks_proxy` (connector ADR 0073), the provider's
+`anon.socks_proxy`, the publisher's `TOON_SOCKS_PROXY` (a hidden payer). All
+three fail closed. Configuration alone is one bug, one dependency that phones
+home or one `.env` edit away from a direct dial from this box's real address,
+so the overlay also **enforces** it (TOON_Network#181):
+
+- The three are on `toon-provider-hidden` **alone**, and that network is
+  `internal`. Docker gives it no NAT and a container on it no default route,
+  and its embedded DNS answers the names of the containers on it and nothing
+  else. A direct dial from any of them, by IP or by name, fails with "network
+  unreachable" or an unresolved name.
+- The one thing on that network that leads off the box is the daemon's SOCKS
+  port, `172.30.2.2:9050`. `anon` itself is also on compose's `default`
+  network, which is its own way to the Anyone network.
+- What still works on it is everything the box needs on the box: the provider
+  and the connector reach each other and the publisher by name, the provider
+  reaches the daemon's control port and the docker socket (a mounted file, not
+  a network peer), the daemon's hidden service reaches the connector at
+  `172.30.2.3`, and the daemon reaches a lease at the network's gateway
+  `172.30.2.1`. That last one needs `hidden-firewall.sh`: docker forwards it
+  to the lease's forwarder on another bridge, out of an internal network,
+  which docker's own isolation drops; the script accepts exactly the daemon's
+  address, to that gateway, on the lease ranges, and nothing else on the
+  network.
+- **`127.0.0.1:4000` is held by `connector-loopback`.** Docker publishes no
+  port of a container whose only network is internal, and says nothing about
+  it. So a small relay (nginx's `stream`, pinned by digest) on both `default`
+  and the hidden network publishes the connector's loopback port and relays
+  it to `172.30.2.3:4000`, and only there. `bootstrap.sh` (the sealing key),
+  `auto-apply.sh` (`GET /ilp`) and `ssh -L 4000:127.0.0.1:4000` for the
+  dashboard work as before. `bootstrap.sh` starts it beside the connector for
+  the sealing-key read.
+- **A self-hosted settlement node must be on the hidden network** (below),
+  because it is dialled directly and nothing else is reachable.
+- **Upgrading a box brought up before this.** `docker compose up` (and so
+  `auto-apply.sh`) sees that `toon-provider-hidden` is now `internal`,
+  recreates the network and the containers on it, and moves the loopback port
+  from the connector to the relay by itself. Expect the connector, the
+  provider and the publisher to restart once.
+
+`keys.sh check-funded` runs on the host, not in these containers, and is
+unaffected: on the proxied default it asks nothing, and a self-hosted node it
+asks is on this host or the hidden network anyway.
 
 ### The settlement RPCs: through anon, or your own
 
@@ -830,13 +878,24 @@ two things per chain, and the bundle does both:
   with `rpc_via_socks_proxy = false`:
 
   ```bash
-  HIDDEN_SETTLEMENT_EVM_RPC_URL=http://10.0.0.5:8545     # Base Sepolia
-  HIDDEN_SETTLEMENT_SOLANA_RPC_URL=http://10.0.0.5:8899  # Solana devnet
+  HIDDEN_SETTLEMENT_EVM_RPC_URL=http://172.30.2.1:8545     # Base Sepolia
+  HIDDEN_SETTLEMENT_SOLANA_RPC_URL=http://172.30.2.1:8899  # Solana devnet
   ```
 
-  Either chain may be self-hosted alone. It must be on a private address the
-  connector's container can route to — `render.sh` refuses loopback, because
-  the connector is a container and its `127.0.0.1` is itself.
+  Either chain may be self-hosted alone. It must be **on the hidden network,
+  `172.30.2.0/24`**, because the connector, the provider and the publisher
+  route nowhere else (§ "Anon-only egress, enforced rather than configured"):
+  either a process on this host, named at the network's gateway `172.30.2.1`
+  (and let in by ufw from `172.30.2.0/24` on its RPC port; `bootstrap.sh`
+  opens nothing for it), or a container of yours attached to
+  `toon-provider-hidden`, named by a fixed address in the lower half (`.4` to
+  `.127`; the upper half is Docker's) or by its container name, which Docker's
+  DNS answers on that network. Not a container that only publishes its port on
+  this host: docker forwards a dial to `172.30.2.1:<port>` on to that
+  container, out of an internal network, and drops it. `render.sh` refuses any
+  other IP address: loopback, because the connector is a container and its
+  `127.0.0.1` is itself, and a private one off that network, such as another
+  machine on your LAN, because nothing on this box could reach it.
 
 **The rule covers every process on the box that dials the RPC** (spec §10),
 and here that is four: the connector, as above; the directory publisher,
@@ -901,8 +960,10 @@ and hides this box only as well as that machine is unlinkable to you.
 ### What the connector's own outbound is, on a hidden box
 
 Its client edge is reached through the daemon's hidden service; the provider
-app on the compose network; and each settlement RPC, through the daemon's
-SOCKS port by default (above) or directly to your own node. Circuit latency is
+app on the hidden network; and each settlement RPC, through the daemon's
+SOCKS port by default (above) or directly to your own node on the hidden
+network. Nothing else: the hidden network is internal, so a dial that forgot
+the proxy is refused by the network, not merely by the connector's config. Circuit latency is
 what connector ADR 0073 measured before allowing this: every wait on a
 proxied RPC is bounded, a confirmation poll that fails in transit does not end
 the wait, EVM nonces are read from `pending`, and the boot reads before it
@@ -983,9 +1044,13 @@ curl --socks5-hostname 127.0.0.1:9050 http://<HIDDEN_ADDRESS>/ilp/identity
   address to them), and docker's rules run ahead of ufw. A tenant who found
   its own workload answering at this box's IP would have found the box. So
   `hidden-firewall.sh` drops, in DOCKER-USER, every connection to both ranges
-  forwarded in from outside, and ufw lets the daemon's pinned address, and
-  nothing else, reach them from inside. The unit re-applies it after every
-  boot and docker restart, which leave DOCKER-USER empty.
+  forwarded in from outside, and lets the daemon's pinned address, and
+  nothing else, reach them from inside: it dials a lease at the hidden
+  network's gateway, which docker 29 forwards to the lease's forwarder out of
+  that internal network, so DOCKER-USER accepts exactly that dial and its
+  replies ahead of everything else (ufw allows the same address for a docker
+  that hands it to docker-proxy on INPUT instead). The unit re-applies it
+  after every boot and docker restart, which leave DOCKER-USER empty.
 - **`br_netfilter`.** With it loaded (`net.bridge.bridge-nf-call-iptables =
   1`), Docker's isolation of the internal egress network drops every
   transparently proxied packet; `hidden-firewall.sh` then accepts
@@ -994,7 +1059,8 @@ curl --socks5-hostname 127.0.0.1:9050 http://<HIDDEN_ADDRESS>/ilp/identity
 - **SSH stays on port 22 of the real address.** That is the operator's way
   in, and it is not in anything a tenant is told. Moving it behind an anon
   address of its own is possible and not done here.
-- **The two pinned networks**, `172.30.2.0/24` and `10.204.0.0/24`. A
+- **The two pinned networks**, `172.30.2.0/24` and `10.204.0.0/24`, both
+  `internal`. A
   collision shows up at `up` as "Pool overlaps"; moving one means changing
   it in `docker-compose.hidden.yml`, `anon/anonrc` and
   `provider.toml.template` together, and `tests/deploy_bundle.rs` checks the
@@ -1098,6 +1164,28 @@ failed closed and dialled nothing direct. The public render loads in the same
 image, and the previous pin (`rust-2026.09.11.1`) refuses the hidden one at
 `[settlement.evm]`. Connector ADR 0073 has the measurements of settlement
 over real Anyone circuits.
+
+Anon-only egress (TOON_Network#181): `cargo test --test hidden_internal_net
+-- --ignored` resolves this overlay with `docker compose config`, builds the
+networks it declares (one subnet over, so it runs beside a real hidden box),
+and stands a `curl` probe in for the connector, the provider and the
+publisher, each on exactly the networks the overlay gives that service. From
+each, a direct dial to `https://1.1.1.1` and to `https://example.com` fails,
+while a probe on compose's `default` network dials the same directly; through
+a real daemon's SOCKS port each reaches `https://example.com` over the real
+Anyone network; and the relay, run from the overlay's own image and command,
+carries a host loopback port through to a stand-in at the connector's
+address. Putting `default` back on the provider fails it on the direct dial.
+The upgrade path (a non-internal network made `internal`, the loopback
+publish moved from one container to the relay) was run with `docker compose
+up` on a scratch project. The daemon's dial to a lease was run in an
+isolated dind (docker 29.8.1) with `hidden-firewall.sh` itself: on the
+internal network, the daemon's address reaches a published lease port at the
+gateway and another address on the same network does not, and neither has a
+direct route out. The same dind showed the dial timing out on the network as
+it was before, non-internal, under the previous `hidden-firewall.sh`: docker
+29 forwards it rather than handing it to docker-proxy, and rule 1 dropped it. Not run: the real connector, provider and
+publisher booted on the internal network, which needs funded keys.
 
 **Not run end to end:** a hidden box of this bundle booted against the
 devnet over real circuits (connector and publisher on the proxied preset),

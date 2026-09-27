@@ -90,8 +90,10 @@ ufw default allow outgoing
 ufw allow 22/tcp  comment 'SSH'
 if [ "$HIDDEN" = 1 ]; then
   # The anon daemon, and only it, reaches a lease's ports: it dials them at
-  # the hidden network's gateway, through docker-proxy, so they arrive on
-  # INPUT, where this is the one allowance. 172.30.2.2 is its pinned address
+  # the hidden network's gateway. Where docker hands that to docker-proxy it
+  # arrives on INPUT, and this is the one allowance; docker 29 forwards it
+  # instead, and hidden-firewall.sh's rule 0 is the allowance there
+  # (TOON_Network#181). 172.30.2.2 is its pinned address
   # (docker-compose.hidden.yml); the ranges are the public box's, below.
   ufw allow proto tcp from 172.30.2.2 to any port 40000:40099 comment 'anon -> lease SSH forwards'
   ufw allow proto tcp from 172.30.2.2 to any port 41000:42599 comment 'anon -> lease published ports'
@@ -220,7 +222,16 @@ if [ -z "${CONNECTOR_SEAL_KEY:-}" ]; then
   # provider config at /etc/toon-provider/provider.toml: Is a directory", the
   # dependency gate fails, and the connector never starts at all. Only the
   # connector is wanted here; the app comes up in step 7 with its config.
-  docker compose up -d --no-deps provider-connector
+  #
+  # On a hidden box, with the relay that holds its loopback port: the
+  # connector is on an internal network alone there, where docker publishes
+  # no port, so 127.0.0.1:4000 below is connector-loopback's
+  # (docker-compose.hidden.yml, TOON_Network#181).
+  if [ "$HIDDEN" = 1 ]; then
+    docker compose up -d --no-deps provider-connector connector-loopback
+  else
+    docker compose up -d --no-deps provider-connector
+  fi
 
   echo "    waiting for the connector to answer GET /ilp/identity"
   for _ in $(seq 1 40); do
