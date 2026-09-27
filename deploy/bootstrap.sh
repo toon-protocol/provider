@@ -265,6 +265,9 @@ echo "==> [7/9] Pull and start"
 # checkout instead (README § "How updates arrive").
 ./pull-images.sh
 docker compose up -d
+# A container pinned to an address can come back from `up -d` without it
+# (pin-addresses.sh says when, and why); this puts it back.
+./pin-addresses.sh
 
 echo "==> [8/9] TLS"
 if [ "$HIDDEN" = 1 ]; then

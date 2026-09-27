@@ -194,6 +194,16 @@ if ! docker compose "${COMPOSE[@]}" up -d; then
   echo "FAILED: 'docker compose up -d' failed for ${REMOTE:0:7} (its message is above)." >&2
   exit 1
 fi
+# An update that changes a network's own config (TOON_Network#181 made the
+# hidden one `internal`) reconnects a pinned container WITHOUT its address,
+# and on a hidden box that leaves anon unable to bind its SOCKS port.
+# pin-addresses.sh recreates exactly the services that drifted. Before the
+# health waits, so they wait on the recreated containers.
+if ! ./pin-addresses.sh; then
+  echo "FAILED: pin-addresses.sh could not put the pinned addresses back for ${REMOTE:0:7}" >&2
+  echo "(its message is above)." >&2
+  exit 1
+fi
 
 # A service must reach `healthy`. Docker resets Health.Status to `starting` on
 # restart, so calling this right after a restart cannot read a stale `healthy`.
