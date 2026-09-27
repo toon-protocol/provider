@@ -400,6 +400,50 @@ pub fn render_outcome(channel: &ChannelEarnings, outcome: &Outcome, keyid: &str)
     }
 }
 
+/// An estimated gas cost for each chain `candidates` are on.
+///
+/// A Hidden Provider's EVM RPC is the one its config names, by the route it
+/// names (spec §10, ADR 0030): a public one only through anon, on the EVM
+/// settlement circuit. Anywhere else, `evm_rpc_url` (`--evm-rpc-url` or its
+/// env var). Shared by `redeem` and `dash`.
+pub async fn estimates(
+    config: Option<&crate::provider::ProviderConfig>,
+    evm_rpc_url: Option<&str>,
+    candidates: &[ChannelEarnings],
+) -> BTreeMap<Chain, Estimate> {
+    let hidden = config.is_some_and(|c| c.hidden);
+    let evm_rpc = match config
+        .filter(|c| c.hidden)
+        .and_then(|c| c.anon.settlement.evm.as_ref().map(|rpc| (c, rpc)))
+    {
+        Some((config, rpc)) => Some(SettlementRpcRoute::of(
+            rpc,
+            config.anon.socks_proxy.as_deref(),
+            SettlementChain::Evm,
+        )),
+        None => evm_rpc_url.map(|url| Ok(SettlementRpcRoute::direct(url))),
+    };
+    let mut estimates = BTreeMap::new();
+    let chains: BTreeSet<Chain> = candidates.iter().map(|c| chain_of(&c.channel_id)).collect();
+    for chain in chains {
+        // A route that cannot be built is an estimate nobody asked for, never
+        // a direct dial and never a reason to stop redeeming.
+        let estimated = match (&evm_rpc, chain) {
+            (Some(Err(e)), Chain::Evm) => Estimate::Unknown(format!("not asked: {e:#}")),
+            _ => {
+                estimate(
+                    chain,
+                    evm_rpc.as_ref().and_then(|r| r.as_ref().ok()),
+                    hidden,
+                )
+                .await
+            }
+        };
+        estimates.insert(chain, estimated);
+    }
+    estimates
+}
+
 /// Read the operator key from stdin: at a prompt with echo off when stdin
 /// is a terminal, else the first line of what is piped in. Read through an
 /// unbuffered handle, so no copy is left in std's stdin buffer.
@@ -437,7 +481,6 @@ pub async fn run(config_path: &str, args: &RedeemArgs) -> Result<i32> {
     } else {
         None
     };
-    let hidden = config.as_ref().is_some_and(|c| c.hidden);
     let base = match &config {
         Some(config) => connector_operator_url(config, args.connector.as_deref()),
         None => match args.connector.as_deref().map(str::trim) {
@@ -469,42 +512,7 @@ pub async fn run(config_path: &str, args: &RedeemArgs) -> Result<i32> {
     }
     let candidates = select::redeemable(&earnings.channels);
 
-    // A Hidden Provider's EVM RPC is the one its config names, by the route
-    // it names (spec §10, ADR 0030): a public one only through anon, on the
-    // EVM settlement circuit. Anywhere else, the flag or its env var.
-    let evm_rpc = match config
-        .as_ref()
-        .filter(|c| c.hidden)
-        .and_then(|c| c.anon.settlement.evm.as_ref().map(|rpc| (c, rpc)))
-    {
-        Some((config, rpc)) => Some(SettlementRpcRoute::of(
-            rpc,
-            config.anon.socks_proxy.as_deref(),
-            SettlementChain::Evm,
-        )),
-        None => args
-            .evm_rpc_url
-            .as_deref()
-            .map(|url| Ok(SettlementRpcRoute::direct(url))),
-    };
-    let mut estimates = BTreeMap::new();
-    let chains: BTreeSet<Chain> = candidates.iter().map(|c| chain_of(&c.channel_id)).collect();
-    for chain in chains {
-        // A route that cannot be built is an estimate nobody asked for, never
-        // a direct dial and never a reason to stop redeeming.
-        let estimated = match (&evm_rpc, chain) {
-            (Some(Err(e)), Chain::Evm) => Estimate::Unknown(format!("not asked: {e:#}")),
-            _ => {
-                estimate(
-                    chain,
-                    evm_rpc.as_ref().and_then(|r| r.as_ref().ok()),
-                    hidden,
-                )
-                .await
-            }
-        };
-        estimates.insert(chain, estimated);
-    }
+    let estimates = estimates(config.as_ref(), args.evm_rpc_url.as_deref(), &candidates).await;
     print!("{}", render_table(&base, &candidates, &estimates));
     if candidates.is_empty() || args.list {
         return Ok(0);

@@ -1,0 +1,44 @@
+---
+source: tests/dash.rs
+expression: "frame(&app_with(\"provider_down\"))"
+---
+ toon-provider dash ── ● 1 problem ── as of 22:14:20 UTC, every 60s
+┌ NEEDS A PERSON ──────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│PROBLEM provider: GET http://127.0.0.1:9/operator/status failed: error sending request for url                        │
+│(http://127.0.0.1:9/operator/status): client error (Connect): tcp connect error: Connection refused (os error 111) —  │
+│is the provider running?                                                                                              │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌ IDENTITY ────────────────────────────────────────────────┐┌ DIRECTORY ───────────────────────────────────────────────┐
+│unavailable: GET http://127.0.0.1:9/operator/status       ││unavailable: GET http://127.0.0.1:9/operator/status       │
+│failed: error sending request for url                     ││failed: error sending request for url                     │
+│(http://127.0.0.1:9/operator/status): client error        ││(http://127.0.0.1:9/operator/status): client error        │
+│(Connect): tcp connect error: Connection refused (os error││(Connect): tcp connect error: Connection refused (os error│
+│111) — is the provider running?                           ││111) — is the provider running?                           │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+┌ PUBLISHER ───────────────────────────────────────────────┐┌ LEASES ──────────────────────────────────────────────────┐
+│channel       PubChanne1111111111111111111111111111111111 ││unavailable: GET http://127.0.0.1:9/operator/status       │
+│on solana                                                 ││failed: error sending request for url                     │
+│deposit       10000000   spent 2981   remaining 9997019   ││(http://127.0.0.1:9/operator/status): client error        │
+│(token base units)                                        ││(Connect): tcp connect error: Connection refused (os error│
+│runway        14d at the current Liveness cadence         ││111) — is the provider running?                           │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+┌ EARNINGS ────────────────────────────────────────────────┐┌ FUNDING ─────────────────────────────────────────────────┐
+│0xabababab…ababab (open): claimed 3400, redeemed 1000,    ││settlement    9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin│
+│unredeemed 2400; last redeemed 10m ago                    ││holds 1.5 SOL (read from                                  │
+│2aEVJ8koKD…zQ7Rip: claimed 600, redeemed 0, unredeemed    ││https://solana-rpc.fixture.example)                       │
+│600; last redeemed not since the connector started        ││                                                          │
+│total unredeemed 3000 (token base units)                  ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+ r redeem  t top up  u refresh  Tab pane  j/k scroll  q quit

@@ -9,6 +9,7 @@ pub mod anon_control;
 pub mod capabilities;
 pub mod clock;
 pub mod compute;
+pub mod dash;
 pub mod directory;
 pub mod dns_shim;
 pub mod docker;

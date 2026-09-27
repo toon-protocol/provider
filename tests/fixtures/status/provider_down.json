@@ -1,0 +1,76 @@
+{
+  "check": {
+    "ok": false,
+    "problems": [
+      "provider: GET http://127.0.0.1:9/operator/status failed: error sending request for url (http://127.0.0.1:9/operator/status): client error (Connect): tcp connect error: Connection refused (os error 111) — is the provider running?"
+    ],
+    "warnings": []
+  },
+  "directory": {
+    "error": "GET http://127.0.0.1:9/operator/status failed: error sending request for url (http://127.0.0.1:9/operator/status): client error (Connect): tcp connect error: Connection refused (os error 111) — is the provider running?",
+    "url": "http://127.0.0.1:9/operator/status"
+  },
+  "earnings": {
+    "audit_error": null,
+    "channels": [
+      {
+        "channel_id": "0xabababababababababababababababababababababababababababababababab",
+        "claimed": "3400",
+        "counterparty": "0x1111111111111111111111111111111111111111",
+        "deposited": "5000000",
+        "last_redeemed_at": 1699999460,
+        "redeemed": "1000",
+        "status": "open",
+        "unredeemed": "2400"
+      },
+      {
+        "channel_id": "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip",
+        "claimed": "600",
+        "counterparty": null,
+        "deposited": null,
+        "last_redeemed_at": null,
+        "redeemed": "0",
+        "status": null,
+        "unredeemed": "600"
+      }
+    ],
+    "dashboard_url": "https://proxy.provider.fixture.example/dashboard",
+    "error": null,
+    "total_unredeemed": "3000",
+    "url": "http://provider-connector:4000"
+  },
+  "funding": {
+    "address": "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin",
+    "chain": "solana",
+    "error": null,
+    "lamports": 1500000000,
+    "rpc": "https://solana-rpc.fixture.example",
+    "sol": "1.5"
+  },
+  "generated_at": 1700000060,
+  "identity": {
+    "error": "GET http://127.0.0.1:9/operator/status failed: error sending request for url (http://127.0.0.1:9/operator/status): client error (Connect): tcp connect error: Connection refused (os error 111) — is the provider running?",
+    "url": "http://127.0.0.1:9/operator/status"
+  },
+  "leases": {
+    "error": "GET http://127.0.0.1:9/operator/status failed: error sending request for url (http://127.0.0.1:9/operator/status): client error (Connect): tcp connect error: Connection refused (os error 111) — is the provider running?",
+    "url": "http://127.0.0.1:9/operator/status"
+  },
+  "publisher": {
+    "assumptions": [
+      "runway = remaining ÷ (price per write × writes per cadence)"
+    ],
+    "chain": "solana",
+    "channelId": "PubChanne1111111111111111111111111111111111",
+    "deposit": "10000000",
+    "error": null,
+    "remaining": "9997019",
+    "runway_s": 1209600,
+    "signedCeiling": "2981",
+    "spent": "2981",
+    "url": "http://directory-publisher:8081/status",
+    "watermarkUncertain": false
+  },
+  "service": "provider",
+  "version": 1
+}

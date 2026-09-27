@@ -10,7 +10,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
 
-use super::{StatusArgs, SOURCE_TIMEOUT};
+use super::{ReportArgs, SOURCE_TIMEOUT};
 use crate::outbound_proxy::{is_private_url, SettlementChain, SettlementRpcRoute};
 use crate::provider::operator_status::{OperatorStatus, OPERATOR_STATUS_VERSION};
 use crate::provider::ProviderConfig;
@@ -45,7 +45,7 @@ pub struct Sources {
 }
 
 impl Sources {
-    pub fn from_config(config: &ProviderConfig, args: &StatusArgs) -> Self {
+    pub fn from_config(config: &ProviderConfig, args: &ReportArgs) -> Self {
         let hidden = config.hidden;
         // A Hidden Provider dials nothing public directly: every source it
         // asks here must be on this box's own private network, which is

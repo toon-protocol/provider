@@ -1168,6 +1168,16 @@ settlement key under `--min-sol` (0.005 SOL)). Where it finds each source, and
 the timer that runs the check, are in
 [deploy/README.md](deploy/README.md#is-it-working-toon-provider-status).
 
+**`toon-provider dash`** is a full-screen view over the same report: six
+panes in the same order, read again on the Liveness cadence, with whatever
+`--check` would fail on in red, in the terminal's ANSI colours only (the
+Console's rule, ADR 0028). From it, `r` redeems earnings (the channels
+`redeem` offers, the operator key typed into a field that never shows it and
+held in memory only) and `t` tops up the publisher, each only after `y` then
+Enter. Its rendering is snapshot-tested from `status --json --check`
+fixtures under `tests/fixtures/status/`, which `tests/status_cli.rs`
+generates from the real `gather` and `to_json`.
+
 ## Availability and image policy
 
 `POST /availability` (free, unsigned) answers whether a spawn would run,
