@@ -407,7 +407,11 @@ fn channel_index_from_block_matches_the_chain_preset_and_can_be_overridden() {
         "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     );
     let render = run_render(&env, Some(ACME_LISTINGS), None, &[]);
-    assert!(render.ok, "render.sh refused the mainnet preset:\n{}", render.stderr);
+    assert!(
+        render.ok,
+        "render.sh refused the mainnet preset:\n{}",
+        render.stderr
+    );
     let connector: toml::Value = toml::from_str(&render.read("connector.toml")).unwrap();
     assert_eq!(
         connector["settlement"]["evm"]["channel_index_from_block"].as_integer(),
