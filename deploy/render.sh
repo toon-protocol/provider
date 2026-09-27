@@ -88,6 +88,51 @@ set -a; . ./.env; set +a
 : "${SETTLEMENT_SOLANA_DECIMALS:?set SETTLEMENT_SOLANA_DECIMALS in .env (.env.example has the devnet preset)}"
 LISTINGS_FILE=${LISTINGS_FILE:-listings.toml}
 
+# ── The EVM channel index's cold-start block (TOON_Network#182) ─────────────
+# [settlement.evm] channel_index_from_block (connector issue #661) is the
+# block the connector's local ChannelOpened/ChannelNewDeposit/ChannelSettled
+# index backfills from on a cold start with no checkpoint. It defaults to 0,
+# and a public RPC that prunes history (base-sepolia-rpc.publicnode.com, this
+# preset's default, prunes below block 46000000) refuses a request for block
+# 0 outright — the index never warms up, and every channel lookup falls back
+# to a direct chain read for good.
+#
+# So this bundle picks the right value FOR THE PRESET'S CHAIN, the same way
+# the connector's own deployment records do:
+#
+#   evm:84532 (Base Sepolia)  47285026 — the live TokenNetwork's deploy
+#                             block (connector
+#                             packages/contracts/deployments/base-sepolia.md)
+#   evm:8453  (Base mainnet)  50745815 — connector
+#                             packages/contracts/deployments/base-mainnet.md
+#   anything else             SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK in
+#                             .env, required: this bundle does not know a
+#                             custom chain's TokenNetwork deploy block, and
+#                             guessing one would be worse than refusing to
+#                             start.
+case "$SETTLEMENT_EVM_CHAIN_ID" in
+  84532) SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK=${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK:-47285026} ;;
+  8453) SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK=${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK:-50745815} ;;
+  *)
+    if [ -z "${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK:-}" ]; then
+      echo "SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK is not set in .env." >&2
+      echo "SETTLEMENT_EVM_CHAIN_ID=${SETTLEMENT_EVM_CHAIN_ID} has no built-in preset, so this" >&2
+      echo "bundle does not know that chain TokenNetwork deploy block. Find it the way" >&2
+      echo "connector docs/protocol/configuration-spec.md and" >&2
+      echo "packages/contracts/deployments/*.md describe it, or the connector will backfill" >&2
+      echo "its channel index from genesis against whatever RPC you name." >&2
+      exit 1
+    fi
+    ;;
+esac
+case "$SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK" in
+  '' | *[!0-9]*)
+    echo "SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK=${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK} is not a non-negative integer." >&2
+    exit 1
+    ;;
+esac
+export SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK
+
 case "${HIDDEN:-0}" in
   0 | '') HIDDEN=0 ;;
   1) ;;
@@ -396,7 +441,7 @@ grep -q '^\[\[routes\]\]$' "$WORK/routes.toml" || {
   exit 1
 }
 
-envsubst '${NODE_HTTP_ENDPOINT} ${NODE_BTP_ENDPOINT} ${ILP_ADDRESS} ${SETTLEMENT_EVM_RPC_URL} ${SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY} ${SETTLEMENT_EVM_REGISTRY} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_SOLANA_RPC_URL} ${SETTLEMENT_SOLANA_RPC_VIA_SOCKS_PROXY} ${SETTLEMENT_SOLANA_PROGRAM_ID} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS}' \
+envsubst '${NODE_HTTP_ENDPOINT} ${NODE_BTP_ENDPOINT} ${ILP_ADDRESS} ${SETTLEMENT_EVM_RPC_URL} ${SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY} ${SETTLEMENT_EVM_REGISTRY} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK} ${SETTLEMENT_SOLANA_RPC_URL} ${SETTLEMENT_SOLANA_RPC_VIA_SOCKS_PROXY} ${SETTLEMENT_SOLANA_PROGRAM_ID} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS}' \
   < connector.toml.template | select_blocks connector.toml.template \
   | splice '# @render: routes' "$WORK/routes.toml" > "$WORK/connector.toml"
 

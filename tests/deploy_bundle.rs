@@ -378,6 +378,67 @@ fn the_profile_advertises_what_the_connector_actually_settles() {
 }
 
 #[test]
+fn channel_index_from_block_matches_the_chain_preset_and_can_be_overridden() {
+    // TOON_Network#182: [settlement.evm] channel_index_from_block (connector
+    // issue #661) defaults to 0, and a cold connector against a public RPC
+    // that prunes history refuses to backfill from genesis. render.sh must
+    // pick the right value for the preset's chain id, and let an operator on
+    // a chain this bundle does not know override it.
+    let connector: toml::Value = toml::from_str(&rendered_connector_toml()).unwrap();
+    assert_eq!(
+        connector["settlement"]["evm"]["channel_index_from_block"].as_integer(),
+        Some(47_285_026),
+        "the devnet preset (Base Sepolia, evm:84532) should backfill from its live \
+         TokenNetwork's deploy block (connector packages/contracts/deployments/base-sepolia.md), \
+         not scan from genesis into base-sepolia-rpc.publicnode.com's pruned history"
+    );
+
+    // Base mainnet preset: connector packages/contracts/deployments/base-mainnet.md
+    // records channel_index_from_block = 50745815 for the same reason.
+    let mut env = acme_env();
+    env.insert("SETTLEMENT_EVM_CHAIN_ID", "8453");
+    env.insert("SETTLEMENT_EVM_RPC_URL", "https://mainnet.base.org");
+    env.insert(
+        "SETTLEMENT_EVM_REGISTRY",
+        "0x61d31e7Fd9a57A0611e29Bd7eB162f15AC8B3427",
+    );
+    env.insert(
+        "SETTLEMENT_EVM_TOKEN",
+        "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    );
+    let render = run_render(&env, Some(ACME_LISTINGS), None, &[]);
+    assert!(
+        render.ok,
+        "render.sh refused the mainnet preset:\n{}",
+        render.stderr
+    );
+    let connector: toml::Value = toml::from_str(&render.read("connector.toml")).unwrap();
+    assert_eq!(
+        connector["settlement"]["evm"]["channel_index_from_block"].as_integer(),
+        Some(50_745_815),
+        "the Base mainnet preset should backfill from the block base-mainnet.md records"
+    );
+
+    // A chain this bundle has no preset for gets an explicit env override
+    // rather than a made-up default — and without one, refuses to scan from
+    // an unstated genesis.
+    let mut env = acme_env();
+    env.insert("SETTLEMENT_EVM_CHAIN_ID", "31337");
+    env.insert("SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK", "123456");
+    let render = run_render(&env, Some(ACME_LISTINGS), None, &[]);
+    assert!(
+        render.ok,
+        "render.sh refused a custom chain's override:\n{}",
+        render.stderr
+    );
+    let connector: toml::Value = toml::from_str(&render.read("connector.toml")).unwrap();
+    assert_eq!(
+        connector["settlement"]["evm"]["channel_index_from_block"].as_integer(),
+        Some(123_456)
+    );
+}
+
+#[test]
 fn every_credential_the_connector_reads_is_a_path() {
     let connector = rendered_connector_toml();
     for path in [

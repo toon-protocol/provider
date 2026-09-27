@@ -124,13 +124,26 @@ key_file = "/app/data/signer.key"
 #
 # provider.toml's [anon.settlement.*] carries the same two values, so the
 # app's hiding gate judges exactly what is written here.
+#
+# `channel_index_from_block` (connector issue #661) is the block the local
+# ChannelOpened/ChannelNewDeposit/ChannelSettled index backfills from on a
+# cold start with no checkpoint. It defaults to 0, and this preset's public
+# RPC prunes history well short of genesis, so a cold connector would ask for
+# a block the RPC has already discarded and never warm the index up
+# (TOON_Network#182). render.sh picks the right value for the preset named by
+# SETTLEMENT_EVM_CHAIN_ID (the connector's own deployment records —
+# packages/contracts/deployments/base-sepolia.md and base-mainnet.md — name
+# the block for Base Sepolia and Base mainnet); a chain it does not know
+# reads SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK from .env instead, required
+# in that case. See deploy/README.md § "channel_index_from_block".
 
 [settlement.evm]
-rpc_url             = "${SETTLEMENT_EVM_RPC_URL}"
-rpc_via_socks_proxy = ${SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY}
-contract_address    = "${SETTLEMENT_EVM_REGISTRY}"  # TokenNetworkRegistry
-token_address       = "${SETTLEMENT_EVM_TOKEN}"
-decimals            = ${SETTLEMENT_EVM_DECIMALS}
+rpc_url                  = "${SETTLEMENT_EVM_RPC_URL}"
+rpc_via_socks_proxy      = ${SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY}
+contract_address         = "${SETTLEMENT_EVM_REGISTRY}"  # TokenNetworkRegistry
+token_address            = "${SETTLEMENT_EVM_TOKEN}"
+decimals                 = ${SETTLEMENT_EVM_DECIMALS}
+channel_index_from_block = ${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK}
 
 [settlement.evm.key]
 key_file = "/app/data/settlement.key"

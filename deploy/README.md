@@ -310,6 +310,40 @@ the component's own on fixed keys:
 Once the node is up, `GET /ilp` serves the connector's two addresses as well,
 after the connector has proved each of them against a live chain.
 
+## `channel_index_from_block`: skip the genesis scan
+
+`[settlement.evm]`'s local channel index (connector issue #661) backfills
+`ChannelOpened`/`ChannelNewDeposit`/`ChannelSettled` logs from
+`channel_index_from_block` on a cold start with no checkpoint, so that
+resolving a channel is a map hit instead of an RPC call. Left unset, that
+field defaults to `0` — and a public RPC that prunes history (this preset's
+`base-sepolia-rpc.publicnode.com` prunes below block 46000000) refuses a
+request for block `0` outright, so a cold connector never warms the index up
+and pays a direct chain read for every channel lookup instead
+(TOON_Network#182).
+
+`render.sh` sets it for you, from `SETTLEMENT_EVM_CHAIN_ID`:
+
+| `SETTLEMENT_EVM_CHAIN_ID` | `channel_index_from_block` | Source |
+| ------------------------- | --------------------------- | ------ |
+| `84532` (Base Sepolia)     | `47285026`                   | connector `packages/contracts/deployments/base-sepolia.md` |
+| `8453` (Base mainnet)      | `50745815`                   | connector `packages/contracts/deployments/base-mainnet.md` |
+| anything else              | `SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK` in `.env`, required | your own `TokenNetwork`'s deploy block |
+
+Pointing `SETTLEMENT_EVM_CHAIN_ID` at a chain that is neither of the two
+presets and leaving `SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK` unset is a
+render-time refusal, not a silent scan from genesis: this bundle has no way
+to know that chain's `TokenNetwork` deploy block, and guessing one would be
+worse than asking. Find it the way connector
+`docs/protocol/configuration-spec.md` and
+`packages/contracts/deployments/*.md` describe — the block of the
+`registry.createTokenNetwork(...)` (or equivalent) transaction that created
+your `TokenNetwork` — and set it in `.env`:
+
+```bash
+SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK=12345678
+```
+
 ## Is it working? `toon-provider status`
 
 One command, on the box, answers all of it (ADR 0029):
