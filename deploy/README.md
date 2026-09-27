@@ -652,15 +652,13 @@ config it was validated against are the same commit and the box takes both with
 one fast-forward, so a build can never reach this box ahead of the config it
 needs.
 
-The current pin is `rust-sha-854d199`, the `main` build that merged
-connector#1335 (connector ADR 0073): the first connector that accepts
-`rpc_via_socks_proxy` in a `[settlement.*]` table, which this bundle now
-renders on every box (`false` on a public one, `true` by default on a hidden
-one, § "Running hidden"). An older connector refuses that key, so the pin and
-the template moved in one commit (TOON_Network#167). It is a commit build
-rather than a release handle because no release carried #1335 yet when it was
-pinned; move it to the first `rust-<handle>` release cut from `854d199` or
-later (connector ADR 0068) when there is one. The previous pin was
+The current pin is `rust-2026.09.27.1` (= `rust-sha-422129a`), the first
+connector release carrying connector#1335 (connector ADR 0073): the first
+connector that accepts `rpc_via_socks_proxy` in a `[settlement.*]` table, which
+this bundle renders on every box (`false` on a public one, `true` by default on
+a hidden one, § "Running hidden"). An older connector refuses that key, so the
+pin and the template moved in one commit (TOON_Network#167), first as the
+commit build `rust-sha-854d199` until this release was cut. Before that it was
 `rust-2026.09.11.1` (= `rust-sha-f278cd6`); the rest of the devnet fleet is
 on `rust-2026.09.11.1` or `rust-2026.08.28.1`, and this box peers with none of
 them (tenants pay it at its own client edge), so nothing here needs them to

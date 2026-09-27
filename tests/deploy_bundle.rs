@@ -795,7 +795,7 @@ fn the_firewall_opens_exactly_the_workload_ports_the_config_hands_out() {
 
 #[test]
 fn the_connector_pin_is_immutable_and_written_once() {
-    const PIN: &str = "ghcr.io/toon-protocol/connector:rust-sha-854d199";
+    const PIN: &str = "ghcr.io/toon-protocol/connector:rust-2026.09.27.1";
 
     // A dated release alias or an exact commit. Never `rust-main`, and never
     // the retired `rust-release` pointer, which is frozen on a build whose
