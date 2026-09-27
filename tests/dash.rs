@@ -19,7 +19,10 @@ use ratatui::Terminal;
 
 use toon_provider::dash::{draw, App, Effect, Modal, Update};
 use toon_provider::redeem::gas::{Chain, Estimate};
-use toon_provider::status::{from_json, Report, Section, Thresholds};
+use toon_provider::status::{
+    from_json, parse_duration, parse_sol, Report, Section, Thresholds, DEFAULT_MIN_RUNWAY,
+    DEFAULT_MIN_SOL,
+};
 
 const KEY: &str = "4242424242424242424242424242424242424242424242424242424242424242";
 const KEYID: &str = "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12";
@@ -35,8 +38,8 @@ fn fixture(name: &str) -> Report {
 /// `status`'s default thresholds: `--min-runway 7d`, `--min-sol 0.005`.
 fn thresholds() -> Thresholds {
     Thresholds {
-        min_runway_s: 7 * 86_400,
-        min_lamports: 5_000_000,
+        min_runway_s: parse_duration(DEFAULT_MIN_RUNWAY).unwrap(),
+        min_lamports: parse_sol(DEFAULT_MIN_SOL).unwrap(),
     }
 }
 
@@ -48,7 +51,11 @@ fn app_with(name: &str) -> App {
 
 fn buffer(app: &App, width: u16, height: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-    terminal.draw(|frame| draw(frame, app)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw(frame, app);
+        })
+        .unwrap();
     terminal.backend().buffer().clone()
 }
 
@@ -262,7 +269,11 @@ fn a_refresh_keeps_an_open_dialog() {
 #[test]
 fn redeem_offers_the_same_channels_as_toon_provider_redeem() {
     let mut app = app_with("healthy");
-    let Some(Effect::EstimateGas(candidates)) = press(&mut app, KeyCode::Char('r')) else {
+    let Some(Effect::EstimateGas {
+        round,
+        channels: candidates,
+    }) = press(&mut app, KeyCode::Char('r'))
+    else {
         panic!("r asks for gas estimates for the channels it offers");
     };
     let ids: Vec<&str> = candidates.iter().map(|c| c.channel_id.as_str()).collect();
@@ -274,13 +285,10 @@ fn redeem_offers_the_same_channels_as_toon_provider_redeem() {
         ]
     );
     assert!(frame(&app).contains("estimating"), "{}", frame(&app));
-    app.apply(Update::Estimates(
-        [
-            (Chain::Evm, Estimate::Unknown("no EVM RPC".into())),
-            (Chain::Solana, Estimate::Solana { lamports: 10_000 }),
-        ]
-        .into(),
-    ));
+    app.apply(Update::Estimates {
+        round,
+        estimates: estimates(),
+    });
     insta::assert_snapshot!("redeem_pick", frame(&app));
 }
 
@@ -387,6 +395,93 @@ fn nothing_to_redeem_says_why() {
     assert!(press(&mut app, KeyCode::Char('r')).is_none());
     assert!(app.modal().is_none());
     assert!(frame(&app).contains("nothing to redeem"), "{}", frame(&app));
+}
+
+fn estimates() -> std::collections::BTreeMap<Chain, Estimate> {
+    [
+        (Chain::Evm, Estimate::Unknown("no EVM RPC".into())),
+        (Chain::Solana, Estimate::Solana { lamports: 10_000 }),
+    ]
+    .into()
+}
+
+#[test]
+fn estimates_that_land_after_enter_still_reach_the_confirmation() {
+    let mut app = app_with("healthy");
+    let Some(Effect::EstimateGas { round, .. }) = press(&mut app, KeyCode::Char('r')) else {
+        panic!("r asks for estimates");
+    };
+    press(&mut app, KeyCode::Down);
+    press(&mut app, KeyCode::Char(' '));
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('y'));
+    assert!(frame(&app).contains("gas unknown"), "{}", frame(&app));
+    app.apply(Update::Estimates {
+        round,
+        estimates: estimates(),
+    });
+    let screen = frame(&app);
+    assert!(screen.contains("gas ~0.00001 SOL"), "{screen}");
+    let Some(Modal::Confirm { armed, .. }) = app.modal() else {
+        panic!("still confirming");
+    };
+    assert!(*armed, "an estimate landing does not disarm the dialog");
+}
+
+#[test]
+fn estimates_for_a_dialog_since_closed_are_not_taken_for_the_open_one() {
+    let mut app = app_with("healthy");
+    let Some(Effect::EstimateGas { round: stale, .. }) = press(&mut app, KeyCode::Char('r')) else {
+        panic!("r asks for estimates");
+    };
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Char('r'));
+    app.apply(Update::Estimates {
+        round: stale,
+        estimates: estimates(),
+    });
+    assert!(frame(&app).contains("estimating"), "{}", frame(&app));
+}
+
+#[test]
+fn ctrl_c_waits_while_money_is_moving() {
+    let mut app = app_with("healthy");
+    press(&mut app, KeyCode::Char('t'));
+    type_text(&mut app, "1");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('y'));
+    press(&mut app, KeyCode::Enter);
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert!(app.handle_key(ctrl_c).is_none());
+    assert!(frame(&app).contains("Ctrl-C waits"), "{}", frame(&app));
+    app.apply(Update::ToppedUp(Ok("{}".into())));
+    assert!(matches!(app.handle_key(ctrl_c), Some(Effect::Quit)));
+}
+
+#[test]
+fn a_pane_scrolls_no_further_than_its_last_line() {
+    let mut app = app_with("healthy");
+    press(&mut app, KeyCode::Char('2'));
+    let limits = {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut limits = None;
+        terminal
+            .draw(|frame| limits = Some(draw(frame, &app)))
+            .unwrap();
+        limits.unwrap()
+    };
+    let limit = limits[&Section::Directory];
+    assert!(
+        limit > 0,
+        "the fixture's directory does not fit: {limits:?}"
+    );
+    app.set_scroll_limits(limits);
+    for _ in 0..50 {
+        press(&mut app, KeyCode::Char('j'));
+    }
+    assert_eq!(app.scroll(Section::Directory), limit);
+    press(&mut app, KeyCode::Char('k'));
+    assert_eq!(app.scroll(Section::Directory), limit - 1);
 }
 
 // ── Top up ────────────────────────────────────────────────────────────────────

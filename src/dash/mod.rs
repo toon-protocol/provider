@@ -45,12 +45,10 @@ pub use app::{sections_of, App, Effect, Modal, Spend, Tone, Update};
 pub use view::draw;
 
 use crate::provider::ProviderConfig;
-use crate::redeem::{estimates, redeem_one, render_outcome, sign::keyid_hex, Outcome};
+use crate::redeem::{
+    estimates, redeem_one, render_outcome, sign::keyid_hex, unix_now, Outcome, REDEEM_TIMEOUT,
+};
 use crate::status::{connector_operator_url, gather, ReportArgs, Sources};
-
-/// How long one redeem may take: the connector answers only once the
-/// transaction is confirmed on chain (as `toon-provider redeem`).
-const REDEEM_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// `toon-provider dash`'s flags: where the report is read from and what it
 /// is judged by, as `status` takes them, and the EVM RPC `redeem` estimates
@@ -105,6 +103,8 @@ pub async fn run(config: &ProviderConfig, args: &DashArgs) -> Result<()> {
     let mut app = App::new(args.report.thresholds());
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
 
+    // Raw mode first, so no key is read cooked.
+    let _screen = Screen::enter()?;
     // Keys, on a thread of their own: crossterm's read blocks.
     let keys = tx.clone();
     std::thread::spawn(move || loop {
@@ -119,13 +119,16 @@ pub async fn run(config: &ProviderConfig, args: &DashArgs) -> Result<()> {
         }
     });
 
-    let _screen = Screen::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     terminal.clear()?;
 
     let mut next_refresh = tokio::time::Instant::now();
     loop {
-        terminal.draw(|frame| draw(frame, &app))?;
+        let mut limits = None;
+        terminal.draw(|frame| limits = Some(draw(frame, &app)))?;
+        if let Some(limits) = limits {
+            app.set_scroll_limits(limits);
+        }
 
         let message = tokio::select! {
             message = rx.recv() => match message {
@@ -136,7 +139,7 @@ pub async fn run(config: &ProviderConfig, args: &DashArgs) -> Result<()> {
                 // One read at a time: the next is scheduled when it lands.
                 next_refresh = far_future();
                 refresh(&sources, &tx);
-                app.refreshing = true;
+                app.start_refresh();
                 continue;
             }
         };
@@ -160,12 +163,13 @@ pub async fn run(config: &ProviderConfig, args: &DashArgs) -> Result<()> {
                 next_refresh = far_future();
                 refresh(&sources, &tx);
             }
-            Some(Effect::EstimateGas(candidates)) => {
+            Some(Effect::EstimateGas { round, channels }) => {
                 let (config, evm_rpc_url, tx) =
                     (config.clone(), args.evm_rpc_url.clone(), tx.clone());
                 tokio::spawn(async move {
-                    let e = estimates(Some(&config), evm_rpc_url.as_deref(), &candidates).await;
-                    let _ = tx.send(Message::Update(Update::Estimates(e)));
+                    let estimates =
+                        estimates(Some(&config), evm_rpc_url.as_deref(), &channels).await;
+                    let _ = tx.send(Message::Update(Update::Estimates { round, estimates }));
                 });
             }
             Some(Effect::Redeem { channels, key }) => {
@@ -251,11 +255,4 @@ fn client(timeout: Duration) -> Result<reqwest::Client> {
 
 fn far_future() -> tokio::time::Instant {
     tokio::time::Instant::now() + Duration::from_secs(365 * 86_400)
-}
-
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }

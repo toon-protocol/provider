@@ -17,7 +17,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, Modal, Tone};
+use std::collections::BTreeMap;
+
+use super::app::{plural, App, Modal, Tone, KEY_HEX};
 use crate::redeem::gas::{chain_of, Estimate};
 use crate::status::{abbreviate, format_duration, section_text, Section};
 
@@ -31,7 +33,9 @@ const MAX_FINDINGS: usize = 6;
 /// screen; otherwise it takes up to a third of it.
 const MIN_FINDINGS_ROWS: u16 = 4;
 
-pub fn draw(frame: &mut Frame, app: &App) {
+/// Draw one frame, and answer how far each pane can scroll: the rows of it
+/// that did not fit, for `App::set_scroll_limits`.
+pub fn draw(frame: &mut Frame, app: &App) -> BTreeMap<Section, u16> {
     let area = frame.area();
     let findings = findings_box(findings(app));
     let findings_height = match &findings {
@@ -52,19 +56,21 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if let Some(findings) = findings {
         frame.render_widget(findings, findings_area);
     }
-    if app.report().is_some() {
-        draw_panes(frame, panes, app);
+    let limits = if app.report().is_some() {
+        draw_panes(frame, panes, app)
     } else {
         frame.render_widget(
             Paragraph::new("  reading the status…").block(Block::default().borders(Borders::ALL)),
             panes,
         );
-    }
+        BTreeMap::new()
+    };
     draw_footer(frame, footer, app);
 
     if let Some(modal) = app.modal() {
         draw_modal(frame, area, modal);
     }
+    limits
 }
 
 fn draw_title(frame: &mut Frame, area: Rect, app: &App) {
@@ -92,7 +98,7 @@ fn draw_title(frame: &mut Frame, area: Rect, app: &App) {
                 format!(
                     "● {} problem{}",
                     outcome.problems.len(),
-                    if outcome.problems.len() == 1 { "" } else { "s" }
+                    plural(outcome.problems.len())
                 ),
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )
@@ -103,7 +109,7 @@ fn draw_title(frame: &mut Frame, area: Rect, app: &App) {
             app.cadence_s()
         )));
     }
-    if app.refreshing {
+    if app.refreshing() {
         spans.push(Span::styled(
             "── refreshing… ",
             Style::default().add_modifier(Modifier::DIM),
@@ -157,7 +163,7 @@ fn findings_box(mut lines: Vec<Line<'static>>) -> Option<Paragraph<'static>> {
     )
 }
 
-fn draw_panes(frame: &mut Frame, area: Rect, app: &App) {
+fn draw_panes(frame: &mut Frame, area: Rect, app: &App) -> BTreeMap<Section, u16> {
     let report = app.report().expect("drawn only once there is a report");
     let cells: Vec<Rect> = if area.width >= TWO_COLUMNS_FROM {
         let rows = Layout::default()
@@ -181,6 +187,7 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &App) {
             .to_vec()
     };
 
+    let mut limits = BTreeMap::new();
     for (section, cell) in Section::ALL.into_iter().zip(cells) {
         let tone = app.tone(section);
         let border = match tone {
@@ -188,7 +195,7 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &App) {
             Tone::Warning => Style::default().fg(Color::Yellow),
             Tone::Fine => Style::default(),
         };
-        let focused = app.focus == section;
+        let focused = app.focus() == section;
         let title_style = if focused {
             border.add_modifier(Modifier::BOLD | Modifier::REVERSED)
         } else {
@@ -198,9 +205,11 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &App) {
             .lines()
             .map(|l| styled_line(l.strip_prefix("  ").unwrap_or(l)))
             .collect();
-        let scroll = app.scroll.get(&section).copied().unwrap_or(0);
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
         let rows = paragraph.line_count(cell.width.saturating_sub(2)) as u16;
+        let limit = rows.saturating_sub(cell.height.saturating_sub(2));
+        limits.insert(section, limit);
+        let scroll = app.scroll(section).min(limit);
         let mut block = Block::default()
             .borders(Borders::ALL)
             .border_style(border)
@@ -211,6 +220,7 @@ fn draw_panes(frame: &mut Frame, area: Rect, app: &App) {
         }
         frame.render_widget(paragraph.block(block).scroll((scroll, 0)), cell);
     }
+    limits
 }
 
 /// One of `status`'s lines, coloured by what it says: what `--check` fails
@@ -256,7 +266,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_modal(frame: &mut Frame, area: Rect, modal: &Modal) {
-    let (title, lines, tone): (&str, Vec<Line>, Color) = match modal {
+    let (title, lines, border): (&str, Vec<Line>, Color) = match modal {
         Modal::RedeemPick {
             candidates,
             picked,
@@ -307,15 +317,14 @@ fn draw_modal(frame: &mut Frame, area: Rect, modal: &Modal) {
                 "picked: {total} token base units. Gas is an estimate, paid by the connector's \
                  settlement key in the chain's own coin, not out of the channel."
             )));
-            if let Some(Some(basis)) = estimates.as_ref().map(|e| {
-                (!e.is_empty()).then(|| {
-                    e.iter()
-                        .map(|(chain, est)| format!("gas, {chain}: {}", est.basis()))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                })
-            }) {
-                lines.push(Line::raw(basis));
+            // How each chain's gas was estimated, once it has been.
+            let basis: Vec<String> = estimates
+                .iter()
+                .flatten()
+                .map(|(chain, est)| format!("gas, {chain}: {}", est.basis()))
+                .collect();
+            if !basis.is_empty() {
+                lines.push(Line::raw(basis.join("; ")));
             }
             push_error(&mut lines, error.as_deref());
             lines.push(keys(&[
@@ -369,7 +378,7 @@ fn draw_modal(frame: &mut Frame, area: Rect, modal: &Modal) {
                     "The operator key signs {} redeem{}: 64 hex characters, the private half \
                      `./keys.sh init` printed.",
                     channels.len(),
-                    if channels.len() == 1 { "" } else { "s" }
+                    plural(channels.len())
                 )),
                 Line::raw(
                     "It is held in memory until the redeems are sent, then wiped; it is never \
@@ -377,8 +386,8 @@ fn draw_modal(frame: &mut Frame, area: Rect, modal: &Modal) {
                 ),
                 Line::raw(""),
                 Line::raw(format!(
-                    "key: {}  ({typed} of 64)",
-                    "•".repeat((*typed).min(64))
+                    "key: {}  ({typed} of {KEY_HEX})",
+                    "•".repeat((*typed).min(KEY_HEX))
                 )),
             ];
             push_error(&mut lines, error.as_deref());
@@ -427,7 +436,7 @@ fn draw_modal(frame: &mut Frame, area: Rect, modal: &Modal) {
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(tone))
+        .border_style(Style::default().fg(border))
         .title(format!(" {title} "));
     frame.render_widget(paragraph.block(block), popup);
 }

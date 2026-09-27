@@ -53,7 +53,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long one redeem may take: the connector answers only once the
 /// transaction is confirmed on chain.
-const REDEEM_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const REDEEM_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// `toon-provider redeem`'s flags.
 ///
@@ -462,7 +462,7 @@ fn read_key(stdin_is_terminal: bool) -> Result<SigningKey> {
     }
 }
 
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

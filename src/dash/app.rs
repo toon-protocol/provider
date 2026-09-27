@@ -30,6 +30,9 @@ pub const DEFAULT_CADENCE_S: u64 = 60;
 /// reallocates and leaves a copy of what was typed behind.
 const KEY_FIELD: usize = 128;
 
+/// How many hex characters an operator key is.
+pub(super) const KEY_HEX: usize = 64;
+
 /// The longest top-up amount the field takes, in digits.
 const AMOUNT_FIELD: usize = 30;
 
@@ -42,8 +45,13 @@ pub enum Effect {
     Quit,
     /// Read every source again, now.
     Refresh,
-    /// Estimate the gas to redeem these, per chain.
-    EstimateGas(Vec<ChannelEarnings>),
+    /// Estimate the gas to redeem these, per chain. `round` comes back with
+    /// the answer, so one for a dialog since closed is not taken for the
+    /// open one's.
+    EstimateGas {
+        round: u64,
+        channels: Vec<ChannelEarnings>,
+    },
     /// Redeem each of these, signing with `key`. The key lives exactly as
     /// long as the redeem does, and is wiped when it is dropped.
     Redeem {
@@ -61,7 +69,10 @@ pub enum Update {
     /// A fresh report.
     Report(Box<Report>),
     /// The gas estimates asked for with [`Effect::EstimateGas`].
-    Estimates(BTreeMap<Chain, Estimate>),
+    Estimates {
+        round: u64,
+        estimates: BTreeMap<Chain, Estimate>,
+    },
     /// One redeem's outcome, as `toon-provider redeem` prints it.
     Redeemed(String),
     /// Every redeem asked for has an outcome.
@@ -130,9 +141,13 @@ pub struct App {
     key_field: Zeroizing<String>,
     /// A line for the footer: why an action did not start.
     message: Option<String>,
-    pub(crate) focus: Section,
-    pub(crate) scroll: BTreeMap<Section, u16>,
-    pub(crate) refreshing: bool,
+    /// Which redeem dialog the gas estimates in flight are for.
+    estimate_round: u64,
+    focus: Section,
+    scroll: BTreeMap<Section, u16>,
+    /// How far each pane can scroll, as the last frame drew it.
+    scroll_limit: BTreeMap<Section, u16>,
+    refreshing: bool,
 }
 
 impl App {
@@ -144,8 +159,10 @@ impl App {
             modal: None,
             key_field: Zeroizing::new(String::with_capacity(KEY_FIELD)),
             message: None,
+            estimate_round: 0,
             focus: Section::Identity,
             scroll: BTreeMap::new(),
+            scroll_limit: BTreeMap::new(),
             refreshing: true,
         }
     }
@@ -165,6 +182,35 @@ impl App {
 
     pub fn message(&self) -> Option<&str> {
         self.message.as_deref()
+    }
+
+    /// The pane `Tab` has picked, which `j`/`k` scroll.
+    pub fn focus(&self) -> Section {
+        self.focus
+    }
+
+    /// How many lines `section`'s pane is scrolled down.
+    pub fn scroll(&self, section: Section) -> u16 {
+        self.scroll.get(&section).copied().unwrap_or(0)
+    }
+
+    /// How far each pane can scroll, as `view::draw` found it: the lines
+    /// that did not fit.
+    pub fn set_scroll_limits(&mut self, limits: BTreeMap<Section, u16>) {
+        for (section, offset) in &mut self.scroll {
+            *offset = (*offset).min(limits.get(section).copied().unwrap_or(0));
+        }
+        self.scroll_limit = limits;
+    }
+
+    /// Whether a read of the report is under way.
+    pub fn refreshing(&self) -> bool {
+        self.refreshing
+    }
+
+    /// A read of the report has started, on the cadence.
+    pub fn start_refresh(&mut self) {
+        self.refreshing = true;
     }
 
     /// How often the report is read: the provider's Liveness cadence.
@@ -198,9 +244,27 @@ impl App {
                 self.refreshing = false;
                 None
             }
-            Update::Estimates(estimates) => {
-                if let Some(Modal::RedeemPick { estimates: e, .. }) = &mut self.modal {
-                    *e = Some(estimates);
+            Update::Estimates { round, estimates } => {
+                if round != self.estimate_round {
+                    return None;
+                }
+                match &mut self.modal {
+                    Some(Modal::RedeemPick { estimates: e, .. }) => *e = Some(estimates),
+                    // Enter came before the estimates did: the dialog that
+                    // asks for the money shows them anyway.
+                    Some(Modal::Confirm {
+                        spend: Spend::Redeem(channels),
+                        armed,
+                        ..
+                    }) => {
+                        let armed = *armed;
+                        let mut confirm = redeem_confirm(channels.clone(), Some(&estimates));
+                        if let Modal::Confirm { armed: a, .. } = &mut confirm {
+                            *a = armed;
+                        }
+                        self.modal = Some(confirm);
+                    }
+                    _ => {}
                 }
                 None
             }
@@ -239,6 +303,17 @@ impl App {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Effect> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            // Not while money is moving: quitting would drop the redeem or
+            // top-up in flight, which the chain may still carry out, and the
+            // operator would never see its outcome.
+            if let Some(Modal::Working { lines, .. }) = &mut self.modal {
+                const WAIT: &str = "(Ctrl-C waits: what was sent is not called back, so its \
+                                    outcome is shown first)";
+                if lines.last().map(String::as_str) != Some(WAIT) {
+                    lines.push(WAIT.to_string());
+                }
+                return None;
+            }
             return Some(Effect::Quit);
         }
         match self.modal.take() {
@@ -261,11 +336,11 @@ impl App {
                 None
             }
             KeyCode::Tab => {
-                self.focus = step(self.focus, 1);
+                self.focus = self.focus.next();
                 None
             }
             KeyCode::BackTab => {
-                self.focus = step(self.focus, Section::ALL.len() - 1);
+                self.focus = self.focus.prev();
                 None
             }
             KeyCode::Char(c @ '1'..='6') => {
@@ -273,8 +348,9 @@ impl App {
                 None
             }
             KeyCode::Down | KeyCode::Char('j') => {
+                let limit = self.scroll_limit.get(&self.focus).copied().unwrap_or(0);
                 let offset = self.scroll.entry(self.focus).or_insert(0);
-                *offset = offset.saturating_add(1);
+                *offset = offset.saturating_add(1).min(limit);
                 None
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -309,7 +385,11 @@ impl App {
             estimates: None,
             error: None,
         });
-        Some(Effect::EstimateGas(candidates))
+        self.estimate_round += 1;
+        Some(Effect::EstimateGas {
+            round: self.estimate_round,
+            channels: candidates,
+        })
     }
 
     fn open_topup(&mut self) {
@@ -436,7 +516,7 @@ impl App {
                         self.key_field.pop();
                     }
                     KeyCode::Enter => {
-                        let parsed = parse_operator_key(self.key_field.as_bytes());
+                        let parsed = key_from_field(&self.key_field);
                         self.wipe_key_field();
                         match parsed {
                             Ok(key) => {
@@ -446,12 +526,12 @@ impl App {
                                         "redeeming {} channel{}; each waits for its transaction \
                                          to confirm…",
                                         channels.len(),
-                                        if channels.len() == 1 { "" } else { "s" }
+                                        plural(channels.len())
                                     )],
                                 });
                                 return Some(Effect::Redeem { channels, key });
                             }
-                            Err(e) => error = Some(format!("{e:#}")),
+                            Err(e) => error = Some(e),
                         }
                     }
                     _ => {}
@@ -488,8 +568,7 @@ impl App {
                 None
             }
 
-            // Money is moving: nothing but Ctrl-C (handled above) until it
-            // has an outcome.
+            // Money is moving: no key does anything until it has an outcome.
             working @ Modal::Working { .. } => {
                 self.modal = Some(working);
                 None
@@ -507,9 +586,35 @@ impl App {
     }
 }
 
-fn step(section: Section, by: usize) -> Section {
-    let at = Section::ALL.iter().position(|&s| s == section).unwrap_or(0);
-    Section::ALL[(at + by) % Section::ALL.len()]
+/// `"s"` unless there is exactly one.
+pub(super) fn plural(n: usize) -> &'static str {
+    if n == 1 {
+        ""
+    } else {
+        "s"
+    }
+}
+
+/// The typed field as an operator key, or why it is not one, worded for this
+/// field rather than for `redeem`'s stdin, and never repeating what was
+/// typed.
+fn key_from_field(field: &str) -> Result<SigningKey, String> {
+    let trimmed = field.trim();
+    if trimmed.is_empty() {
+        return Err("type the operator key first".into());
+    }
+    parse_operator_key(trimmed.as_bytes()).map_err(|_| {
+        format!(
+            "that is not an operator key: it is {KEY_HEX} hex characters, and {} were typed{}. \
+             The field is cleared; type it again.",
+            trimmed.chars().count(),
+            if trimmed.bytes().all(|b| b.is_ascii_hexdigit()) {
+                ""
+            } else {
+                ", not all of them hex"
+            }
+        )
+    })
 }
 
 /// The panes a `--check` finding is about, by the section name every
@@ -552,7 +657,7 @@ fn redeem_confirm(
         "Redeem {} channel{}, {total} token base units in all? Each is one on-chain transaction \
          the connector's settlement key pays gas for. The operator key is asked next.",
         channels.len(),
-        if channels.len() == 1 { "" } else { "s" },
+        plural(channels.len()),
     ));
     Modal::Confirm {
         title: "Redeem".into(),

@@ -57,6 +57,20 @@ impl Section {
         Section::Funding,
     ];
 
+    /// The section after this one, round to the first.
+    pub fn next(self) -> Section {
+        Section::ALL[(self.index() + 1) % Section::ALL.len()]
+    }
+
+    /// The section before this one, round to the last.
+    pub fn prev(self) -> Section {
+        Section::ALL[(self.index() + Section::ALL.len() - 1) % Section::ALL.len()]
+    }
+
+    fn index(self) -> usize {
+        Section::ALL.iter().position(|&s| s == self).unwrap_or(0)
+    }
+
     /// The heading `render_text` prints it under.
     pub fn title(self) -> &'static str {
         match self {
@@ -537,7 +551,7 @@ pub fn from_json(doc: &Value) -> Result<Report> {
         // The provider did not answer: `to_json` wrote its error into each
         // of the provider's own sections.
         Some(error) if identity.get("npub").is_none() => OperatorSource {
-            url: string(identity, "url").unwrap_or_default(),
+            url: string_field(identity, "url").unwrap_or_default(),
             raw: None,
             status: None,
             error: Some(error.to_string()),
@@ -592,9 +606,9 @@ pub fn from_json(doc: &Value) -> Result<Report> {
             .iter()
             .map(|c| {
                 Ok(ChannelEarnings {
-                    channel_id: string(c, "channel_id").context("a channel with no id")?,
-                    counterparty: string(c, "counterparty"),
-                    status: string(c, "status"),
+                    channel_id: string_field(c, "channel_id").context("a channel with no id")?,
+                    counterparty: string_field(c, "counterparty"),
+                    status: string_field(c, "status"),
                     deposited: amount(c, "deposited")?,
                     claimed: amount(c, "claimed")?.unwrap_or(0),
                     redeemed: amount(c, "redeemed")?.unwrap_or(0),
@@ -605,19 +619,19 @@ pub fn from_json(doc: &Value) -> Result<Report> {
             .collect::<Result<_>>()?,
     };
     let earnings = EarningsSection {
-        url: string(e, "url"),
-        dashboard_url: string(e, "dashboard_url"),
+        url: string_field(e, "url"),
+        dashboard_url: string_field(e, "dashboard_url"),
         channels,
-        error: string(e, "error"),
-        audit_error: string(e, "audit_error"),
+        error: string_field(e, "error"),
+        audit_error: string_field(e, "audit_error"),
     };
 
     let f = doc.get("funding").context("no funding section")?;
     let funding = FundingSection {
-        address: string(f, "address"),
-        rpc: string(f, "rpc"),
+        address: string_field(f, "address"),
+        rpc: string_field(f, "rpc"),
         lamports: f.get("lamports").and_then(Value::as_u64),
-        error: string(f, "error"),
+        error: string_field(f, "error"),
     };
 
     Ok(Report {
@@ -629,7 +643,7 @@ pub fn from_json(doc: &Value) -> Result<Report> {
     })
 }
 
-fn string(v: &Value, key: &str) -> Option<String> {
+fn string_field(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
