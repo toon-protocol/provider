@@ -36,7 +36,10 @@
 //!   * the connector pin, in exactly one place;
 //!   * a HIDDEN=1 render (TOON_Network#159) passes the same loader, whose
 //!     hiding gate refuses any missing condition, publishes no host, and
-//!     names the same addresses as the anon daemon and the compose overlay.
+//!     names the same addresses as the anon daemon and the compose overlay;
+//!   * on that hidden box the connector, the provider and the publisher are
+//!     on the internal hidden network alone (TOON_Network#181), so anon's
+//!     SOCKS port is their only way off the box, whatever their config says.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -1083,10 +1086,12 @@ fn the_publisher_pays_over_a_carriage_the_relay_will_accept() {
 /// .env; this one resolves nowhere.
 const HIDDEN_ADDRESS: &str = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.anyone";
 
-/// The operator's own settlement nodes, on a private network the connector's
-/// container routes to: ADR 0030's self-hosted option.
-const HIDDEN_EVM_RPC: &str = "http://10.8.0.1:8545";
-const HIDDEN_SOLANA_RPC: &str = "http://10.8.0.1:8899";
+/// The operator's own settlement nodes: ADR 0030's self-hosted option. On
+/// this host, at the hidden network's gateway, because that network is
+/// `internal` (TOON_Network#181) and the gateway, with the network's own
+/// subnet, is all the connector's container can route to.
+const HIDDEN_EVM_RPC: &str = "http://172.30.2.1:8545";
+const HIDDEN_SOLANA_RPC: &str = "http://172.30.2.1:8899";
 
 /// The devnet preset's public, keyless RPCs (`.env.example`): what a hidden
 /// box reaches through anon by DEFAULT (spec §10, ADR 0030).
@@ -1527,6 +1532,22 @@ fn a_hidden_render_refuses_what_it_cannot_hide() {
         refused(env, "is loopback");
     }
 
+    // A node the connector cannot route to (TOON_Network#181). The hidden
+    // network is `internal`, so an address off it — a machine elsewhere on
+    // the operator's LAN, say — passes the app's private-address rule and
+    // then reaches nothing: a connector restarting forever on "network
+    // unreachable". Refused by name instead, for either chain.
+    for (key, off_net) in [
+        ("HIDDEN_SETTLEMENT_SOLANA_RPC_URL", "http://10.0.0.5:8899"),
+        ("HIDDEN_SETTLEMENT_EVM_RPC_URL", "http://192.168.1.20:8545"),
+        ("HIDDEN_SETTLEMENT_SOLANA_RPC_URL", "http://172.30.3.1:8899"),
+        ("HIDDEN_SETTLEMENT_EVM_RPC_URL", "http://[fd00::5]:8545"),
+    ] {
+        let mut env = self_hosted_env();
+        env.insert(key, off_net);
+        refused(env, "is not on the hidden network");
+    }
+
     // The switch and the overlay disagree, either way round.
     let mut env = hidden_env();
     env.remove("COMPOSE_FILE");
@@ -1638,10 +1659,13 @@ fn the_daemon_the_overlay_and_the_config_name_the_same_addresses() {
 #[test]
 fn the_hidden_overlay_publishes_nothing_and_switches_the_tls_edge_off() {
     let overlay = deploy("docker-compose.hidden.yml");
+    // One row, and on the loopback: the connector's own publish, moved onto
+    // the relay that carries it to a connector with no route off the box
+    // (TOON_Network#181).
     assert_eq!(
         published_ports(&overlay),
-        Vec::<String>::new(),
-        "docker-compose.hidden.yml publishes a port"
+        vec!["127.0.0.1:4000:4000".to_string()],
+        "docker-compose.hidden.yml publishes something other than the connector's loopback port"
     );
     for service in ["nginx:", "certbot:"] {
         let at = overlay
@@ -1676,6 +1700,177 @@ fn the_hidden_overlay_publishes_nothing_and_switches_the_tls_edge_off() {
     assert!(!overlay.contains("TOON_TRANSPORT: http"));
 }
 
+// ── Anon-only egress, enforced by the network (TOON_Network#181) ────────────
+
+/// The services of a hidden box that dial out for themselves. Each is
+/// CONFIGURED to dial only through anon (the connector's `socks_proxy` and
+/// `rpc_via_socks_proxy`, the provider's `anon.socks_proxy`, the publisher's
+/// `TOON_SOCKS_PROXY`), and that is one bug or one `.env` edit away from a
+/// direct dial from this box's real address. The network is what makes it
+/// hold anyway.
+const HIDDEN_BOX_DIALLERS: [&str; 3] = ["provider-connector", "provider", "directory-publisher"];
+
+/// Every service named under a compose file's top-level `services:`.
+fn service_names(compose: &str) -> Vec<String> {
+    let (_, services) = compose
+        .split_once("\nservices:\n")
+        .expect("no top-level services:");
+    services
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .take_while(|l| l.starts_with(' '))
+        .filter(|l| l.len() - l.trim_start().len() == 2)
+        .map(|l| l.trim().trim_end_matches(':').to_string())
+        .collect()
+}
+
+/// The keys of a service block's `networks:` mapping, in the order written.
+fn service_networks(block: &str) -> Vec<String> {
+    let mut lines = block
+        .lines()
+        .skip_while(|l| l.trim_end() != "    networks:");
+    assert!(
+        lines.next().is_some(),
+        "the service names no networks: mapping:\n{block}"
+    );
+    lines
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .take_while(|l| l.len() - l.trim_start().len() > 4)
+        .filter(|l| l.len() - l.trim_start().len() == 6)
+        .map(|l| l.trim().split(':').next().unwrap().to_string())
+        .collect()
+}
+
+/// One network's block under a compose file's top-level `networks:`.
+fn network_block<'a>(compose: &'a str, key: &str) -> &'a str {
+    let at = compose
+        .find("\nnetworks:\n")
+        .expect("no top-level networks:");
+    service_block(&compose[at..], key)
+}
+
+/// Whether a network a service names is `internal`. `default` is compose's
+/// own, never declared here, and has an ordinary route to the internet.
+fn is_internal(compose: &str, network: &str) -> bool {
+    network != "default" && network_block(compose, network).contains("\n    internal: true\n")
+}
+
+#[test]
+fn the_hidden_boxs_own_services_reach_off_the_box_only_through_anon() {
+    let base = deploy("docker-compose.yml");
+    let overlay = deploy("docker-compose.hidden.yml");
+
+    // Compose puts a service that names no network on `default`, and merges
+    // an overlay's `networks:` into the base file's. The base file names
+    // none, so what the overlay lists is the whole list.
+    for service in HIDDEN_BOX_DIALLERS {
+        assert!(
+            !service_block(&base, service).contains("networks:"),
+            "docker-compose.yml puts {service} on a network the overlay cannot take away"
+        );
+        let networks = service_networks(service_block(&overlay, service));
+        assert_eq!(
+            networks,
+            vec!["hidden".to_string()],
+            "on a hidden box {service} is on {networks:?}: anything but the internal \
+             hidden network is a route off the box that does not go through anon"
+        );
+    }
+    assert!(
+        is_internal(&overlay, "hidden"),
+        "the hidden network is not internal, so it routes to the internet:\n{}",
+        network_block(&overlay, "hidden")
+    );
+    // The daemon's SOCKS port is on that network, so it is still the way out.
+    assert!(line_value(&deploy("anon/anonrc"), "SocksPort ").starts_with("172.30.2.2:"));
+    assert!(deploy("anon/anonrc").contains("SocksPolicy accept 172.30.2.0/24"));
+
+    // Every service of the base file is named in the overlay, so none keeps
+    // `default` by being forgotten here.
+    for service in service_names(&base) {
+        assert!(
+            service_names(&overlay).contains(&service),
+            "the overlay does not name {service}, which keeps the base file's networks"
+        );
+    }
+
+    // What still has a route off the box, and why each may: the daemon (its
+    // own way to the Anyone network) and the loopback relay (which only
+    // accepts, and only ever dials the connector). Nothing else.
+    let mut off_box: Vec<String> = service_names(&overlay)
+        .into_iter()
+        .filter(|s| !service_block(&overlay, s).contains("profiles: ['public']"))
+        .filter(|s| {
+            service_networks(service_block(&overlay, s))
+                .iter()
+                .any(|n| !is_internal(&overlay, n))
+        })
+        .collect();
+    off_box.sort();
+    assert_eq!(off_box, vec!["anon", "connector-loopback"]);
+}
+
+#[test]
+fn the_connectors_loopback_port_is_a_relay_that_reaches_only_the_connector() {
+    // Docker publishes no port of a container whose only network is
+    // internal, silently. bootstrap.sh reads the sealing key and auto-apply.sh
+    // checks GET /ilp at 127.0.0.1:4000, and an operator tunnels to the
+    // dashboard there, so the publish moves to a relay on both networks.
+    let base = deploy("docker-compose.yml");
+    let overlay = deploy("docker-compose.hidden.yml");
+
+    let connector = service_block(&overlay, "provider-connector");
+    assert!(
+        connector.contains("    ports: !reset []\n"),
+        "the hidden overlay leaves the connector a publish docker would drop silently"
+    );
+
+    let relay = service_block(&overlay, "connector-loopback");
+    // The very row the base file gives the connector, which auto-apply.sh
+    // reads its port out of.
+    assert_eq!(
+        published_ports(relay),
+        published_ports(service_block(&base, "provider-connector"))
+    );
+    assert_eq!(
+        published_ports(relay),
+        vec!["127.0.0.1:4000:4000".to_string()]
+    );
+    assert_eq!(
+        service_networks(relay),
+        vec!["default".to_string(), "hidden".to_string()]
+    );
+    // One fixed upstream, by IP literal: the connector's pinned address,
+    // the one the daemon's hidden service forwards to.
+    let anonrc = deploy("anon/anonrc");
+    let target = line_value(&anonrc, "HiddenServicePort 80 ");
+    assert_eq!(target, "172.30.2.3:4000");
+    assert!(
+        relay.contains("listen 4000;"),
+        "the relay does not listen on 4000"
+    );
+    assert!(
+        relay.contains(&format!("proxy_pass {target};")),
+        "the relay does not relay to the connector at {target}"
+    );
+    assert_eq!(relay.matches("proxy_pass").count(), 1);
+    let image = relay
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("image: "))
+        .expect("the relay names no image");
+    assert!(
+        image.contains("@sha256:") && image.len() >= image.find("@sha256:").unwrap() + 8 + 64,
+        "the relay's image is not pinned by digest: {image}"
+    );
+
+    // The seal-key read comes before the full `up`, with `--no-deps`, so the
+    // relay has to be started beside the connector by name.
+    assert!(
+        deploy("bootstrap.sh").contains("up -d --no-deps provider-connector connector-loopback"),
+        "bootstrap.sh reads the sealing key at 127.0.0.1:4000 without starting the relay"
+    );
+}
+
 #[test]
 fn the_hidden_firewall_closes_exactly_the_ports_the_config_hands_out() {
     // The same ranges the public box opens in ufw, closed here: a hidden
@@ -1705,6 +1900,43 @@ fn the_hidden_firewall_closes_exactly_the_ports_the_config_hands_out() {
     assert_eq!(line_value(&firewall, "EGRESS_BRIDGE="), "toon-hegress");
     assert!(deploy("docker-compose.hidden.yml")
         .contains("com.docker.network.bridge.name: toon-hegress"));
+
+    // Rule 0 (TOON_Network#181): Docker forwards the daemon's dial to a
+    // lease's forwarder out of the INTERNAL hidden network, which its own
+    // isolation and rule 1 both drop. So exactly the daemon, from that
+    // network's bridge, to its gateway, on both ranges, is accepted ahead
+    // of them, and its replies. Every address it names is one the overlay
+    // pins and the config dials.
+    let overlay = deploy("docker-compose.hidden.yml");
+    let control = config.anon.control.as_ref().unwrap();
+    let daemon_ip = control.addr.split(':').next().unwrap();
+    assert_eq!(line_value(&firewall, "ANON_IP="), daemon_ip);
+    assert_eq!(
+        line_value(&firewall, "FORWARD_HOST="),
+        config.anon.forward_host
+    );
+    assert_eq!(line_value(&firewall, "HIDDEN_BRIDGE="), "toon-hidden");
+    assert!(
+        network_block(&overlay, "hidden").contains("com.docker.network.bridge.name: toon-hidden\n")
+    );
+    assert!(firewall.contains(
+        "first -i \"$HIDDEN_BRIDGE\" -s \"$ANON_IP\" -p tcp -m conntrack --ctorigdst \"$FORWARD_HOST\" \\\n    --ctorigdstport \"$range\""
+    ));
+    assert!(firewall.contains(
+        "first -o \"$HIDDEN_BRIDGE\" -d \"$ANON_IP\" -p tcp -m conntrack --ctstate ESTABLISHED,RELATED \\\n  --ctorigsrc \"$ANON_IP\" --ctorigdst \"$FORWARD_HOST\""
+    ));
+    // Ahead of rule 1 on every run, not only the first.
+    let accept = firewall.find("first -i \"$HIDDEN_BRIDGE\"").unwrap();
+    let drop = firewall
+        .find("rule -p tcp -m conntrack --ctstate NEW --ctorigdstport")
+        .unwrap();
+    assert!(
+        drop < accept,
+        "rule 0 is inserted before rule 1, so rule 1 lands above it"
+    );
+    assert!(firewall.contains(
+        "while iptables -C DOCKER-USER \"$@\" 2>/dev/null; do iptables -D DOCKER-USER \"$@\"; done"
+    ));
 }
 
 #[test]

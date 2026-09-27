@@ -19,13 +19,28 @@
 #                        answers AAAA itself with NOERROR and no records; see
 #                        dns-shim/Dockerfile and src/dns_shim.rs.
 #   provider-connector   pinned on the hidden network, where the daemon's
-#                        hidden service points. Still on 127.0.0.1:4000 for
-#                        bootstrap.sh and auto-apply.sh; never public.
-#   provider             on the hidden network, with the daemon's control
+#                        hidden service points, and on NOTHING ELSE.
+#   provider             on the hidden network only, with the daemon's control
 #                        cookie mounted read-only.
-#   directory-publisher  on the hidden network, and refusing to start unless
-#                        it dials out through the daemon — chain RPC included.
+#   directory-publisher  on the hidden network only, and refusing to start
+#                        unless it dials out through the daemon — chain RPC
+#                        included.
+#   connector-loopback   NEW (TOON_Network#181). Holds the connector's
+#                        127.0.0.1:4000 for bootstrap.sh, auto-apply.sh and an
+#                        operator's dashboard tunnel, and relays it to the
+#                        connector: docker publishes no port of a container
+#                        whose only network is internal. Never public.
 #   nginx, certbot       DISABLED. No public DNS, no TLS edge, no certificate.
+#
+# ANON-ONLY EGRESS IS ENFORCED, NOT JUST CONFIGURED (TOON_Network#181). The
+# connector, the provider and the publisher are each configured to dial out
+# only through the daemon (the connector's `socks_proxy` and
+# `rpc_via_socks_proxy`, the provider's `anon.socks_proxy`, the publisher's
+# `TOON_SOCKS_PROXY`), and each fails closed. That is one bug, one dependency
+# that phones home or one `.env` edit away from a direct dial from this box's
+# real address. So all three sit on `hidden` alone, and `hidden` is
+# `internal`: no NAT, no default route, no upstream DNS. The one thing on it
+# that reaches past this host is the daemon's SOCKS port.
 #
 #   tenant ──socks5h──▶ Anyone ──▶ anon ──▶ provider-connector :4000 ──▶ provider
 #                                   ▲                                       │
@@ -33,6 +48,11 @@
 #                                   │
 #   toon-<id> (internal egress network only) ── default route ──▶ anon :9040
 #                                            └─ port 53 ──▶ dns-shim :53 ──▶ anon :5353 (A only)
+#
+#   connector, provider, publisher (internal hidden network only)
+#                                   ── socks5h ──▶ anon :9050 ──▶ Anyone
+#                                   ── anything else off the box: no route
+#   host 127.0.0.1:4000 ──▶ connector-loopback ──▶ provider-connector :4000
 #
 # It is used by naming it in .env, beside the switch:
 #
@@ -45,6 +65,10 @@
 # where the two lines disagree. README § "Running hidden".
 #
 # ── The two networks, and why both are pinned ────────────────────────────────
+# Both are `internal`. Only `anon` (to reach the Anyone network) and
+# `connector-loopback` (to hold a port on the host's loopback) are also on
+# compose's `default`, which is the only network here with a way out.
+#
 # The rest of the bundle leaves addresses to Docker. Here a fixed address is
 # the mechanism: anon resolves a HiddenServicePort target when it PARSES its
 # config, before the connector it names exists, so the target must be an IP
@@ -60,7 +84,8 @@ services:
   # ── The Anyone daemon ──────────────────────────────────────────────────────
   # ON THREE NETWORKS, one job each:
   #   default   its own way out to the Anyone network, and nothing is bound
-  #             there;
+  #             there. The ONLY way out any service of this box has: the
+  #             connector, the provider and the publisher are not on it;
   #   hidden    pinned at .2, where every surface it offers the provider is
   #             bound: the ControlPort and the SocksPort. Binding them here and
   #             not on 0.0.0.0 is the point: a workload shares the egress
@@ -205,16 +230,69 @@ services:
     restart: unless-stopped
 
   # PINNED AT .3, because anon/anonrc forwards the address's port 80 here by IP
-  # literal. The loopback publish in docker-compose.yml stays: it is how
-  # bootstrap.sh reads the sealing key and auto-apply.sh verifies GET /ilp, and
-  # 127.0.0.1 is not a public door. On this network it also reaches the
-  # daemon's SOCKS port, which connector.toml's root `socks_proxy` names and
-  # every [settlement.*] table with `rpc_via_socks_proxy = true` rides.
+  # literal. On this network it also reaches the daemon's SOCKS port, which
+  # connector.toml's root `socks_proxy` names and every [settlement.*] table
+  # with `rpc_via_socks_proxy = true` rides — and, the network being
+  # internal, nothing else off this box: a settlement dial that forgot the
+  # proxy is "network unreachable", not a leak (TOON_Network#181). A
+  # self-hosted node it dials directly must be on this network or this host
+  # (README § "The settlement RPCs"); render.sh refuses any other address.
+  #
+  # NO PUBLISH OF ITS OWN. Docker drops the base file's 127.0.0.1:4000 for a
+  # container on an internal network alone, without a word; `!reset` says so
+  # here rather than leaving a row that does nothing. connector-loopback,
+  # below, holds that port instead.
   provider-connector:
+    ports: !reset []
     networks:
-      default: {}
       hidden:
         ipv4_address: 172.30.2.3
+
+  # ── The connector's loopback port (TOON_Network#181) ───────────────────────
+  # bootstrap.sh reads the sealing key from 127.0.0.1:4000, auto-apply.sh
+  # verifies GET /ilp there, and an operator reaches the dashboard through
+  # `ssh -L 4000:127.0.0.1:4000`. The connector itself can no longer publish
+  # it (above), so this does: a TCP relay (nginx's `stream`, no HTTP parsing,
+  # so websockets and all pass as they are) on `default`, which is where
+  # docker can publish a port, and on `hidden`, where the connector is.
+  #
+  # IT CANNOT BE A WAY OUT. It only accepts, and its one upstream is the
+  # connector's pinned address, an IP literal, so it needs no resolver and
+  # dials nothing else whatever it is sent. Nothing uses it as a gateway:
+  # the containers on `hidden` have no default route to point at it.
+  #
+  # AFTER THE CONNECTOR, only so that on a box upgraded from the overlay
+  # before this one the old connector, which held 127.0.0.1:4000 itself, is
+  # gone before this binds it. `service_started`, not healthy: bootstrap.sh
+  # starts the two together with `--no-deps` to read the sealing key, and
+  # until the connector answers a connection here is accepted and closed,
+  # which every caller retries.
+  connector-loopback:
+    image: nginx:1.30.5-alpine@sha256:0985e772fb9f729e6fa0980da05fca5d9c468e870eed43071545afa9d2e27d94
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        cat > /etc/nginx/nginx.conf <<'EOF'
+        worker_processes 1;
+        error_log stderr notice;
+        events {}
+        stream {
+          server {
+            listen 4000;
+            proxy_pass 172.30.2.3:4000;
+          }
+        }
+        EOF
+        exec nginx -g 'daemon off;'
+    ports:
+      - '127.0.0.1:4000:4000'
+    networks:
+      default: {}
+      hidden: {}
+    depends_on:
+      provider-connector:
+        condition: service_started
+    restart: unless-stopped
 
   provider:
     volumes:
@@ -233,9 +311,10 @@ services:
       TOON_SETTLEMENT_SOLANA_RPC_URL: ${HIDDEN_SETTLEMENT_SOLANA_RPC_URL:-}
       TOON_SETTLEMENT_EVM_RPC_URL: ${HIDDEN_SETTLEMENT_EVM_RPC_URL:-}
     networks:
-      default: {}
-      # Where the daemon's control and SOCKS ports are. No fixed address: it
-      # dials, it is not dialled here.
+      # Where the daemon's control and SOCKS ports are, the connector and the
+      # publisher; the ONLY network (TOON_Network#181). No fixed address: it
+      # dials, it is not dialled here. The docker socket is a mounted file,
+      # not a network peer, so leases are made as before.
       hidden: {}
     depends_on:
       # A hidden provider with no daemon is not a hidden provider: it checks
@@ -279,7 +358,8 @@ services:
       # SOCKS port like every other byte. README § "Running hidden".
       TOON_TRANSPORT: btp
     networks:
-      default: {}
+      # The ONLY network (TOON_Network#181): the daemon's SOCKS port is its
+      # way out, and the provider reaches it here.
       hidden: {}
     depends_on:
       anon:
@@ -298,9 +378,30 @@ networks:
   # address for a container that has not started yet, and a publisher handed
   # .3 on a cold start would leave the connector failing with "Address already
   # in use" (the sandbox's TOON_Network#44).
+  #
+  # `internal` (TOON_Network#181): Docker gives it no NAT and a container on
+  # it no default route, and its embedded DNS answers the names of the
+  # containers here and nothing else. The connector, the provider and the
+  # publisher are on this network alone, so the daemon's SOCKS port is the
+  # only way off the box any of them has. What still works on it: every
+  # container here reaching every other, and the daemon, alone, reaching a
+  # lease at the gateway below. Docker forwards that dial to the lease's
+  # forwarder on another bridge and would drop it leaving an internal
+  # network; hidden-firewall.sh's rule 0 accepts exactly it.
+  #
+  # A box first brought up before this was `internal` has the network
+  # without it; `docker compose up` sees the difference and recreates the
+  # network, and the containers on it, by itself.
   hidden:
     name: toon-provider-hidden
     driver: bridge
+    internal: true
+    driver_opts:
+      # A stable interface name, for hidden-firewall.sh's rule 0: the daemon
+      # dials a lease at this network's gateway, which Docker forwards out of
+      # this (internal) bridge, so DOCKER-USER must accept exactly that, from
+      # exactly the daemon, on this interface.
+      com.docker.network.bridge.name: toon-hidden
     ipam:
       config:
         - subnet: 172.30.2.0/24

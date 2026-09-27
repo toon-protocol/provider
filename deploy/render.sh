@@ -185,8 +185,8 @@ if [ "$HIDDEN" = 1 ]; then
       case "$(url_host "${!own}")" in
         localhost | 127.* | ::1)
           echo "${own}=${!own} is loopback, and the connector is a container: its" >&2
-          echo "127.0.0.1 is itself, not this host. Name the node at a private address the" >&2
-          echo "container can route to, such as this host's address on a private network." >&2
+          echo "127.0.0.1 is itself, not this host. Name the node on the hidden network:" >&2
+          echo "this host is 172.30.2.1 there (README § \"The settlement RPCs\")." >&2
           exit 1
           ;;
       esac
@@ -260,7 +260,12 @@ if [ "$CONNECTOR_ONLY" = 0 ] && [ -z "${CONNECTOR_SEAL_KEY:-}" ]; then
   echo "compares it byte for byte against GET /ilp/identity before it will spawn" >&2
   echo "anything here (ADR 0011). Start the connector and read it off:" >&2
   echo >&2
-  echo "  docker compose up -d provider-connector" >&2
+  if [ "$HIDDEN" = 1 ]; then
+    # connector-loopback holds 127.0.0.1:4000 on a hidden box (TOON_Network#181).
+    echo "  docker compose up -d provider-connector connector-loopback" >&2
+  else
+    echo "  docker compose up -d provider-connector" >&2
+  fi
   echo "  curl -s http://127.0.0.1:4000/ilp/identity" >&2
   echo >&2
   echo "then put its .publicKey (WITH the 0x) in .env as CONNECTOR_SEAL_KEY." >&2
@@ -390,6 +395,33 @@ provider_routes "$ROUTES_FROM" > "$WORK/routes.toml"
 # connector's [settlement.*] tables, below. A public RPC dialled directly, or
 # a proxied one over plain http, was a refusal above, before the connector
 # has read a byte of chain state from this box.
+#
+# And then the one thing the loader cannot judge, because it is about this
+# bundle's network rather than the RPC (TOON_Network#181): a self-hosted node
+# must be ON THE HIDDEN NETWORK, or nothing of this box reaches it. The
+# connector, the provider and the publisher are on `toon-provider-hidden`
+# alone, and it is `internal`: an address off its subnet — another machine on
+# the operator's LAN, say — passes the app's private-address rule and is then
+# "network unreachable" from every one of them, a connector restarting
+# forever. On it: this host, at the network's gateway 172.30.2.1, or a
+# container attached to the network at a fixed address. After the loader, so
+# a PUBLIC address is still refused by the app's own rule, which says more.
+if [ "$HIDDEN" = 1 ]; then
+  for own in HIDDEN_SETTLEMENT_EVM_RPC_URL HIDDEN_SETTLEMENT_SOLANA_RPC_URL; do
+    [ -n "${!own:-}" ] || continue
+    host=$(url_host "${!own}")
+    if [[ $host =~ ^[0-9]+(\.[0-9]+){3}$ || $host == *:* ]] && ! [[ $host =~ ^172\.30\.2\.[0-9]+$ ]]; then
+      echo "${own}=${!own} is not on the hidden network (172.30.2.0/24)." >&2
+      echo "The connector, the provider and the publisher of a hidden box have no route" >&2
+      echo "anywhere else: their network is internal, so only anon leads off the box." >&2
+      echo "Run the node on this host and name it at 172.30.2.1, the hidden network's" >&2
+      echo "gateway, or attach its container to toon-provider-hidden at a fixed address" >&2
+      echo "(README § \"The settlement RPCs: through anon, or your own\")." >&2
+      exit 1
+    fi
+  done
+fi
+
 grep -q '^\[\[routes\]\]$' "$WORK/routes.toml" || {
   echo "\`toon-provider routes\` printed no [[routes]] for ${ROUTES_FROM##*/}; refusing to" >&2
   echo "render a connector that terminates nothing." >&2
