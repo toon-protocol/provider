@@ -374,6 +374,35 @@ To collect what the earnings section shows, run `toon-provider redeem`
 root@<box>`; on a hidden box, the `.anyone` address's `/dashboard`), signed in
 with `OPERATOR_BEARER_TOKEN`. `status`'s earnings section links it.
 
+### The same report, full screen: `toon-provider dash`
+
+```bash
+docker compose exec provider toon-provider dash
+```
+
+Six panes in the same order, each holding what `status` prints under that
+heading, read again on the provider's Liveness cadence (`u` reads now).
+Whatever `status --check` would fail on is listed at the top in red and its
+pane is drawn red; a warning is yellow. `Tab` (or `1`–`6`) picks a pane and
+`j`/`k` scroll it; `q` quits. It takes the same flags and environment as
+`status` (`--min-runway`, `--min-sol`, the sources below), so it sees the
+same box. It draws only in the terminal's own ANSI colours.
+
+Two keys move money, each only after `y` then Enter, and neither ever on its
+own:
+
+- **`r` redeem**: the channels `toon-provider redeem` offers, with its gas
+  estimates. Pick with Space (`a` for all), confirm, then type the operator
+  key into a field that shows only how many characters are in it. The key is
+  held in memory while the redeems are signed and sent, then wiped, and is
+  never written anywhere. Each redeem is the same signed
+  `POST /channels/:id/redeem-latest` as the command's.
+- **`t` top up**: an amount in base units, then the publisher's `/topup`, as
+  `toon-provider topup` sends it.
+
+There is no eviction and no listing edit in it (ADR 0029): `toon-provider
+evict` and the deploy bundle's render stay the way to do those.
+
 ### Where each source is, from inside the provider container
 
 | section | source | how the container reaches it |

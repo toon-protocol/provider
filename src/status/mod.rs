@@ -36,6 +36,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
+pub(crate) use check::abbreviate;
 pub use check::{check, CheckOutcome, Thresholds};
 pub use gather::{
     gather, ChannelEarnings, EarningsSection, FundingSection, OperatorSource, PublisherSection,
@@ -45,7 +46,7 @@ pub use gather::{
 pub(crate) use gather::{
     channel_key, connector_operator_url, error_chain, origin, read_earnings_from,
 };
-pub use render::{render_text, to_json};
+pub use render::{from_json, render_text, section_text, to_json, Section};
 
 use crate::provider::ProviderConfig;
 
@@ -61,10 +62,8 @@ pub const DEFAULT_MIN_SOL: &str = "0.005";
 /// journal once a week to top up before the Liveness stops.
 pub const DEFAULT_MIN_RUNWAY: &str = "7d";
 
-/// `toon-provider status`'s flags. Where a source is found is overridable
-/// here, and each such flag has an environment variable, which is how the
-/// deploy bundle's compose file points the command at the box's own
-/// services without an operator typing any of it.
+/// `toon-provider status`'s flags: its two output modes, and the
+/// [`ReportArgs`] it shares with `toon-provider dash`.
 #[derive(Debug, Clone, clap::Args)]
 pub struct StatusArgs {
     /// Print one JSON document instead of the human-readable report.
@@ -78,13 +77,24 @@ pub struct StatusArgs {
     #[arg(long)]
     pub check: bool,
 
-    /// `--check` fails when the publisher's runway is under this: `7d`,
-    /// `36h`, `90m`, `3600s` or plain seconds.
+    #[command(flatten)]
+    pub report: ReportArgs,
+}
+
+/// What the report is gathered from and judged by, shared by `status` and
+/// `dash`. Where a source is found is overridable here, and each such flag
+/// has an environment variable, which is how the deploy bundle's compose
+/// file points either command at the box's own services without an
+/// operator typing any of it.
+#[derive(Debug, Clone, clap::Args)]
+pub struct ReportArgs {
+    /// `--check` (and `dash`'s highlighting) fails when the publisher's
+    /// runway is under this: `7d`, `36h`, `90m`, `3600s` or plain seconds.
     #[arg(long, default_value = DEFAULT_MIN_RUNWAY, value_parser = parse_duration)]
     pub min_runway: u64,
 
-    /// `--check` fails when the connector's Solana settlement address holds
-    /// less than this many SOL.
+    /// `--check` (and `dash`'s highlighting) fails when the connector's
+    /// Solana settlement address holds less than this many SOL.
     #[arg(long, default_value = DEFAULT_MIN_SOL, value_parser = parse_sol)]
     pub min_sol: u64,
 
@@ -118,24 +128,27 @@ pub struct StatusArgs {
     pub settlement_rpc_url: Option<String>,
 }
 
+impl ReportArgs {
+    pub fn thresholds(&self) -> Thresholds {
+        Thresholds {
+            min_runway_s: self.min_runway,
+            min_lamports: self.min_sol,
+        }
+    }
+}
+
 /// Run the command: gather, print, and return the process exit code — 0,
 /// or 1 when `--check` found a problem.
 pub async fn run(config: &ProviderConfig, args: &StatusArgs) -> Result<i32> {
-    let sources = Sources::from_config(config, args);
+    let sources = Sources::from_config(config, &args.report);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let report = gather(&sources, now).await;
-    let outcome = args.check.then(|| {
-        check(
-            &report,
-            &Thresholds {
-                min_runway_s: args.min_runway,
-                min_lamports: args.min_sol,
-            },
-        )
-    });
+    let outcome = args
+        .check
+        .then(|| check(&report, &args.report.thresholds()));
 
     if args.json {
         println!(

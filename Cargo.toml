@@ -81,7 +81,19 @@ ed25519-dalek = { version = "2", default-features = false, features = ["std", "z
 zeroize = "1"
 base64 = "0.22"
 
+# `toon-provider dash` (TOON_Network#174, ADR 0029): a full-screen view over
+# the status document. The same two crates, at the same versions, as the
+# Console's TUI (ADR 0028), and none of its code. `unstable-rendered-line-info`
+# is `Paragraph::line_count`: how many rows wrapped text takes, to size a box
+# to fit it. ratatui's `instability` dependency is held at 0.3.10 in the lock
+# file: 0.3.11 needs rustc 1.88, and the image builds on 1.85.
+ratatui = { version = "0.29", features = ["unstable-rendered-line-info"] }
+crossterm = "0.28"
+
 [dev-dependencies]
+# `dash`'s rendering, as text snapshots under tests/snapshots/.
+insta = "1"
+
 tower = { version = "0.4", features = ["util"] }
 proptest = "1"
 rand = "0.8"

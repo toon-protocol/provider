@@ -4,14 +4,18 @@
 
 use std::fmt::Write as _;
 
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
 
 use crate::directory::{RefusalKind, RelayOutcome};
 use crate::nostr::wire::LeaseState;
-use crate::provider::operator_status::OPERATOR_STATUS_VERSION;
+use crate::provider::operator_status::{OperatorStatus, OPERATOR_STATUS_VERSION};
 
 use super::check::{abbreviate, CheckOutcome};
-use super::gather::Report;
+use super::gather::{
+    ChannelEarnings, EarningsSection, FundingSection, OperatorSource, PublisherSection,
+    PublisherStatus, Report,
+};
 use super::{format_duration, format_sol};
 
 /// `t` relative to `now`: `4m 10s ago`, `in 2h`.
@@ -29,6 +33,54 @@ fn wire_name<T: serde::Serialize>(value: &T) -> String {
         Ok(Value::String(s)) => s,
         Ok(other) => other.to_string(),
         Err(_) => "?".to_string(),
+    }
+}
+
+/// The report's six sections, in ADR 0029's order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Section {
+    Identity,
+    Directory,
+    Publisher,
+    Leases,
+    Earnings,
+    Funding,
+}
+
+impl Section {
+    pub const ALL: [Section; 6] = [
+        Section::Identity,
+        Section::Directory,
+        Section::Publisher,
+        Section::Leases,
+        Section::Earnings,
+        Section::Funding,
+    ];
+
+    /// The section after this one, round to the first.
+    pub fn next(self) -> Section {
+        Section::ALL[(self.index() + 1) % Section::ALL.len()]
+    }
+
+    /// The section before this one, round to the last.
+    pub fn prev(self) -> Section {
+        Section::ALL[(self.index() + Section::ALL.len() - 1) % Section::ALL.len()]
+    }
+
+    fn index(self) -> usize {
+        Section::ALL.iter().position(|&s| s == self).unwrap_or(0)
+    }
+
+    /// The heading `render_text` prints it under.
+    pub fn title(self) -> &'static str {
+        match self {
+            Section::Identity => "IDENTITY",
+            Section::Directory => "DIRECTORY",
+            Section::Publisher => "PUBLISHER",
+            Section::Leases => "LEASES",
+            Section::Earnings => "EARNINGS",
+            Section::Funding => "FUNDING",
+        }
     }
 }
 
@@ -55,240 +107,270 @@ pub fn render_text(report: &Report) -> String {
         }
     }
 
-    // ── 1. Identity ───────────────────────────────────────────────────────
-    let _ = writeln!(out, "\nIDENTITY");
-    match status {
-        None => unreachable_line(&mut out, report.operator.error.as_deref()),
-        Some(s) => {
-            let id = &s.identity;
-            let _ = writeln!(out, "  npub          {}", id.npub);
-            let _ = writeln!(out, "  ILP address   {}", id.ilp_address);
-            let _ = writeln!(
-                out,
-                "  mode          {}",
-                if id.hidden {
-                    "hidden (reached only at .anyone addresses)"
-                } else {
-                    "public"
-                }
-            );
-            let probe = &id.connector_identity;
-            let verdict = match probe.matches {
-                Some(true) => "matches the connector's live key".to_string(),
-                Some(false) => format!(
-                    "MISMATCH: the connector reports {}; tenants will refuse to spawn",
-                    abbreviate(probe.live_seal_key.as_deref().unwrap_or("?"))
-                ),
-                None => format!(
-                    "not compared: {}",
-                    probe
-                        .error
-                        .as_deref()
-                        .unwrap_or("the connector did not answer")
-                ),
-            };
-            let _ = writeln!(
-                out,
-                "  sealing key   {} — {verdict}",
-                abbreviate(&id.connector_seal_key)
-            );
+    for section in Section::ALL {
+        let _ = writeln!(out, "\n{}", section.title());
+        out.push_str(&section_text(report, section));
+        if section == Section::Earnings {
+            earnings_hints(&mut out, &report.earnings);
         }
     }
+    out
+}
 
-    // ── 2. Directory ──────────────────────────────────────────────────────
-    let _ = writeln!(out, "\nDIRECTORY");
-    match status {
-        None => unreachable_line(&mut out, report.operator.error.as_deref()),
-        Some(s) if !s.directory.publishing => {
-            let _ = writeln!(
-                out,
-                "  not publishing: no publish_url is configured, so this provider is in no \
-                 directory"
-            );
-        }
-        Some(s) => {
-            let d = &s.directory;
-            let _ = writeln!(
-                out,
-                "  Liveness every {}s; {}",
-                d.liveness_cadence_s,
-                match d.liveness_expires_at {
-                    Some(t) if t > now => format!("the latest expires {}", relative(now, t)),
-                    Some(t) => format!("EXPIRED {} on every relay", relative(now, t)),
-                    None => "no relay has accepted one since the provider started".to_string(),
-                }
-            );
-            for (relay, entries) in &d.relays {
-                let _ = writeln!(out, "  {relay}");
-                outcome_line(&mut out, now, "profile", entries.profile.as_ref());
-                outcome_line(&mut out, now, "liveness", entries.liveness.as_ref());
-                for (name, outcome) in &entries.listings {
-                    outcome_line(&mut out, now, &format!("listing {name}"), outcome.as_ref());
-                }
-            }
-        }
-    }
-
-    // ── 3. Publisher ──────────────────────────────────────────────────────
-    let _ = writeln!(out, "\nPUBLISHER");
-    let p = &report.publisher;
-    match &p.status {
-        None => unreachable_line(&mut out, p.error.as_deref()),
-        Some(ps) => {
-            let _ = writeln!(
-                out,
-                "  channel       {}",
-                match (&ps.channel_id, &ps.chain) {
-                    (Some(id), Some(chain)) => format!("{id} on {chain}"),
-                    (Some(id), None) => id.clone(),
-                    _ => "none opened yet".to_string(),
-                }
-            );
-            let _ = writeln!(
-                out,
-                "  deposit       {}   spent {}   remaining {}   (token base units)",
-                ps.deposit.as_deref().unwrap_or("unknown"),
-                ps.spent.as_deref().unwrap_or("unknown"),
-                ps.remaining.as_deref().unwrap_or("unknown"),
-            );
-            let _ = writeln!(
-                out,
-                "  runway        {}",
-                match ps.runway_s {
-                    Some(r) => format!("{} at the current Liveness cadence", format_duration(r)),
-                    None => format!(
-                        "unknown{}",
-                        ps.assumptions
-                            .first()
-                            .map(|a| format!(" — {a}"))
-                            .unwrap_or_default()
-                    ),
-                }
-            );
-            if ps.drained() {
+/// One section's lines, as `render_text` prints them under its heading —
+/// also what each of `toon-provider dash`'s panes shows.
+pub fn section_text(report: &Report, section: Section) -> String {
+    let mut out = String::new();
+    let now = report.at();
+    let status = report.operator.status.as_ref();
+    match section {
+        Section::Identity => match status {
+            None => unreachable_line(&mut out, report.operator.error.as_deref()),
+            Some(s) => {
+                let id = &s.identity;
+                let _ = writeln!(out, "  npub          {}", id.npub);
+                let _ = writeln!(out, "  ILP address   {}", id.ilp_address);
                 let _ = writeln!(
                     out,
-                    "  DRAINED: no directory write can be paid for. Top up with \
-                     `toon-provider topup <amount>`."
-                );
-            }
-            if ps.watermark_uncertain {
-                let _ = writeln!(
-                    out,
-                    "  the channel watermark is uncertain: spent may be understated"
-                );
-            }
-        }
-    }
-
-    // ── 4. Leases ─────────────────────────────────────────────────────────
-    let _ = writeln!(out, "\nLEASES");
-    match status {
-        None => unreachable_line(&mut out, report.operator.error.as_deref()),
-        Some(s) => {
-            let l = &s.leases;
-            if l.listings.is_empty() {
-                let _ = writeln!(out, "  no listing is on sale");
-            }
-            for (name, use_) in &l.listings {
-                let _ = writeln!(
-                    out,
-                    "  {name} v{}: {} of {} in use, {} available — {} per {}s{}",
-                    use_.version,
-                    use_.live,
-                    use_.capacity,
-                    use_.available,
-                    use_.price,
-                    use_.lease_interval_s,
-                    use_.standby_price
-                        .map(|p| format!(" ({p} standby)"))
-                        .unwrap_or_default(),
-                );
-            }
-            if l.leases.is_empty() {
-                let _ = writeln!(out, "  no leases");
-            }
-            for lease in &l.leases {
-                let ports: Vec<String> = lease
-                    .ports
-                    .iter()
-                    .map(|p| format!("{}→{}", p.container_port, p.host_port))
-                    .collect();
-                let _ = writeln!(
-                    out,
-                    "  #{} {} v{} {} {}, {} {}; ssh {}{}{}; billed {}{}",
-                    lease.id,
-                    lease.listing,
-                    lease.listing_version,
-                    wire_name(&lease.role),
-                    lease_state_name(&lease.state),
-                    match lease.ended_at {
-                        Some(_) => "expired",
-                        None => "expires",
-                    },
-                    relative(now, lease.ended_at.unwrap_or(lease.expires_at)),
-                    lease.ssh_port,
-                    if ports.is_empty() {
-                        String::new()
+                    "  mode          {}",
+                    if id.hidden {
+                        "hidden (reached only at .anyone addresses)"
                     } else {
-                        format!(", ports {}", ports.join(" "))
-                    },
-                    lease
-                        .hidden_address
-                        .as_deref()
-                        .map(|a| format!(", at {a}"))
-                        .unwrap_or_default(),
-                    lease
-                        .billed
-                        .map(|b| b.to_string())
-                        .unwrap_or_else(|| "unknown".to_string()),
-                    if lease.billed_estimated {
-                        " (estimated)"
-                    } else {
-                        ""
-                    },
-                );
-            }
-        }
-    }
-
-    // ── 5. Earnings ───────────────────────────────────────────────────────
-    let _ = writeln!(out, "\nEARNINGS");
-    let e = &report.earnings;
-    match &e.error {
-        Some(error) => unreachable_line(&mut out, Some(error)),
-        None => {
-            if e.channels.is_empty() {
-                let _ = writeln!(out, "  no payer has opened a channel yet");
-            }
-            for c in &e.channels {
-                let _ = writeln!(
-                    out,
-                    "  {}{}: claimed {}, redeemed {}, unredeemed {}; last redeemed {}",
-                    abbreviate(&c.channel_id),
-                    c.status
-                        .as_deref()
-                        .map(|s| format!(" ({s})"))
-                        .unwrap_or_default(),
-                    c.claimed,
-                    c.redeemed,
-                    c.unredeemed,
-                    match c.last_redeemed_at {
-                        Some(t) => relative(now, t),
-                        None => "not since the connector started".to_string(),
+                        "public"
                     }
                 );
+                let probe = &id.connector_identity;
+                let verdict = match probe.matches {
+                    Some(true) => "matches the connector's live key".to_string(),
+                    Some(false) => format!(
+                        "MISMATCH: the connector reports {}; tenants will refuse to spawn",
+                        abbreviate(probe.live_seal_key.as_deref().unwrap_or("?"))
+                    ),
+                    None => format!(
+                        "not compared: {}",
+                        probe
+                            .error
+                            .as_deref()
+                            .unwrap_or("the connector did not answer")
+                    ),
+                };
+                let _ = writeln!(
+                    out,
+                    "  sealing key   {} — {verdict}",
+                    abbreviate(&id.connector_seal_key)
+                );
             }
-            let _ = writeln!(
-                out,
-                "  total unredeemed {} (token base units)",
-                e.total_unredeemed()
-            );
-            if let Some(error) = &e.audit_error {
-                let _ = writeln!(out, "  (last redeemed unknown: {error})");
+        },
+        Section::Directory => match status {
+            None => unreachable_line(&mut out, report.operator.error.as_deref()),
+            Some(s) if !s.directory.publishing => {
+                let _ = writeln!(
+                    out,
+                    "  not publishing: no publish_url is configured, so this provider is in no \
+                     directory"
+                );
+            }
+            Some(s) => {
+                let d = &s.directory;
+                let _ = writeln!(
+                    out,
+                    "  Liveness every {}s; {}",
+                    d.liveness_cadence_s,
+                    match d.liveness_expires_at {
+                        Some(t) if t > now => format!("the latest expires {}", relative(now, t)),
+                        Some(t) => format!("EXPIRED {} on every relay", relative(now, t)),
+                        None => "no relay has accepted one since the provider started".to_string(),
+                    }
+                );
+                for (relay, entries) in &d.relays {
+                    let _ = writeln!(out, "  {relay}");
+                    outcome_line(&mut out, now, "profile", entries.profile.as_ref());
+                    outcome_line(&mut out, now, "liveness", entries.liveness.as_ref());
+                    for (name, outcome) in &entries.listings {
+                        outcome_line(&mut out, now, &format!("listing {name}"), outcome.as_ref());
+                    }
+                }
+            }
+        },
+        Section::Publisher => {
+            let p = &report.publisher;
+            match &p.status {
+                None => unreachable_line(&mut out, p.error.as_deref()),
+                Some(ps) => {
+                    let _ = writeln!(
+                        out,
+                        "  channel       {}",
+                        match (&ps.channel_id, &ps.chain) {
+                            (Some(id), Some(chain)) => format!("{id} on {chain}"),
+                            (Some(id), None) => id.clone(),
+                            _ => "none opened yet".to_string(),
+                        }
+                    );
+                    let _ = writeln!(
+                        out,
+                        "  deposit       {}   spent {}   remaining {}   (token base units)",
+                        ps.deposit.as_deref().unwrap_or("unknown"),
+                        ps.spent.as_deref().unwrap_or("unknown"),
+                        ps.remaining.as_deref().unwrap_or("unknown"),
+                    );
+                    let _ = writeln!(
+                        out,
+                        "  runway        {}",
+                        match ps.runway_s {
+                            Some(r) =>
+                                format!("{} at the current Liveness cadence", format_duration(r)),
+                            None => format!(
+                                "unknown{}",
+                                ps.assumptions
+                                    .first()
+                                    .map(|a| format!(" — {a}"))
+                                    .unwrap_or_default()
+                            ),
+                        }
+                    );
+                    if ps.drained() {
+                        let _ = writeln!(
+                            out,
+                            "  DRAINED: no directory write can be paid for. Top up with \
+                         `toon-provider topup <amount>`."
+                        );
+                    }
+                    if ps.watermark_uncertain {
+                        let _ = writeln!(
+                            out,
+                            "  the channel watermark is uncertain: spent may be understated"
+                        );
+                    }
+                }
+            }
+        }
+        Section::Leases => match status {
+            None => unreachable_line(&mut out, report.operator.error.as_deref()),
+            Some(s) => {
+                let l = &s.leases;
+                if l.listings.is_empty() {
+                    let _ = writeln!(out, "  no listing is on sale");
+                }
+                for (name, use_) in &l.listings {
+                    let _ = writeln!(
+                        out,
+                        "  {name} v{}: {} of {} in use, {} available — {} per {}s{}",
+                        use_.version,
+                        use_.live,
+                        use_.capacity,
+                        use_.available,
+                        use_.price,
+                        use_.lease_interval_s,
+                        use_.standby_price
+                            .map(|p| format!(" ({p} standby)"))
+                            .unwrap_or_default(),
+                    );
+                }
+                if l.leases.is_empty() {
+                    let _ = writeln!(out, "  no leases");
+                }
+                for lease in &l.leases {
+                    let ports: Vec<String> = lease
+                        .ports
+                        .iter()
+                        .map(|p| format!("{}→{}", p.container_port, p.host_port))
+                        .collect();
+                    let _ = writeln!(
+                        out,
+                        "  #{} {} v{} {} {}, {} {}; ssh {}{}{}; billed {}{}",
+                        lease.id,
+                        lease.listing,
+                        lease.listing_version,
+                        wire_name(&lease.role),
+                        lease_state_name(&lease.state),
+                        match lease.ended_at {
+                            Some(_) => "expired",
+                            None => "expires",
+                        },
+                        relative(now, lease.ended_at.unwrap_or(lease.expires_at)),
+                        lease.ssh_port,
+                        if ports.is_empty() {
+                            String::new()
+                        } else {
+                            format!(", ports {}", ports.join(" "))
+                        },
+                        lease
+                            .hidden_address
+                            .as_deref()
+                            .map(|a| format!(", at {a}"))
+                            .unwrap_or_default(),
+                        lease
+                            .billed
+                            .map(|b| b.to_string())
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        if lease.billed_estimated {
+                            " (estimated)"
+                        } else {
+                            ""
+                        },
+                    );
+                }
+            }
+        },
+        Section::Earnings => {
+            let e = &report.earnings;
+            match &e.error {
+                Some(error) => unreachable_line(&mut out, Some(error)),
+                None => {
+                    if e.channels.is_empty() {
+                        let _ = writeln!(out, "  no payer has opened a channel yet");
+                    }
+                    for c in &e.channels {
+                        let _ = writeln!(
+                            out,
+                            "  {}{}: claimed {}, redeemed {}, unredeemed {}; last redeemed {}",
+                            abbreviate(&c.channel_id),
+                            c.status
+                                .as_deref()
+                                .map(|s| format!(" ({s})"))
+                                .unwrap_or_default(),
+                            c.claimed,
+                            c.redeemed,
+                            c.unredeemed,
+                            match c.last_redeemed_at {
+                                Some(t) => relative(now, t),
+                                None => "not since the connector started".to_string(),
+                            }
+                        );
+                    }
+                    let _ = writeln!(
+                        out,
+                        "  total unredeemed {} (token base units)",
+                        e.total_unredeemed()
+                    );
+                    if let Some(error) = &e.audit_error {
+                        let _ = writeln!(out, "  (last redeemed unknown: {error})");
+                    }
+                }
+            }
+        }
+        Section::Funding => {
+            let f = &report.funding;
+            match f.lamports {
+                Some(lamports) => {
+                    let _ = writeln!(
+                        out,
+                        "  settlement    {} holds {} SOL (read from {})",
+                        f.address.as_deref().unwrap_or("?"),
+                        format_sol(lamports),
+                        f.rpc.as_deref().unwrap_or("?"),
+                    );
+                }
+                None => unreachable_line(&mut out, f.error.as_deref()),
             }
         }
     }
+    out
+}
+
+/// Where the rest of the earnings story is: `redeem`, and the connector's
+/// dashboard. Printed by `status`, not in `dash`, which redeems itself.
+fn earnings_hints(out: &mut String, e: &EarningsSection) {
     let _ = writeln!(
         out,
         "  To collect it: `toon-provider redeem` lists each channel with a gas estimate and \
@@ -307,23 +389,6 @@ pub fn render_text(report: &Report) -> String {
             None => " at <connector edge>/dashboard".to_string(),
         },
     );
-
-    // ── 6. Funding ────────────────────────────────────────────────────────
-    let _ = writeln!(out, "\nFUNDING");
-    let f = &report.funding;
-    match f.lamports {
-        Some(lamports) => {
-            let _ = writeln!(
-                out,
-                "  settlement    {} holds {} SOL (read from {})",
-                f.address.as_deref().unwrap_or("?"),
-                format_sol(lamports),
-                f.rpc.as_deref().unwrap_or("?"),
-            );
-        }
-        None => unreachable_line(&mut out, f.error.as_deref()),
-    }
-    out
 }
 
 fn unreachable_line(out: &mut String, error: Option<&str>) {
@@ -463,4 +528,138 @@ pub fn to_json(report: &Report, outcome: Option<&CheckOutcome>) -> Value {
         );
     }
     Value::Object(doc)
+}
+
+/// The sections `to_json` adds beside the provider's own document.
+const ADDED_SECTIONS: [&str; 4] = ["publisher", "earnings", "funding", "check"];
+
+/// A document `to_json` printed, read back into the report it was printed
+/// from — what `toon-provider dash` is fed in its snapshot tests, and what a
+/// view on another machine reads from `status --json`. `check` is ignored:
+/// it is recomputed from the report with the reader's own thresholds.
+pub fn from_json(doc: &Value) -> Result<Report> {
+    let doc = doc
+        .as_object()
+        .context("a status document is a JSON object")?;
+    let now = doc
+        .get("generated_at")
+        .and_then(Value::as_u64)
+        .context("a status document has a generated_at")?;
+
+    let identity = doc.get("identity").context("no identity section")?;
+    let operator = match identity.get("error").and_then(Value::as_str) {
+        // The provider did not answer: `to_json` wrote its error into each
+        // of the provider's own sections.
+        Some(error) if identity.get("npub").is_none() => OperatorSource {
+            url: string_field(identity, "url").unwrap_or_default(),
+            raw: None,
+            status: None,
+            error: Some(error.to_string()),
+        },
+        _ => {
+            let mut raw = doc.clone();
+            for key in ADDED_SECTIONS {
+                raw.remove(key);
+            }
+            let raw = Value::Object(raw);
+            let status: OperatorStatus = serde_json::from_value(raw.clone())
+                .context("the provider's sections are not an operator status document")?;
+            OperatorSource {
+                url: String::new(),
+                raw: Some(raw),
+                status: Some(status),
+                error: None,
+            }
+        }
+    };
+
+    let p = doc
+        .get("publisher")
+        .and_then(Value::as_object)
+        .context("no publisher section")?;
+    let publisher = match p.get("error").and_then(Value::as_str) {
+        Some(error) => PublisherSection {
+            url: p.get("url").and_then(Value::as_str).map(str::to_string),
+            raw: None,
+            status: None,
+            error: Some(error.to_string()),
+        },
+        None => {
+            let mut raw = p.clone();
+            raw.remove("url");
+            raw.remove("error");
+            let status: PublisherStatus = serde_json::from_value(Value::Object(raw.clone()))
+                .context("the publisher section is not a publisher status")?;
+            PublisherSection {
+                url: p.get("url").and_then(Value::as_str).map(str::to_string),
+                raw: Some(raw),
+                status: Some(status),
+                error: None,
+            }
+        }
+    };
+
+    let e = doc.get("earnings").context("no earnings section")?;
+    let channels = match e.get("channels").and_then(Value::as_array) {
+        None => Vec::new(),
+        Some(rows) => rows
+            .iter()
+            .map(|c| {
+                Ok(ChannelEarnings {
+                    channel_id: string_field(c, "channel_id").context("a channel with no id")?,
+                    counterparty: string_field(c, "counterparty"),
+                    status: string_field(c, "status"),
+                    deposited: amount(c, "deposited")?,
+                    claimed: amount(c, "claimed")?.unwrap_or(0),
+                    redeemed: amount(c, "redeemed")?.unwrap_or(0),
+                    unredeemed: amount(c, "unredeemed")?.unwrap_or(0),
+                    last_redeemed_at: c.get("last_redeemed_at").and_then(Value::as_u64),
+                })
+            })
+            .collect::<Result<_>>()?,
+    };
+    let earnings = EarningsSection {
+        url: string_field(e, "url"),
+        dashboard_url: string_field(e, "dashboard_url"),
+        channels,
+        error: string_field(e, "error"),
+        audit_error: string_field(e, "audit_error"),
+    };
+
+    let f = doc.get("funding").context("no funding section")?;
+    let funding = FundingSection {
+        address: string_field(f, "address"),
+        rpc: string_field(f, "rpc"),
+        lamports: f.get("lamports").and_then(Value::as_u64),
+        error: string_field(f, "error"),
+    };
+
+    Ok(Report {
+        now,
+        operator,
+        publisher,
+        earnings,
+        funding,
+    })
+}
+
+fn string_field(v: &Value, key: &str) -> Option<String> {
+    v.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// A decimal-string amount, as `to_json` writes one.
+fn amount(v: &Value, key: &str) -> Result<Option<u128>> {
+    match v.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => {
+            Ok(Some(s.parse().with_context(|| {
+                format!("{key} {s:?} is not an amount")
+            })?))
+        }
+        Some(Value::Number(n)) => match n.as_u64() {
+            Some(n) => Ok(Some(u128::from(n))),
+            None => bail!("{key} {n} is not an amount"),
+        },
+        Some(other) => bail!("{key} {other} is not an amount"),
+    }
 }

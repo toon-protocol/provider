@@ -295,7 +295,7 @@ fn check_funding(report: &Report, thresholds: &Thresholds, out: &mut CheckOutcom
 }
 
 /// A long key or id as its first and last few characters.
-pub(super) fn abbreviate(text: &str) -> String {
+pub(crate) fn abbreviate(text: &str) -> String {
     if text.chars().count() <= 20 {
         return text.to_string();
     }

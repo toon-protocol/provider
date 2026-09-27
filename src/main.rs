@@ -103,6 +103,17 @@ enum Command {
     /// anywhere, and one given on the command line is refused.
     Redeem(toon_provider::redeem::RedeemArgs),
 
+    /// A full-screen view of `status`, read again on the Liveness cadence,
+    /// with whatever `status --check` would fail on in red (ADR 0029).
+    ///
+    /// Six panes: identity, directory, publisher, leases, earnings,
+    /// funding. `r` redeems earnings (the channels `redeem` offers, then the
+    /// operator key typed into a field that never shows it, held in memory
+    /// only), `t` tops up the publisher, `u` refreshes, `q` quits. Both money
+    /// actions ask for `y` then Enter. Needs a terminal: `docker compose exec
+    /// provider toon-provider dash`.
+    Dash(toon_provider::dash::DashArgs),
+
     /// Run the Hidden Provider's DNS shim (TOON_Network#166): forward A (and
     /// any non-AAAA) queries to `anon`'s `DNSPort` unchanged, and answer
     /// every AAAA query itself with NOERROR and no records, so a musl
@@ -227,7 +238,9 @@ async fn main() -> Result<()> {
             let publish_url = config.publish_url.as_deref().with_context(|| {
                 "no publish_url is configured; this provider has no directory publisher to top up"
             })?;
-            let origin = publisher_origin(publish_url)?;
+            // Checked before the question, so a bad publish_url is not
+            // discovered only after the operator has said yes.
+            publisher_origin(publish_url)?;
             if !confirmed(yes, &amount, |question| {
                 eprint!("{question}");
                 use std::io::Write;
@@ -241,23 +254,7 @@ async fn main() -> Result<()> {
                 println!("Not confirmed; nothing was topped up.");
                 return Ok(());
             }
-            let url = format!("{}/topup", origin.trim_end_matches('/'));
-            let response = reqwest::Client::new()
-                .post(&url)
-                .json(&serde_json::json!({ "amount": amount }))
-                .send()
-                .await
-                .with_context(|| {
-                    format!(
-                        "reaching the publisher at {} — is directory-publisher running?",
-                        url
-                    )
-                })?;
-            let status = response.status();
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .context("reading the publisher's answer")?;
+            let (status, body) = toon_provider::topup::send(publish_url, &amount).await?;
             println!("{}", serde_json::to_string_pretty(&body)?);
             if !status.is_success() {
                 anyhow::bail!("top-up refused: {}", status);
@@ -268,6 +265,7 @@ async fn main() -> Result<()> {
             let code = toon_provider::status::run(&config, &args).await?;
             std::process::exit(code)
         }
+        Some(Command::Dash(args)) => toon_provider::dash::run(&config, &args).await,
         Some(Command::Redeem(_)) => unreachable!("handled before the config is loaded"),
         Some(Command::DnsShim(_)) => unreachable!("handled before the config is loaded"),
         None => ProviderService::new(config)?.run().await,

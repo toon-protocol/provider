@@ -1,0 +1,44 @@
+---
+source: tests/dash.rs
+expression: frame(&app)
+---
+ toon-provider dash ── Fixture Provider ── up 1h ── ● check OK ── as of 22:14:20 UTC, every 60s
+┌ IDENTITY ────────────────────────────────────────────────┐┌ DIRECTORY ───────────────────────────────────────────────┐
+│npub                                                      ││Liveness every 60s; the latest expires in 5m              │
+│npub1gekhljh9v0jukzdq6xrshdvqx3yqgctc0xs5jjw0yg597xaw8uns4││ws://relay-two.fixture.example:7100                       │
+│7vduw                                                     ││  profile       accepted 1m ago                           │
+│ILP address   g.fixture                                   ││  liveness      accepted 0s ago, expires in 5m            │
+│mode          public                                      ││  listing basic accepted 1m ago                           │
+│sealing key   0x04325b06…ed0188 — matches the connector's ││  listing gpu   accepted 1m ago                           │
+│live key                                                  ││  listing warm  accepted 1m ago                           │
+│                                                          ││ws://relay.fixture.example:7100                           │
+│                                                          ││  profile       accepted 1m ago                           │
+│                                                          ││  liveness      accepted 0s ago, expires in 5m            │
+│                                                          ││  listing basic accepted 1m ago                           │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────── ↓ more: Tab here, then j ┘
+┌ PUBLISHER ───────────────────────────────────────────────┐┌ LEASES ──────────────────────────────────────────────────┐
+│channel       PubChanne1111111111111111111111111111111111 ││basic v1: 1 of 2 in use, 1 available — 1000 per 3600s     │
+│on s┌ Top up ────────────────────────────────────────────────────────────────────────────────────────────────────┐    │
+│depo│Add 5000000 (token base units) to the publisher's channel PubChanne1111111111111111111111111111111111?      │400 │
+│(tok│It has 9997019 remaining now.                                                                               │    │
+│runw│The publisher deposits it on chain from its own wallet.                                                     │ssh │
+│    │                                                                                                            │    │
+│    │y then Enter confirms   Esc cancels                                                                         │001,│
+│    └────────────────────────────────────────────────────────────────────────────────────────────────────────────┘    │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+┌ EARNINGS ────────────────────────────────────────────────┐┌ FUNDING ─────────────────────────────────────────────────┐
+│0xabababab…ababab (open): claimed 3400, redeemed 1000,    ││settlement    9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin│
+│unredeemed 2400; last redeemed 10m ago                    ││holds 1.5 SOL (read from                                  │
+│2aEVJ8koKD…zQ7Rip: claimed 600, redeemed 0, unredeemed    ││https://solana-rpc.fixture.example)                       │
+│600; last redeemed not since the connector started        ││                                                          │
+│total unredeemed 3000 (token base units)                  ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+└──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
+ r redeem  t top up  u refresh  Tab pane  j/k scroll  q quit

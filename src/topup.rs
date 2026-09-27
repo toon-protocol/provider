@@ -66,6 +66,32 @@ pub fn confirmed(
     Ok(answer.trim().eq_ignore_ascii_case("yes"))
 }
 
+/// `POST <publisher origin>/topup` with `amount`, answering the publisher's
+/// HTTP status and JSON body — `toon-provider topup` and `dash` both print
+/// that body, and treat anything but success as refused. `amount` must
+/// already have passed [`validate_amount`] and been confirmed by a person.
+pub async fn send(
+    publish_url: &str,
+    amount: &str,
+) -> Result<(reqwest::StatusCode, serde_json::Value)> {
+    let origin = publisher_origin(publish_url)?;
+    let url = format!("{}/topup", origin.trim_end_matches('/'));
+    let response = reqwest::Client::new()
+        .post(&url)
+        .json(&serde_json::json!({ "amount": amount }))
+        .send()
+        .await
+        .with_context(|| {
+            format!("reaching the publisher at {url} — is directory-publisher running?")
+        })?;
+    let status = response.status();
+    let body = response
+        .json()
+        .await
+        .context("reading the publisher's answer")?;
+    Ok((status, body))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

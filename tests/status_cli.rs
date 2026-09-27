@@ -23,7 +23,7 @@ mod common;
 use common::socks::SocksStub;
 use toon_provider::provider::{AnonConfig, SettlementRpc, SettlementRpcs};
 use toon_provider::status::{
-    check, gather, render_text, to_json, Report, Sources, StatusArgs, Thresholds,
+    check, from_json, gather, render_text, to_json, Report, ReportArgs, Sources, Thresholds,
 };
 use toon_provider::ProviderConfig;
 
@@ -236,10 +236,8 @@ impl World {
         }
     }
 
-    fn args(&self) -> StatusArgs {
-        StatusArgs {
-            json: false,
-            check: false,
+    fn args(&self) -> ReportArgs {
+        ReportArgs {
             min_runway: 7 * 86_400,
             min_sol: 5_000_000,
             connector_operator_url: Some(self.connector.uri()),
@@ -254,7 +252,7 @@ impl World {
         self.report_with(&self.config(), &self.args()).await
     }
 
-    async fn report_with(&self, config: &ProviderConfig, args: &StatusArgs) -> Report {
+    async fn report_with(&self, config: &ProviderConfig, args: &ReportArgs) -> Report {
         gather(&Sources::from_config(config, args), AT).await
     }
 }
@@ -1095,4 +1093,120 @@ async fn the_binary_exits_zero_on_a_healthy_box_and_one_on_a_drained_publisher()
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(1), "{stdout}");
     assert!(stdout.contains("under --min-sol 2"), "{stdout}");
+}
+
+// ── `status --json --check` fixtures (TOON_Network#174) ─────────────────────
+//
+// `toon-provider dash` is a view over the document `status --json` prints,
+// and its snapshot tests are fed these files. They are generated HERE, by
+// the real `gather` over the stubbed sources above and the real `to_json`,
+// with each stub's random port replaced by a fixed, compose-like address —
+// so nothing in them is typed by hand. The suite verifies them byte for
+// byte; `TOON_UPDATE_FIXTURES=1 cargo test --test status_cli` rewrites them.
+
+fn status_fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/status")
+}
+
+/// `status --json --check` for `world`, with its stubs' addresses fixed.
+async fn status_json(world: &World, config: &ProviderConfig) -> String {
+    let report = world.report_with(config, &world.args()).await;
+    let doc = to_json(&report, Some(&check(&report, &thresholds())));
+    let mut text = serde_json::to_string_pretty(&doc).unwrap() + "\n";
+    for (server, fixed) in [
+        (&world.operator, "http://127.0.0.1:8090"),
+        (&world.publisher, "http://directory-publisher:8081"),
+        (&world.connector, "http://provider-connector:4000"),
+        (&world.rpc, "https://solana-rpc.fixture.example"),
+    ] {
+        text = text.replace(&server.uri(), fixed);
+    }
+    text
+}
+
+fn golden_status(name: &str, text: String) {
+    let path = status_fixture_dir().join(format!("{name}.json"));
+    if std::env::var_os("TOON_UPDATE_FIXTURES").is_some() {
+        std::fs::create_dir_all(status_fixture_dir()).unwrap();
+        std::fs::write(&path, &text).unwrap();
+        return;
+    }
+    let on_disk = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "{}: {e}. Generate it (TOON_UPDATE_FIXTURES=1 cargo test --test status_cli) and \
+             commit the result.",
+            path.display()
+        )
+    });
+    assert_eq!(
+        on_disk,
+        text,
+        "{} has drifted from what `status --json` prints; regenerate it \
+         (TOON_UPDATE_FIXTURES=1 cargo test --test status_cli) and commit the result",
+        path.display()
+    );
+}
+
+#[tokio::test]
+async fn status_json_fixture_healthy() {
+    let world = World::healthy().await;
+    golden_status("healthy", status_json(&world, &world.config()).await);
+}
+
+/// A box with something wrong in every section `--check` judges: the
+/// sealing key mismatched, a relay refusing the latest Liveness, the
+/// publisher drained, the bearer token refused, and the settlement key low
+/// on SOL.
+#[tokio::test]
+async fn status_json_fixture_troubled() {
+    let world = World::new().await;
+    let mut doc = fixture_doc();
+    doc["started_at"] = json!(AT - 3_600);
+    doc["identity"]["connector_identity"]["matches"] = json!(false);
+    doc["identity"]["connector_identity"]["live_seal_key"] =
+        json!("0x04ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    world.operator_answers(doc).await;
+    let mut body = publisher_body("0", Value::Null);
+    body["spent"] = json!("10000000");
+    world.publisher_answers(body).await;
+    world.rpc_answers(4_000_000).await;
+    // No connector stub answers: every read is a 404.
+    golden_status("troubled", status_json(&world, &world.config()).await);
+}
+
+#[tokio::test]
+async fn status_json_fixture_provider_down() {
+    let world = World::healthy().await;
+    let config = ProviderConfig {
+        operator_url: DEAD.to_string(),
+        ..world.config()
+    };
+    golden_status("provider_down", status_json(&world, &config).await);
+}
+
+/// What `dash` reads back is what `status --json` printed: every fixture
+/// parses into a `Report` that prints the same document again.
+#[test]
+fn every_status_json_fixture_reads_back_into_the_same_document() {
+    let mut seen = 0;
+    for entry in std::fs::read_dir(status_fixture_dir()).unwrap() {
+        let path = entry.unwrap().path();
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let report = from_json(&doc).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+        let mut again = to_json(&report, Some(&check(&report, &thresholds())));
+        assert_eq!(again, doc, "{}", path.display());
+        again.as_object_mut().unwrap().remove("check");
+        assert_eq!(to_json(&report, None), again, "{}", path.display());
+        seen += 1;
+    }
+    assert!(
+        seen >= 3,
+        "only {seen} fixtures under tests/fixtures/status"
+    );
+}
+
+#[test]
+fn a_document_that_is_not_a_status_is_refused() {
+    assert!(from_json(&json!([1, 2])).is_err());
+    assert!(from_json(&json!({ "version": 1 })).is_err());
 }
