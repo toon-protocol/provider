@@ -393,9 +393,11 @@ KEY_FILES = {
 # README asks for 1-2 SOL; this is the floor below which a first boot is
 # certain to fail, not a recommendation.
 MIN_LAMPORTS = 5_000_000
-# The publisher deposits TOON_DEPOSIT (docker-compose.yml) into the channel it
-# opens on first publish: 10 USDC at 6 decimals.
-PUBLISHER_DEPOSIT = 10_000_000
+# The publisher opens each Solana channel with TOON_DEPOSIT, which
+# docker-compose.yml sets from PUBLISHER_DEPOSIT in .env: 10 USDC at 6
+# decimals unless the operator says otherwise. A Solana channel is never
+# topped up: the write one cannot cover opens a fresh one of this size.
+DEFAULT_PUBLISHER_DEPOSIT = 10_000_000
 
 DEVNET_SOLANA_RPC = "https://api.devnet.solana.com"
 TOON_FAUCET = "https://faucet.devnet.toonprotocol.dev"
@@ -403,6 +405,10 @@ TOON_FAUCET = "https://faucet.devnet.toonprotocol.dev"
 
 def env(name):
     return os.environ.get(name, "").strip()
+
+
+def publisher_deposit():
+    return int(env("PUBLISHER_DEPOSIT") or DEFAULT_PUBLISHER_DEPOSIT)
 
 
 def is_devnet_preset():
@@ -516,12 +522,17 @@ def addresses(role):
             "The publisher's Solana wallet (PUBLISHER_MNEMONIC)",
             publisher,
             "REQUIRED TO BE LISTED: it pays the relay for every directory write",
-            [
-                "1 devnet SOL, from https://faucet.solana.com, and mock USDC:",
+            ([
+                "mock USDC:",
                 f"curl -X POST {TOON_FAUCET}/api/solana/usdc-request \\",
                 "  -H 'content-type: application/json' -d '{\"address\":\"" + publisher + "\"}'",
             ] if devnet else [
-                f"SOL, and at least {PUBLISHER_DEPOSIT / 1e6:g} of the token {env('SETTLEMENT_SOLANA_TOKEN')}",
+                f"at least {publisher_deposit() / 1e6:g} of the token {env('SETTLEMENT_SOLANA_TOKEN')}",
+            ]) + [
+                # The relay's connector sponsors the open (x402), and a
+                # channel is replaced from this wallet, never topped up.
+                "No SOL: the relay's connector pays to open each channel. SOL is only for",
+                "leaving one (request_close, withdraw_payer).",
             ],
         ))
     rows.append((
@@ -614,11 +625,12 @@ def cmd_check_funded(role, warn_only):
             publisher = rows[1][1]
             balance = lamports(publisher_rpc, publisher)
             usdc = token_units(publisher_rpc, publisher, env("SETTLEMENT_SOLANA_TOKEN"))
+            # Its SOL is printed, never required: opening a channel costs
+            # the payer none (the relay's connector sponsors it).
             print(f"    publisher  {publisher}  {balance / 1e9:.4f} SOL, {usdc / 1e6:g} USDC")
-            if balance < MIN_LAMPORTS:
-                short.append(f"the publisher's wallet holds {balance / 1e9:.4f} SOL")
-            if usdc < PUBLISHER_DEPOSIT:
-                short.append(f"the publisher's wallet holds {usdc / 1e6:g} USDC, less than the {PUBLISHER_DEPOSIT / 1e6:g} it deposits")
+            deposit = publisher_deposit()
+            if usdc < deposit:
+                short.append(f"the publisher's wallet holds {usdc / 1e6:g} USDC, less than the {deposit / 1e6:g} it deposits")
     except (OSError, urllib.error.URLError, RuntimeError, KeyError, ValueError) as error:
         print(f"::warning:: could not read a balance from the Solana RPC ({error}); not checked.")
         return 3
@@ -639,7 +651,7 @@ def cmd_check_funded(role, warn_only):
 
 def main(argv):
     if len(argv) < 3 or argv[1] not in ("provider", "gateway"):
-        print("usage: keys.py provider|gateway init|addresses|check-funded [--warn-only]|solana-address", file=sys.stderr)
+        print("usage: keys.py provider|gateway init|addresses|check-funded [--warn-only]|solana-address|publisher-address", file=sys.stderr)
         return 2
     role, command = argv[1], argv[2]
     try:
@@ -655,6 +667,14 @@ def main(argv):
         # render.sh writes for `toon-provider status` to read a balance for.
         if command == "solana-address":
             print(base58(ed25519_public_key(read_key("settlement-solana.key"))))
+            return 0
+        # The publisher's Solana wallet and nothing else: what render.sh
+        # writes for `toon-provider status` to read the wallet's USDC for.
+        if command == "publisher-address":
+            mnemonic = env("PUBLISHER_MNEMONIC")
+            if not mnemonic:
+                raise KeyError("PUBLISHER_MNEMONIC is empty in .env -- run ./keys.sh init")
+            print(solana_address_from_mnemonic(mnemonic))
             return 0
         # The derivations alone, one per line, for the tests that pin them.
         if command == "derive":

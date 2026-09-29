@@ -9,8 +9,10 @@ expression: "text(&buffer(&app_with(\"troubled\"), 80, 60))"
 │spawn                                                                         │
 │PROBLEM directory: ws://relay-two.fixture.example:7100 refused the latest     │
 │write of the Liveness: relay refused (last accepted 1m ago)                   │
-│PROBLEM publisher: the channel PubChanne1…111111 is drained (remaining 0 of   │
-│10000000); no directory write can be paid for — `toon-provider topup <amount>`│
+│PROBLEM publisher: the channel is drained, and the wallet                     │
+│7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy holds 4000000, less than the     │
+│10000000 the next channel takes; no directory write can be paid for until it  │
+│does                                                                          │
 │PROBLEM funding: the connector's Solana settlement address                    │
 │9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin holds 0.004 SOL, under --min-sol │
 │0.005; the connector cannot pay for its boot transaction                      │
@@ -22,7 +24,6 @@ expression: "text(&buffer(&app_with(\"troubled\"), 80, 60))"
 │mode          public                                                          │
 │sealing key   0x04325b06…ed0188 — MISMATCH: the connector reports             │
 │0x04ffffff…ffffff; tenants will refuse to spawn                               │
-│                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ DIRECTORY ───────────────────────────────────────────────────────────────────┐
 │Liveness every 60s; the latest expires in 5m                                  │
@@ -36,9 +37,9 @@ expression: "text(&buffer(&app_with(\"troubled\"), 80, 60))"
 │deposit       10000000   spent 10000000   remaining 0   (token base units)    │
 │runway        unknown — runway = remaining ÷ (price per write × writes per    │
 │cadence)                                                                      │
-│DRAINED: no directory write can be paid for. Top up with `toon-provider topup │
-│<amount>`.                                                                    │
-└──────────────────────────────────────────────────────────────────────────────┘
+│DRAINED: no directory write can be paid for until the wallet                  │
+│7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy holds 10000000 (it holds         │
+└──────────────────────────────────────────────────── ↓ more: Tab here, then j ┘
 ┌ LEASES ──────────────────────────────────────────────────────────────────────┐
 │basic v1: 1 of 2 in use, 1 available — 1000 per 3600s                         │
 │gpu v1: 0 of 1 in use, 1 available — 1000 per 3600s                           │
@@ -52,13 +53,12 @@ expression: "text(&buffer(&app_with(\"troubled\"), 80, 60))"
 │                                                                              │
 │                                                                              │
 │                                                                              │
-│                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
 ┌ FUNDING ─────────────────────────────────────────────────────────────────────┐
 │settlement    9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin holds 0.004 SOL    │
 │(read from https://solana-rpc.fixture.example)                                │
-│                                                                              │
-│                                                                              │
+│publisher     7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy holds 4000000 of   │
+│34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU; the next channel takes 10000000 │
 │                                                                              │
 └──────────────────────────────────────────────────────────────────────────────┘
  r redeem  t top up  u refresh  Tab pane  j/k scroll  q quit

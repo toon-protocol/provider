@@ -8,6 +8,7 @@
 #   .env OPERATOR_BEARER_TOKEN-> operator-bearer.token       (0600 — a secret)
 #   .env OPERATOR_WRITE_KEY   -> operator-write.keys         (0600 — public keys)
 #   settlement-solana.key     -> settlement-solana.address   (0644 — public)
+#   .env PUBLISHER_MNEMONIC   -> publisher-solana.address    (0644 — public)
 #   nginx/node.conf.template  -> nginx/conf.d/node.conf     (public box only)
 #
 # ── Public or hidden ─────────────────────────────────────────────────────────
@@ -513,6 +514,20 @@ else
   : > settlement-solana.address
 fi
 chmod 644 settlement-solana.address
+
+# ── The wallet `toon-provider status` reads the publisher's USDC for ────────
+# PUBLIC: the Solana address PUBLISHER_MNEMONIC derives, the one the publisher
+# opens each channel from. An x402 Solana channel is replaced from this
+# wallet, never topped up, so whether the next directory write can be paid
+# for is its balance to say. Written EMPTY when it cannot be derived, for the
+# same reason as above; the provider is never handed the mnemonic.
+if [ -f keys.py ] && command -v python3 >/dev/null 2>&1 \
+  && PUBLISHER_SOLANA_ADDRESS=$(python3 keys.py provider publisher-address 2>/dev/null); then
+  printf '%s\n' "$PUBLISHER_SOLANA_ADDRESS" > publisher-solana.address
+else
+  : > publisher-solana.address
+fi
+chmod 644 publisher-solana.address
 
 # None of these may be world-readable — but the connector container runs as uid
 # 10001, and a root-owned 0600 file is unreadable to it ("failed to read config

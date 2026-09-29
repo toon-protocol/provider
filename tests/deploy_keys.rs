@@ -453,6 +453,18 @@ fn addresses_prints_every_address_to_fund_and_how() {
     }
     // The mock-USDC request names the publisher, not the connector.
     assert!(printed.contains(&format!(r#"{{"address":"{}"}}"#, PUBLISHER[1].1)));
+    // …and asks it for no SOL: opening its channel is sponsored.
+    let publisher_row = printed
+        .split("\n2. ")
+        .nth(1)
+        .and_then(|rest| rest.split("\n3. ").next())
+        .expect("the publisher is the second row");
+    assert!(publisher_row.contains("USDC"), "{publisher_row}");
+    assert!(
+        !publisher_row.contains("devnet SOL, from"),
+        "{publisher_row}"
+    );
+    assert!(publisher_row.contains("No SOL"), "{publisher_row}");
     // Nothing is left for the operator to convert.
     assert!(
         !printed.contains(ED25519[0].1),
@@ -582,6 +594,62 @@ fn a_publisher_without_its_deposit_is_refused() {
     let output = keys_sh(dir.path(), &["check-funded"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(stdout(&output).contains("USDC"));
+}
+
+#[test]
+fn a_publisher_with_usdc_and_no_sol_passes() {
+    // The relay's connector sponsors opening a Solana channel: the payer
+    // needs no SOL to open one or to pay over it, only to leave one.
+    let (url, _) = stub_rpc(BTreeMap::from([
+        (ED25519[0].2.to_string(), (1_000_000_000, 0)),
+        (PUBLISHER[1].1.to_string(), (0, 10_000_000)),
+    ]));
+    let dir = funded_bundle(&format!(
+        "SETTLEMENT_SOLANA_RPC_URL={url}\nSOLANA_RPC_URL={url}\n"
+    ));
+    let output = keys_sh(dir.path(), &["check-funded"]);
+    let printed = stdout(&output);
+    assert_eq!(output.status.code(), Some(0), "{printed}");
+    assert!(!printed.contains("short:"), "{printed}");
+}
+
+#[test]
+fn the_publishers_deposit_is_the_one_env_names() {
+    // PUBLISHER_DEPOSIT is what the compose file hands the publisher as
+    // TOON_DEPOSIT; the check asks for that, not a constant.
+    let (url, _) = stub_rpc(BTreeMap::from([
+        (ED25519[0].2.to_string(), (1_000_000_000, 0)),
+        (PUBLISHER[1].1.to_string(), (0, 3_000_000)),
+    ]));
+    let dir = funded_bundle(&format!(
+        "SETTLEMENT_SOLANA_RPC_URL={url}\nSOLANA_RPC_URL={url}\nPUBLISHER_DEPOSIT=2000000\n"
+    ));
+    let output = keys_sh(dir.path(), &["check-funded"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+
+    let dir = funded_bundle(&format!(
+        "SETTLEMENT_SOLANA_RPC_URL={url}\nSOLANA_RPC_URL={url}\nPUBLISHER_DEPOSIT=5000000\n"
+    ));
+    let output = keys_sh(dir.path(), &["check-funded"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stdout(&output));
+    assert!(stdout(&output).contains("less than the 5 it deposits"));
+}
+
+#[test]
+fn keys_py_prints_the_publisher_address_alone() {
+    let dir = funded_bundle("");
+    let output = Command::new("python3")
+        .args(["keys.py", "provider", "publisher-address"])
+        .current_dir(dir.path())
+        .env("PUBLISHER_MNEMONIC", PUBLISHER[1].0)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(stdout(&output), format!("{}\n", PUBLISHER[1].1));
 }
 
 #[test]

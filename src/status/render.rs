@@ -14,7 +14,7 @@ use crate::provider::operator_status::{OperatorStatus, OPERATOR_STATUS_VERSION};
 use super::check::{abbreviate, CheckOutcome};
 use super::gather::{
     ChannelEarnings, EarningsSection, FundingSection, OperatorSource, PublisherSection,
-    PublisherStatus, Report,
+    PublisherStatus, PublisherWallet, Report,
 };
 use super::{format_duration, format_sol};
 
@@ -228,12 +228,35 @@ pub fn section_text(report: &Report, section: Section) -> String {
                             ),
                         }
                     );
-                    if ps.drained() {
-                        let _ = writeln!(
-                            out,
-                            "  DRAINED: no directory write can be paid for. Top up with \
-                         `toon-provider topup <amount>`."
-                        );
+                    let wallet = &report.funding.publisher;
+                    match (ps.drained(), ps.on_solana(), wallet.short()) {
+                        (false, _, _) => {}
+                        // Replaced, never topped up: the wallet decides.
+                        (true, true, Some(true)) => {
+                            let _ = writeln!(
+                                out,
+                                "  DRAINED: no directory write can be paid for until the wallet \
+                                 {} holds {} (it holds {}).",
+                                wallet.address.as_deref().unwrap_or("?"),
+                                next_deposit(wallet),
+                                wallet.units.unwrap_or(0),
+                            );
+                        }
+                        (true, true, _) => {
+                            let _ = writeln!(
+                                out,
+                                "  spent: the next write opens a fresh channel of {} from the \
+                                 publisher's wallet.",
+                                next_deposit(wallet),
+                            );
+                        }
+                        (true, false, _) => {
+                            let _ = writeln!(
+                                out,
+                                "  DRAINED: no directory write can be paid for. Top up with \
+                                 `toon-provider topup <amount>`."
+                            );
+                        }
                     }
                     if ps.watermark_uncertain {
                         let _ = writeln!(
@@ -363,9 +386,41 @@ pub fn section_text(report: &Report, section: Section) -> String {
                 }
                 None => unreachable_line(&mut out, f.error.as_deref()),
             }
+            let w = &f.publisher;
+            match w.units {
+                Some(units) => {
+                    let _ = writeln!(
+                        out,
+                        "  publisher     {} holds {} of {}; {}",
+                        w.address.as_deref().unwrap_or("?"),
+                        units,
+                        w.token.as_deref().unwrap_or("?"),
+                        match w.next_deposit {
+                            Some(n) => format!("the next channel takes {n}"),
+                            None => "the next channel's size is unknown (TOON_PUBLISHER_DEPOSIT)"
+                                .to_string(),
+                        },
+                    );
+                }
+                None => {
+                    let _ = writeln!(
+                        out,
+                        "  publisher     unavailable: {}",
+                        w.error.as_deref().unwrap_or("this source did not answer")
+                    );
+                }
+            }
         }
     }
     out
+}
+
+/// What the publisher's next channel takes, for a sentence.
+fn next_deposit(wallet: &PublisherWallet) -> String {
+    match wallet.next_deposit {
+        Some(n) => n.to_string(),
+        None => "(TOON_DEPOSIT)".to_string(),
+    }
 }
 
 /// Where the rest of the earnings story is: `redeem`, and the connector's
@@ -514,6 +569,13 @@ pub fn to_json(report: &Report, outcome: Option<&CheckOutcome>) -> Value {
             "lamports": f.lamports,
             "sol": f.lamports.map(format_sol),
             "error": f.error,
+            "publisher": {
+                "address": f.publisher.address,
+                "token": f.publisher.token,
+                "units": f.publisher.units.map(|u| u.to_string()),
+                "next_deposit": f.publisher.next_deposit.map(|n| n.to_string()),
+                "error": f.publisher.error,
+            },
         }),
     );
 
@@ -632,6 +694,16 @@ pub fn from_json(doc: &Value) -> Result<Report> {
         rpc: string_field(f, "rpc"),
         lamports: f.get("lamports").and_then(Value::as_u64),
         error: string_field(f, "error"),
+        publisher: match f.get("publisher") {
+            None | Some(Value::Null) => PublisherWallet::default(),
+            Some(w) => PublisherWallet {
+                address: string_field(w, "address"),
+                token: string_field(w, "token"),
+                units: amount(w, "units")?,
+                next_deposit: amount(w, "next_deposit")?,
+                error: string_field(w, "error"),
+            },
+        },
     };
 
     Ok(Report {

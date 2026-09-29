@@ -927,8 +927,8 @@ pub struct PublishRequest {
 /// The paying is delegated to a sidecar, the **directory publisher**
 /// (`tools/publisher`), reached at `publish_url`. That split is deliberate
 /// and is the whole of this milestone's decision: paying a TOON route means
-/// opening a payment channel on Solana or EVM, signing a balance proof per
-/// packet and sealing an ILP prepare to the terminating connector's key.
+/// opening a payment channel on Solana or EVM, signing a voucher per packet
+/// and sealing an ILP prepare to the terminating connector's key.
 /// There is one proven implementation of all of that, `@toon-protocol/client`,
 /// and it is not a Rust crate. Re-deriving it here would put the
 /// marketplace's money on a second, unproven payer. So the provider states

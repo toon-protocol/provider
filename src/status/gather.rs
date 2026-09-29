@@ -41,6 +41,18 @@ pub struct Sources {
     /// circuit, when a Hidden Provider reaches a public RPC through anon
     /// (spec §10, ADR 0030); `None` dials it directly.
     pub settlement_rpc_via: Option<String>,
+    /// The publisher's Solana wallet.
+    pub publisher_address: Result<String, String>,
+    /// The mint its balance is read in: the provider's `[[settlement]]`
+    /// solana token, which is what the relay's connector is paid in on the
+    /// devnet this bundle targets.
+    pub publisher_token: Result<String, String>,
+    /// The RPC the wallet is read from, always dialled directly: the
+    /// settlement RPC, except on a Hidden Provider that reaches it through
+    /// anon, which does not ask.
+    pub publisher_rpc_url: Result<String, String>,
+    /// The publisher's `TOON_DEPOSIT`: what the next channel takes.
+    pub publisher_deposit: Option<u128>,
     pub timeout: Duration,
 }
 
@@ -80,23 +92,31 @@ impl Sources {
 
         let dashboard_url = origin(&config.connector_url).map(|o| format!("{o}/dashboard"));
 
-        let settlement_address = match (&args.settlement_address, &args.settlement_address_file) {
-            (Some(address), _) if !address.trim().is_empty() => Ok(address.trim().to_string()),
-            (_, Some(path)) => match std::fs::read_to_string(path) {
-                Ok(text) if !text.trim().is_empty() => Ok(text.trim().to_string()),
-                Ok(_) => Err(format!(
-                    "{} is empty: deploy/render.sh writes it from settlement-solana.key, and \
-                     wrote nothing (no key file, or no python3, on the box)",
-                    path.display()
-                )),
-                Err(e) => Err(format!("reading {}: {e}", path.display())),
-            },
-            _ => Err(
-                "the connector's Solana settlement address is not known here: set \
-                 TOON_SETTLEMENT_SOLANA_ADDRESS or TOON_SETTLEMENT_SOLANA_ADDRESS_FILE"
-                    .to_string(),
-            ),
-        };
+        let settlement_address = address(
+            args.settlement_address.as_deref(),
+            args.settlement_address_file.as_deref(),
+            "settlement-solana.key, and wrote nothing (no key file, or no python3, on the box)",
+            "the connector's Solana settlement address is not known here: set \
+             TOON_SETTLEMENT_SOLANA_ADDRESS or TOON_SETTLEMENT_SOLANA_ADDRESS_FILE",
+        );
+        let publisher_address = address(
+            args.publisher_address.as_deref(),
+            args.publisher_address_file.as_deref(),
+            "PUBLISHER_MNEMONIC in .env, and wrote nothing (no mnemonic, or no python3, on \
+             the box)",
+            "the publisher's Solana wallet is not known here: set \
+             TOON_PUBLISHER_SOLANA_ADDRESS or TOON_PUBLISHER_SOLANA_ADDRESS_FILE",
+        );
+        let publisher_token = config
+            .settlement
+            .iter()
+            .find(|s| s.chain == "solana" || s.chain.starts_with("solana:"))
+            .map(|s| s.token.clone())
+            .ok_or_else(|| {
+                "provider.toml names no solana [[settlement]] token to read the publisher's \
+                 wallet in"
+                    .to_string()
+            });
 
         let (settlement_rpc_url, settlement_rpc_via) = if hidden {
             // Never a public RPC dialled directly from a hidden box: its own
@@ -142,6 +162,19 @@ impl Sources {
             (url, None)
         };
 
+        // The publisher's wallet is never asked on the settlement circuit:
+        // one circuit asking for both addresses would link them at the RPC.
+        // A Hidden Provider's own node, dialled directly, links nothing.
+        let publisher_rpc_url = match (&settlement_rpc_url, &settlement_rpc_via) {
+            (Ok(_), Some(_)) => Err(
+                "not asked: this hidden provider reaches its Solana RPC only through anon, and \
+                 asking there for the publisher's wallet beside the connector's settlement \
+                 address would link the two"
+                    .to_string(),
+            ),
+            (rpc, _) => rpc.clone(),
+        };
+
         Sources {
             operator_status_url,
             publisher_status_url,
@@ -151,8 +184,34 @@ impl Sources {
             settlement_address,
             settlement_rpc_url,
             settlement_rpc_via,
+            publisher_address,
+            publisher_token,
+            publisher_rpc_url,
+            publisher_deposit: args.publisher_deposit,
             timeout: SOURCE_TIMEOUT,
         }
+    }
+}
+
+/// A public address given outright, or read from the file `deploy/render.sh`
+/// writes it to (from `derived_from`); `unknown` when neither is given.
+fn address(
+    given: Option<&str>,
+    file: Option<&std::path::Path>,
+    derived_from: &str,
+    unknown: &str,
+) -> Result<String, String> {
+    match (given, file) {
+        (Some(address), _) if !address.trim().is_empty() => Ok(address.trim().to_string()),
+        (_, Some(path)) => match std::fs::read_to_string(path) {
+            Ok(text) if !text.trim().is_empty() => Ok(text.trim().to_string()),
+            Ok(_) => Err(format!(
+                "{} is empty: deploy/render.sh writes it from {derived_from}",
+                path.display()
+            )),
+            Err(e) => Err(format!("reading {}: {e}", path.display())),
+        },
+        _ => Err(unknown.to_string()),
     }
 }
 
@@ -280,6 +339,14 @@ impl PublisherStatus {
             .and_then(|r| r.parse::<u128>().ok())
             .is_some_and(|r| r == 0)
     }
+
+    /// Whether the channel is an x402 Solana one, which is replaced from
+    /// the wallet rather than topped up (`POST /topup` refuses it).
+    pub fn on_solana(&self) -> bool {
+        self.chain
+            .as_deref()
+            .is_some_and(|c| c == "solana" || c.starts_with("solana:"))
+    }
 }
 
 /// What the connector says this provider has earned.
@@ -323,7 +390,8 @@ pub struct ChannelEarnings {
     pub last_redeemed_at: Option<u64>,
 }
 
-/// The connector's settlement key's SOL balance.
+/// The connector's settlement key's SOL balance, and the publisher wallet's
+/// token balance.
 #[derive(Debug, Clone)]
 pub struct FundingSection {
     pub address: Option<String>,
@@ -332,6 +400,32 @@ pub struct FundingSection {
     pub rpc: Option<String>,
     pub lamports: Option<u64>,
     pub error: Option<String>,
+    pub publisher: PublisherWallet,
+}
+
+/// The publisher's Solana wallet: what its next channel is opened from. An
+/// x402 Solana channel is opened by the connector's sponsor, which only
+/// opens, so the payment a channel cannot cover opens a fresh one of
+/// `next_deposit` from this wallet, and costs it no SOL.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PublisherWallet {
+    pub address: Option<String>,
+    /// The mint `units` is in.
+    pub token: Option<String>,
+    /// Base units of `token`, across every token account the wallet holds.
+    pub units: Option<u128>,
+    /// What the next channel takes (the publisher's `TOON_DEPOSIT`).
+    pub next_deposit: Option<u128>,
+    pub error: Option<String>,
+}
+
+impl PublisherWallet {
+    /// Whether the wallet is known to hold less than the next channel
+    /// takes; with that size unknown, less than anything at all.
+    pub fn short(&self) -> Option<bool> {
+        self.units
+            .map(|units| units < self.next_deposit.unwrap_or(1))
+    }
 }
 
 /// Read every source, concurrently, each on its own.
@@ -679,15 +773,25 @@ pub(crate) async fn read_earnings_from(
 }
 
 async fn read_funding(client: &reqwest::Client, sources: &Sources) -> FundingSection {
+    let (mut section, publisher) = tokio::join!(
+        read_settlement_balance(client, sources),
+        read_publisher_wallet(client, sources),
+    );
+    section.publisher = publisher;
+    section
+}
+
+async fn read_settlement_balance(client: &reqwest::Client, sources: &Sources) -> FundingSection {
     let mut section = FundingSection {
         address: sources.settlement_address.as_ref().ok().cloned(),
         rpc: sources
             .settlement_rpc_url
             .as_ref()
             .ok()
-            .map(|u| origin(u).unwrap_or_else(|| "(unparseable RPC URL)".to_string())),
+            .map(|u| shown_rpc(u)),
         lamports: None,
         error: None,
+        publisher: PublisherWallet::default(),
     };
     let address = match &sources.settlement_address {
         Ok(address) => address.clone(),
@@ -725,52 +829,144 @@ async fn read_funding(client: &reqwest::Client, sources: &Sources) -> FundingSec
             }
         }
     };
-    let body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "getBalance",
-        "params": [address, { "commitment": "confirmed" }],
-    });
-    let shown = section.rpc.clone().unwrap_or_default();
-    let answer: Result<Value, String> = async {
-        let response = client
-            .post(&rpc)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("getBalance at {shown} failed: {}", error_chain(&e)))?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(format!("getBalance at {shown} answered {status}"));
-        }
-        response
-            .json()
-            .await
-            .map_err(|e| format!("getBalance at {shown} did not answer JSON: {e}"))
-    }
+    let answer = solana_rpc(
+        client,
+        &rpc,
+        "getBalance",
+        serde_json::json!([address, { "commitment": "confirmed" }]),
+    )
     .await;
     match answer {
         Err(e) => section.error = Some(e),
-        Ok(answer) => {
-            if let Some(error) = answer.get("error") {
-                let message = error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| error.to_string());
-                section.error = Some(format!("getBalance at {shown} refused: {message}"));
-            } else {
-                match answer.pointer("/result/value").and_then(Value::as_u64) {
-                    Some(lamports) => section.lamports = Some(lamports),
-                    None => {
-                        section.error =
-                            Some(format!("getBalance at {shown} answered no result.value"))
-                    }
-                }
+        Ok(result) => match result.pointer("/value").and_then(Value::as_u64) {
+            Some(lamports) => section.lamports = Some(lamports),
+            None => {
+                section.error = Some(format!(
+                    "getBalance at {} answered no result.value",
+                    shown_rpc(&rpc)
+                ))
+            }
+        },
+    }
+    section
+}
+
+/// The publisher wallet's balance in its token: every token account it
+/// holds for that mint, summed. Always dialled directly (`Sources`).
+async fn read_publisher_wallet(client: &reqwest::Client, sources: &Sources) -> PublisherWallet {
+    let mut wallet = PublisherWallet {
+        address: sources.publisher_address.as_ref().ok().cloned(),
+        token: sources.publisher_token.as_ref().ok().cloned(),
+        units: None,
+        next_deposit: sources.publisher_deposit,
+        error: None,
+    };
+    let (address, token, rpc) = match (
+        &sources.publisher_address,
+        &sources.publisher_token,
+        &sources.publisher_rpc_url,
+    ) {
+        (Ok(address), Ok(token), Ok(rpc)) => (address, token, rpc),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+            wallet.error = Some(e.clone());
+            return wallet;
+        }
+    };
+    let answer = solana_rpc(
+        client,
+        rpc,
+        "getTokenAccountsByOwner",
+        serde_json::json!([
+            address,
+            { "mint": token },
+            { "encoding": "jsonParsed", "commitment": "confirmed" },
+        ]),
+    )
+    .await;
+    let shown = shown_rpc(rpc);
+    let accounts = match answer {
+        Err(e) => {
+            wallet.error = Some(e);
+            return wallet;
+        }
+        Ok(result) => match result.get("value").and_then(Value::as_array) {
+            Some(accounts) => accounts.clone(),
+            None => {
+                wallet.error = Some(format!(
+                    "getTokenAccountsByOwner at {shown} answered no result.value"
+                ));
+                return wallet;
+            }
+        },
+    };
+    let mut units: u128 = 0;
+    for account in &accounts {
+        let amount = account
+            .pointer("/account/data/parsed/info/tokenAmount/amount")
+            .and_then(Value::as_str)
+            .and_then(|a| a.parse::<u128>().ok());
+        match amount {
+            Some(amount) => units = units.saturating_add(amount),
+            None => {
+                wallet.error = Some(format!(
+                    "getTokenAccountsByOwner at {shown} answered an account with no \
+                     tokenAmount.amount"
+                ));
+                return wallet;
             }
         }
     }
-    section
+    wallet.units = Some(units);
+    wallet
+}
+
+/// An RPC URL as the report shows it: its origin only, since a path or query
+/// often carries an API key.
+fn shown_rpc(rpc: &str) -> String {
+    origin(rpc).unwrap_or_else(|| "(unparseable RPC URL)".to_string())
+}
+
+/// One Solana JSON-RPC call → its `result`, with every failure worded for
+/// the report.
+async fn solana_rpc(
+    client: &reqwest::Client,
+    rpc: &str,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    let shown = shown_rpc(rpc);
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    });
+    let response = client
+        .post(rpc)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("{method} at {shown} failed: {}", error_chain(&e)))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("{method} at {shown} answered {status}"));
+    }
+    let mut answer: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("{method} at {shown} did not answer JSON: {e}"))?;
+    if let Some(error) = answer.get("error") {
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| error.to_string());
+        return Err(format!("{method} at {shown} refused: {message}"));
+    }
+    match answer.get_mut("result") {
+        Some(result) => Ok(result.take()),
+        None => Err(format!("{method} at {shown} answered no result")),
+    }
 }
 
 #[cfg(test)]

@@ -8,8 +8,8 @@ expression: "frame(&app_with(\"troubled\"))"
 │(0x04ffffff…ffffff); every tenant will refuse to spawn                                                                │
 │PROBLEM directory: ws://relay-two.fixture.example:7100 refused the latest write of the Liveness: relay refused (last  │
 │accepted 1m ago)                                                                                                      │
-│PROBLEM publisher: the channel PubChanne1…111111 is drained (remaining 0 of 10000000); no directory write can be paid │
-│for — `toon-provider topup <amount>`                                                                                  │
+│PROBLEM publisher: the channel is drained, and the wallet 7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy holds 4000000, │
+│less than the 10000000 the next channel takes; no directory write can be paid for until it does                       │
 │PROBLEM funding: the connector's Solana settlement address 9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin holds 0.004   │
 │SOL, under --min-sol 0.005; the connector cannot pay for its boot transaction                                         │
 │warning earnings: GET http://provider-connector:4000/claims answered 404 Not Found                                    │
@@ -30,15 +30,15 @@ expression: "frame(&app_with(\"troubled\"))"
 │(token base units)                                        ││standby)                                                  │
 │runway        unknown — runway = remaining ÷ (price per   ││#1000 basic v1 standalone running, expires in 1h 59m; ssh │
 │write × writes per cadence)                               ││40000, ports 443→41000; billed 2000                       │
-│DRAINED: no directory write can be paid for. Top up with  ││#1001 warm v1 standby reserved, expires in 59m; ssh 40001,│
+│DRAINED: no directory write can be paid for until the     ││#1001 warm v1 standby reserved, expires in 59m; ssh 40001,│
 └──────────────────────────────── ↓ more: Tab here, then j ┘└──────────────────────────────── ↓ more: Tab here, then j ┘
 ┌ EARNINGS ────────────────────────────────────────────────┐┌ FUNDING ─────────────────────────────────────────────────┐
 │unavailable: GET http://provider-connector:4000/claims    ││settlement    9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin│
 │answered 404 Not Found                                    ││holds 0.004 SOL (read from                                │
 │                                                          ││https://solana-rpc.fixture.example)                       │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
+│                                                          ││publisher     7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy│
+│                                                          ││holds 4000000 of                                          │
+│                                                          ││34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU; the next    │
+│                                                          ││channel takes 10000000                                    │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
  r redeem  t top up  u refresh  Tab pane  j/k scroll  q quit

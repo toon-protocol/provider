@@ -2198,6 +2198,10 @@ fn the_provider_container_is_pointed_at_every_status_source() {
             "TOON_SETTLEMENT_SOLANA_ADDRESS_FILE",
             "settlement-solana.address",
         ),
+        (
+            "TOON_PUBLISHER_SOLANA_ADDRESS_FILE",
+            "publisher-solana.address",
+        ),
     ] {
         let target = format!("/etc/toon-provider/{file}");
         assert_eq!(env_value(provider, var), Some(target.as_str()), "{var}");
@@ -2210,6 +2214,18 @@ fn the_provider_container_is_pointed_at_every_status_source() {
             "render.sh does not write {file}, and docker would create a directory there"
         );
     }
+
+    // What the publisher's next channel takes: the very TOON_DEPOSIT it
+    // opens each Solana channel with, from one .env value.
+    let deposit = "${PUBLISHER_DEPOSIT:-10000000}";
+    assert_eq!(env_value(provider, "TOON_PUBLISHER_DEPOSIT"), Some(deposit));
+    assert_eq!(
+        env_value(
+            service_block(&compose, "directory-publisher"),
+            "TOON_DEPOSIT"
+        ),
+        Some(deposit)
+    );
 
     // The settlement RPC: the connector's own on a public box, the box's own
     // node on a hidden one.
@@ -2291,6 +2307,57 @@ fn render_writes_the_settlement_address_keys_py_derives() {
     assert!(ignore
         .lines()
         .any(|l| l.trim() == "settlement-solana.address"));
+}
+
+#[test]
+fn render_writes_the_publisher_address_keys_py_derives() {
+    const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
+                            abandon abandon abandon about";
+    let mut env = devnet_env();
+    env.insert("PUBLISHER_MNEMONIC", MNEMONIC);
+    // No keys.py beside it (the test bundle carries none): an EMPTY file.
+    let render = run_render(&env, None, None, &[]);
+    assert!(render.ok, "{}", render.stderr);
+    assert!(render.wrote("publisher-solana.address"));
+    assert_eq!(render.read("publisher-solana.address"), "");
+
+    let dir = render.dir.path();
+    fs::copy(deploy_dir().join("keys.py"), dir.join("keys.py")).unwrap();
+    let out = Command::new("bash")
+        .arg(dir.join("render.sh"))
+        .current_dir(dir)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("TOON_PROVIDER_BIN", env!("CARGO_BIN_EXE_toon-provider"))
+        .env("PROC_MEMINFO", dir.join("meminfo"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let derive = Command::new("python3")
+        .args(["keys.py", "provider", "publisher-address"])
+        .current_dir(dir)
+        .env("PUBLISHER_MNEMONIC", MNEMONIC)
+        .output()
+        .unwrap();
+    assert!(
+        derive.status.success(),
+        "{}",
+        String::from_utf8_lossy(&derive.stderr)
+    );
+    let address = String::from_utf8(derive.stdout).unwrap();
+    assert!(
+        (32..=44).contains(&address.trim().len()),
+        "a base58 ed25519 key: {address}"
+    );
+    assert_eq!(render.read("publisher-solana.address"), address);
+
+    assert!(deploy(".gitignore")
+        .lines()
+        .any(|l| l.trim() == "publisher-solana.address"));
 }
 
 #[test]

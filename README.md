@@ -30,8 +30,9 @@ optional role, and the devnet's gateway already fronts every provider.
 4 GB of RAM; two DNS A-records at it, `proxy.provider.<domain>` and
 `provider.<domain>`; inbound TCP 22, 80, 443, 40000–40099 and 41000–42599
 (`bootstrap.sh` opens them in ufw, but a cloud firewall is yours to open); and
-two identities to fund with devnet SOL, the connector's Solana settlement key
-and the publisher's wallet, which also needs mock USDC.
+two identities to fund: the connector's Solana settlement key with devnet SOL,
+and the publisher's wallet with mock USDC (it needs no SOL: the relay's
+connector pays to open its channel).
 
 1. Clone to `/root/provider` (the auto-apply unit runs from there), then
    `cd /root/provider/deploy`, `cp .env.example .env` and

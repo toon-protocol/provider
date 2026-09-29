@@ -62,6 +62,10 @@ enum Command {
 
     /// Add collateral to the directory publisher's payment channel.
     ///
+    /// An EVM channel only: a Solana one is replaced from the publisher's
+    /// wallet, never topped up, and the publisher refuses (400). Fund the
+    /// wallet instead; `status` shows what it holds.
+    ///
     /// This talks to the RUNNING publisher sidecar (`tools/publisher`), on
     /// the same origin `publish_url` already names — `/topup` beside
     /// `/publish` — never to the provider app's own `operator_url`: the

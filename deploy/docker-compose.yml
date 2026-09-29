@@ -95,12 +95,14 @@ services:
     # (TOON_Network#151) and bumped here by a reviewed commit — never a
     # floating tag, same regime as the connector's pin below.
     #
-    # `sha-817e81c` is the build from the merge of #50 (`toon-provider dash`,
-    # TOON_Network#174), on top of #44 (a Hidden Provider's settlement RPC
-    # through its anon proxy, TOON_Network#167) and #40/#41 (#165, #166).
+    # `sha-8fd6b45` is the build from the merge of #54 (#52: the publisher
+    # and grant tools on @toon-protocol/client 4.1.1, so they pay an
+    # x402-only connector), on top of #50 (`toon-provider dash`,
+    # TOON_Network#174) and #44 (a Hidden Provider's settlement RPC through
+    # its anon proxy, TOON_Network#167).
     # tests/deploy_bundle.rs::the_provider_pin_is_immutable_and_written_once
     # checks the SHAPE of this pin, not its value.
-    image: ghcr.io/toon-protocol/provider:sha-817e81c
+    image: ghcr.io/toon-protocol/provider:sha-8fd6b45
     volumes:
       - ./provider.toml:/etc/toon-provider/provider.toml:ro
       # THE DOCKER SOCKET, and that is the whole deployment shape: the provider
@@ -126,8 +128,11 @@ services:
       # settlement address is PUBLIC, render.sh derives it from
       # settlement-solana.key with keys.py, and it is all `status` needs for
       # the funding section: the key itself never comes near this container.
+      # The publisher's wallet likewise, derived from PUBLISHER_MNEMONIC:
+      # its USDC is what the next Solana channel is opened from.
       - ./operator-bearer.token:/etc/toon-provider/operator-bearer.token:ro
       - ./settlement-solana.address:/etc/toon-provider/settlement-solana.address:ro
+      - ./publisher-solana.address:/etc/toon-provider/publisher-solana.address:ro
     environment:
       # So `docker compose exec provider toon-provider <command>` finds the
       # config without `--config` (`status`, `topup`, `evict`).
@@ -141,6 +146,11 @@ services:
       TOON_CONNECTOR_OPERATOR_URL: http://provider-connector:4000
       TOON_CONNECTOR_BEARER_TOKEN_FILE: /etc/toon-provider/operator-bearer.token
       TOON_SETTLEMENT_SOLANA_ADDRESS_FILE: /etc/toon-provider/settlement-solana.address
+      TOON_PUBLISHER_SOLANA_ADDRESS_FILE: /etc/toon-provider/publisher-solana.address
+      # The publisher's TOON_DEPOSIT, from the same .env value: `status
+      # --check` fails when its channel runs short and the wallet holds less
+      # than the next channel takes.
+      TOON_PUBLISHER_DEPOSIT: ${PUBLISHER_DEPOSIT:-10000000}
       # The same RPC the connector settles on. On a hidden provider `status`
       # reads [anon.settlement.solana] (or the older anon.settlement_rpc_url)
       # by the route that table names instead, and docker-compose.hidden.yml
@@ -196,8 +206,8 @@ services:
   # The provider's Profile, Listings and Liveness are PAID packets on
   # `g.toon.relay` (ADR 0007 — never the free ephemeral lane, whose rate limit
   # is keyed by remote address and so shared by everyone behind one connector).
-  # Paying one means holding a payment channel, signing a balance proof per
-  # packet and sealing to the terminating connector; @toon-protocol/client is
+  # Paying one means holding a payment channel, signing a voucher per packet
+  # and sealing to the terminating connector; @toon-protocol/client is
   # the proven implementation of that and is not a Rust crate. So
   # `toon-provider` states WHAT to publish and this sidecar decides HOW it is
   # paid for.
@@ -208,26 +218,32 @@ services:
     # Same scheme as the provider pin above: immutable, published by the same
     # workflow run, and bumped by a reviewed commit. README § "Bumping the
     # connector pin".
-    image: ghcr.io/toon-protocol/provider-publisher:sha-817e81c
+    image: ghcr.io/toon-protocol/provider-publisher:sha-8fd6b45
     environment:
       # The devnet relay's own client edge. This process pays it directly, as a
       # client with a channel — there is no hub on this devnet and no peering.
       TOON_CONNECTOR_URL: ${RELAY_EDGE_URL:?set RELAY_EDGE_URL in .env}
-      # Solana, not EVM, for one practical reason: devnet SOL and mock USDC are
-      # both a faucet away, and Base Sepolia ETH is not.
+      # Solana, not EVM, for one practical reason: mock USDC is a faucet away,
+      # and the connector sponsors the open, so the wallet needs nothing else.
       TOON_CHAIN: solana
       TOON_RPC_URL: ${SOLANA_RPC_URL:-https://api.devnet.solana.com}
       # The wallet that pays. Its own phrase, not the provider's identity and
-      # not anything else's: two payers sharing one channel share one nonce
-      # watermark, and the loser of that race has every later claim refused.
+      # not anything else's: two payers sharing one channel race one running
+      # total, and every voucher of the one that falls behind is refused.
       TOON_MNEMONIC: ${PUBLISHER_MNEMONIC:?set PUBLISHER_MNEMONIC in .env}
       TOON_ACCOUNT_INDEX: '0'
-      # 10 USDC at 6dp. A relay write costs 1 µUSDC, and this provider buys one
-      # per Liveness (60s) plus one per Profile and Listing at startup — about
-      # 1,500 a day. The deposit is three orders of magnitude more than a year
-      # of that, because topping a channel up is the fiddly part, not funding
-      # it once.
-      TOON_DEPOSIT: '10000000'
+      # 10 USDC at 6dp, unless PUBLISHER_DEPOSIT in .env says otherwise. A
+      # relay write costs 1 µUSDC, and this provider buys one per Liveness
+      # (60s) plus one per Profile and Listing at startup — about 1,500 a
+      # day, so one channel lasts years.
+      #
+      # On Solana this sizes EVERY channel, not just the first: the
+      # connector sponsors the open (the wallet needs no SOL for it) and
+      # only opens, so a channel is never topped up. The write one cannot
+      # cover opens a fresh one of this size from the wallet's own USDC.
+      # Keep the wallet holding at least this much; `toon-provider status
+      # --check` says when it does not (TOON_PUBLISHER_DEPOSIT above).
+      TOON_DEPOSIT: ${PUBLISHER_DEPOSIT:-10000000}
       TOON_CHANNEL_STORE: /var/lib/toon-publisher/channels.json
       # How often this box writes a Liveness — matches the "one per Liveness
       # (60s)" this file's own comment above budgets the deposit against.
@@ -256,8 +272,8 @@ services:
       # connector publishes the pin it enforces.
       TOON_TRANSPORT: btp
     volumes:
-      # The channel watermark. A named volume so a restart keeps it: a claim
-      # nonce that goes backwards is refused for the life of the channel.
+      # The channel's running total. A named volume so a restart keeps it: a
+      # voucher whose total does not exceed the last one is refused.
       - publisher_state:/var/lib/toon-publisher
     expose: ['8081'] # PRIVATE — only the provider dials this
     healthcheck:

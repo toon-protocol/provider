@@ -2,7 +2,8 @@
 //! reads, each stubbed with `wiremock` — the provider's own
 //! `GET /operator/status`, the publisher's `GET /status`, the connector's
 //! bearer-gated `GET /claims`, `/channels` and `/audit-log`, and a Solana
-//! RPC's `getBalance` — and what it makes of them: six sections in ADR 0029's
+//! RPC's `getBalance` (the connector's SOL) and `getTokenAccountsByOwner`
+//! (the publisher wallet's USDC) — and what it makes of them: six sections in ADR 0029's
 //! order, one JSON document, each source degrading on its own, and every
 //! `--check` rule.
 //!
@@ -21,6 +22,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 mod common;
 
 use common::socks::SocksStub;
+use toon_provider::nostr::directory_events::Settlement;
 use toon_provider::provider::{AnonConfig, SettlementRpc, SettlementRpcs};
 use toon_provider::status::{
     check, from_json, gather, render_text, to_json, Report, ReportArgs, Sources, Thresholds,
@@ -29,6 +31,12 @@ use toon_provider::ProviderConfig;
 
 const TOKEN: &str = "fixture-bearer-token";
 const ADDRESS: &str = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
+/// The publisher's Solana wallet, and the mint it pays in: the provider's
+/// own `[[settlement]]` solana token, as on the devnet.
+const PUBLISHER: &str = "7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy";
+const MINT: &str = "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU";
+/// The publisher's `TOON_DEPOSIT`: what each Solana channel it opens takes.
+const NEXT_DEPOSIT: u128 = 10_000_000;
 const EVM_CHANNEL: &str = "0xabababababababababababababababababababababababababababababababab";
 const SOLANA_CHANNEL: &str = "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip";
 /// A port nothing listens on: a source that is down.
@@ -58,6 +66,15 @@ fn healthy_doc() -> Value {
     });
     doc["directory"]["liveness_expires_at"] = json!(AT + 300);
     doc
+}
+
+/// The same answer from a publisher paying on Base, whose channel is topped
+/// up rather than replaced.
+fn evm_publisher_body(remaining: &str, runway_s: Value) -> Value {
+    let mut body = publisher_body(remaining, runway_s);
+    body["channelId"] = json!(EVM_CHANNEL);
+    body["chain"] = json!("evm:84532");
+    body
 }
 
 fn publisher_body(remaining: &str, runway_s: Value) -> Value {
@@ -107,6 +124,7 @@ impl World {
             .await;
         world.connector_answers().await;
         world.rpc_answers(1_500_000_000).await;
+        world.wallet_answers(25_000_000).await;
         world
     }
 
@@ -226,12 +244,42 @@ impl World {
             .await;
     }
 
+    /// The publisher wallet's token accounts for `MINT`: `units` in two of
+    /// them, since a wallet may hold more than one and every one counts.
+    async fn wallet_answers(&self, units: u128) {
+        let account = |amount: u128| {
+            json!({ "account": { "data": { "parsed": { "info": {
+                "tokenAmount": { "amount": amount.to_string(), "decimals": 6 },
+            } } } } })
+        };
+        Mock::given(method("POST"))
+            .and(body_partial_json(json!({
+                "method": "getTokenAccountsByOwner",
+                "params": [PUBLISHER, { "mint": MINT }],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "context": { "slot": 1 },
+                    "value": [account(units - units / 5), account(units / 5)],
+                },
+            })))
+            .mount(&self.rpc)
+            .await;
+    }
+
     fn config(&self) -> ProviderConfig {
         ProviderConfig {
             provider_name: "Fixture Provider".to_string(),
             operator_url: self.operator.uri(),
             publish_url: Some(format!("{}/publish", self.publisher.uri())),
             connector_url: "https://proxy.provider.fixture.example/ilp".to_string(),
+            settlement: vec![Settlement {
+                chain: "solana".to_string(),
+                token: MINT.to_string(),
+                decimals: 6,
+            }],
             ..ProviderConfig::default()
         }
     }
@@ -245,6 +293,9 @@ impl World {
             settlement_address: Some(ADDRESS.to_string()),
             settlement_address_file: None,
             settlement_rpc_url: Some(self.rpc.uri()),
+            publisher_address: Some(PUBLISHER.to_string()),
+            publisher_address_file: None,
+            publisher_deposit: Some(NEXT_DEPOSIT),
         }
     }
 
@@ -751,11 +802,15 @@ async fn a_short_runway_is_a_problem() {
     let world = World::new().await;
     world.operator_answers(healthy_doc()).await;
     world
-        .publisher_answers(publisher_body("400000", json!(3 * 86_400)))
+        .publisher_answers(evm_publisher_body("400000", json!(3 * 86_400)))
         .await;
     let found = problems(&world.report().await);
     assert!(
         any_contains(&found, "3d of runway left, under --min-runway 7d"),
+        "{found:?}"
+    );
+    assert!(
+        any_contains(&found, "`toon-provider topup <amount>`"),
         "{found:?}"
     );
 }
@@ -765,7 +820,7 @@ async fn the_runway_threshold_is_the_operators() {
     let world = World::new().await;
     world.operator_answers(healthy_doc()).await;
     world
-        .publisher_answers(publisher_body("400000", json!(3 * 86_400)))
+        .publisher_answers(evm_publisher_body("400000", json!(3 * 86_400)))
         .await;
     let report = world.report().await;
     let outcome = check(
@@ -805,7 +860,7 @@ async fn a_drained_channel_fails_the_check_even_with_no_runway() {
     // is drained.
     let world = World::new().await;
     world.operator_answers(healthy_doc()).await;
-    let mut body = publisher_body("0", Value::Null);
+    let mut body = evm_publisher_body("0", Value::Null);
     body["spent"] = json!("10000000");
     world.publisher_answers(body).await;
     let report = world.report().await;
@@ -814,7 +869,243 @@ async fn a_drained_channel_fails_the_check_even_with_no_runway() {
         any_contains(&found, "is drained (remaining 0 of 10000000)"),
         "{found:?}"
     );
-    assert!(render_text(&report).contains("DRAINED"));
+    assert!(
+        any_contains(&found, "`toon-provider topup <amount>`"),
+        "{found:?}"
+    );
+    let text = render_text(&report);
+    assert!(text.contains("DRAINED"), "{text}");
+    assert!(text.contains("toon-provider topup"), "{text}");
+}
+
+// ── A Solana publisher: its channel is replaced, never topped up ─────────────
+//
+// An x402 Solana channel is opened by the connector's sponsor, which only
+// opens. The payment a channel cannot cover opens a fresh one of
+// TOON_DEPOSIT from the publisher wallet's own USDC. So what decides whether
+// a write can be paid for is the WALLET, and nothing here tells an operator
+// to top up.
+
+/// A world whose publisher pays on Solana from a channel with `remaining`
+/// left and `runway_s` of runway, and whose wallet holds `wallet` units.
+async fn solana_world(remaining: &str, runway_s: Value, wallet: u128) -> World {
+    let world = World::new().await;
+    world.operator_answers(healthy_doc()).await;
+    world
+        .publisher_answers(publisher_body(remaining, runway_s))
+        .await;
+    world.connector_answers().await;
+    world.rpc_answers(1_500_000_000).await;
+    world.wallet_answers(wallet).await;
+    world
+}
+
+fn says_top_up(lines: &[String]) -> bool {
+    any_contains(lines, "topup") || any_contains(lines, "top up")
+}
+
+#[tokio::test]
+async fn the_publisher_wallet_is_read_for_its_token() {
+    let world = World::healthy().await;
+    let report = world.report().await;
+    let wallet = &report.funding.publisher;
+    assert_eq!(wallet.error, None);
+    assert_eq!(wallet.address.as_deref(), Some(PUBLISHER));
+    assert_eq!(wallet.token.as_deref(), Some(MINT));
+    assert_eq!(wallet.units, Some(25_000_000), "every token account counts");
+    assert_eq!(wallet.next_deposit, Some(NEXT_DEPOSIT));
+
+    let text = render_text(&report);
+    assert!(
+        text.contains(&format!(
+            "publisher     {PUBLISHER} holds 25000000 of {MINT}"
+        )),
+        "{text}"
+    );
+    assert!(text.contains("the next channel takes 10000000"), "{text}");
+
+    let doc = to_json(&report, None);
+    assert_eq!(doc["funding"]["publisher"]["address"], PUBLISHER);
+    assert_eq!(doc["funding"]["publisher"]["token"], MINT);
+    assert_eq!(doc["funding"]["publisher"]["units"], "25000000");
+    assert_eq!(doc["funding"]["publisher"]["next_deposit"], "10000000");
+}
+
+#[tokio::test]
+async fn a_drained_solana_channel_with_a_funded_wallet_is_not_a_problem() {
+    let world = solana_world("0", Value::Null, 25_000_000).await;
+    let report = world.report().await;
+    let outcome = check(&report, &thresholds());
+    assert!(outcome.ok(), "{outcome:?}");
+    assert!(!says_top_up(&outcome.warnings), "{outcome:?}");
+    let text = render_text(&report);
+    assert!(!text.contains("DRAINED"), "{text}");
+    assert!(!text.contains("topup"), "{text}");
+    assert!(
+        text.contains("the next write opens a fresh channel of 10000000"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn a_drained_solana_channel_and_a_wallet_short_of_the_next_is_a_problem() {
+    let world = solana_world("0", Value::Null, 4_000_000).await;
+    let report = world.report().await;
+    let found = problems(&report);
+    assert!(
+        any_contains(
+            &found,
+            &format!(
+                "publisher: the channel is drained, and the wallet {PUBLISHER} holds 4000000, \
+                 less than the 10000000 the next channel takes"
+            )
+        ),
+        "{found:?}"
+    );
+    assert!(!says_top_up(&found), "{found:?}");
+    let text = render_text(&report);
+    assert!(text.contains("DRAINED"), "{text}");
+    assert!(!text.contains("topup"), "{text}");
+}
+
+#[tokio::test]
+async fn a_short_solana_runway_is_a_problem_only_when_the_wallet_is_short_too() {
+    let world = solana_world("400000", json!(3 * 86_400), 25_000_000).await;
+    let outcome = check(&world.report().await, &thresholds());
+    assert!(
+        outcome.ok(),
+        "the wallet funds the next channel: {outcome:?}"
+    );
+
+    let world = solana_world("400000", json!(3 * 86_400), 4_000_000).await;
+    let found = problems(&world.report().await);
+    assert!(
+        any_contains(&found, "3d of runway left, under --min-runway 7d"),
+        "{found:?}"
+    );
+    assert!(
+        any_contains(&found, "less than the 10000000 the next channel takes"),
+        "{found:?}"
+    );
+    assert!(!says_top_up(&found), "{found:?}");
+}
+
+#[tokio::test]
+async fn a_wallet_short_of_the_next_channel_behind_a_long_runway_is_a_warning() {
+    let world = solana_world("9997019", json!(1_209_600), 4_000_000).await;
+    let outcome = check(&world.report().await, &thresholds());
+    assert!(outcome.ok(), "{outcome:?}");
+    assert!(
+        any_contains(
+            &outcome.warnings,
+            "less than the 10000000 the next channel takes; fund it before this channel's 14d \
+             run out"
+        ),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn no_channel_yet_and_a_wallet_that_cannot_open_one_is_a_problem() {
+    let world = World::new().await;
+    world.operator_answers(healthy_doc()).await;
+    world
+        .publisher_answers(json!({
+            "channelId": null, "chain": null, "deposit": null, "spent": "0",
+            "remaining": null, "signedCeiling": null, "watermarkUncertain": false,
+            "runway_s": null, "assumptions": ["no channel has been opened yet."],
+        }))
+        .await;
+    world.wallet_answers(1).await;
+    let found = problems(&world.report().await);
+    assert!(
+        any_contains(&found, "publisher: no channel is open yet, and the wallet"),
+        "{found:?}"
+    );
+    assert!(
+        any_contains(
+            &found,
+            "holds 1, less than the 10000000 the first channel takes"
+        ),
+        "{found:?}"
+    );
+
+    // Funded: only the usual "nothing to measure yet".
+    let world = World::new().await;
+    world.operator_answers(healthy_doc()).await;
+    world
+        .publisher_answers(json!({ "channelId": null, "spent": "0", "assumptions": [] }))
+        .await;
+    world.wallet_answers(10_000_000).await;
+    let found = problems(&world.report().await);
+    assert!(!any_contains(&found, "publisher:"), "{found:?}");
+}
+
+#[tokio::test]
+async fn a_drained_solana_channel_and_an_unread_wallet_is_a_warning() {
+    // Nothing answers getTokenAccountsByOwner: the check cannot tell.
+    let world = World::new().await;
+    world.operator_answers(healthy_doc()).await;
+    world
+        .publisher_answers(publisher_body("0", Value::Null))
+        .await;
+    world.rpc_answers(1_500_000_000).await;
+    let report = world.report().await;
+    assert!(report.funding.publisher.error.is_some());
+    let outcome = check(&report, &thresholds());
+    assert!(
+        !any_contains(&outcome.problems, "publisher:"),
+        "{outcome:?}"
+    );
+    assert!(
+        any_contains(
+            &outcome.warnings,
+            "publisher: the channel is drained; the next write opens a fresh channel of \
+             10000000 from the wallet, whose balance could not be read"
+        ),
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_publisher_address_is_read_from_the_rendered_file() {
+    let world = World::healthy().await;
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), format!("{PUBLISHER}\n")).unwrap();
+    let mut args = world.args();
+    args.publisher_address = None;
+    args.publisher_address_file = Some(file.path().to_path_buf());
+    let report = world.report_with(&world.config(), &args).await;
+    assert_eq!(report.funding.publisher.units, Some(25_000_000));
+
+    std::fs::write(file.path(), "").unwrap();
+    let report = world.report_with(&world.config(), &args).await;
+    assert!(report.funding.publisher.error.unwrap().contains("is empty"));
+}
+
+#[tokio::test]
+async fn without_the_next_deposit_only_an_empty_wallet_is_short() {
+    let world = solana_world("0", Value::Null, 1).await;
+    let mut args = world.args();
+    args.publisher_deposit = None;
+    let report = world.report_with(&world.config(), &args).await;
+    assert!(
+        !any_contains(&problems(&report), "publisher:"),
+        "{:?}",
+        problems(&report)
+    );
+
+    let world = solana_world("0", Value::Null, 0).await;
+    let args = ReportArgs {
+        publisher_deposit: None,
+        ..world.args()
+    };
+    let report = world.report_with(&world.config(), &args).await;
+    let found = problems(&report);
+    assert!(
+        any_contains(&found, "holds 0, nothing to open the next channel with"),
+        "{found:?}"
+    );
 }
 
 #[tokio::test]
@@ -899,6 +1190,12 @@ async fn a_hidden_provider_reads_its_balance_from_its_own_node_only() {
     let report = gather(&sources, AT).await;
     assert_eq!(report.funding.lamports, Some(1_500_000_000));
     assert_eq!(
+        report.funding.publisher.units,
+        Some(25_000_000),
+        "its own node is asked for the publisher's wallet too: {:?}",
+        report.funding.publisher.error
+    );
+    assert_eq!(
         report.earnings.error, None,
         "compose-internal connector URL is near"
     );
@@ -938,10 +1235,15 @@ async fn a_hidden_provider_reads_a_public_rpc_only_through_anon_on_the_solana_ci
         report.funding.error
     );
     assert!(socks.asked_for(&format!("solana-rpc.invalid:{}", rpc_addr.port())));
+    // …and ONLY the connector's balance: the publisher's wallet asked on
+    // that same circuit would link the two addresses at the RPC.
     assert_eq!(
         socks.usernames(),
         vec!["toon-settlement-solana".to_string()]
     );
+    let error = report.funding.publisher.error.clone().unwrap();
+    assert!(error.contains("not asked"), "{error}");
+    assert_eq!(report.funding.publisher.units, None);
 
     // No proxy configured is not a direct dial: it is not asked at all.
     let unproxied = ProviderConfig {
@@ -1033,6 +1335,8 @@ fn run_binary(world: &World, config: &std::path::Path, extra: &[&str]) -> std::p
         .env("TOON_CONNECTOR_BEARER_TOKEN_FILE", world.token_file.path())
         .env("TOON_SETTLEMENT_SOLANA_ADDRESS", ADDRESS)
         .env("TOON_SETTLEMENT_SOLANA_RPC_URL", world.rpc.uri())
+        .env("TOON_PUBLISHER_SOLANA_ADDRESS", PUBLISHER)
+        .env("TOON_PUBLISHER_DEPOSIT", NEXT_DEPOSIT.to_string())
         .arg("status")
         .args(extra)
         .output()
@@ -1070,7 +1374,7 @@ async fn the_binary_exits_zero_on_a_healthy_box_and_one_on_a_drained_publisher()
     let drained = World::new().await;
     drained.operator_answers(healthy_doc()).await;
     drained
-        .publisher_answers(publisher_body("0", Value::Null))
+        .publisher_answers(evm_publisher_body("0", Value::Null))
         .await;
     drained.connector_answers().await;
     drained.rpc_answers(1_500_000_000).await;
@@ -1155,8 +1459,8 @@ async fn status_json_fixture_healthy() {
 
 /// A box with something wrong in every section `--check` judges: the
 /// sealing key mismatched, a relay refusing the latest Liveness, the
-/// publisher drained, the bearer token refused, and the settlement key low
-/// on SOL.
+/// publisher drained with a wallet short of the next channel, the bearer
+/// token refused, and the settlement key low on SOL.
 #[tokio::test]
 async fn status_json_fixture_troubled() {
     let world = World::new().await;
@@ -1170,6 +1474,7 @@ async fn status_json_fixture_troubled() {
     body["spent"] = json!("10000000");
     world.publisher_answers(body).await;
     world.rpc_answers(4_000_000).await;
+    world.wallet_answers(4_000_000).await;
     // No connector stub answers: every read is a 404.
     golden_status("troubled", status_json(&world, &world.config()).await);
 }

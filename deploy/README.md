@@ -153,8 +153,9 @@ reason. A tenant filters on that tag, so it has to be true.
 
 **Before you start** you need a host, two DNS A-records pointing at it —
 `proxy.provider.<your-domain>` and `provider.<your-domain>` — an ILP address of
-your own, and devnet SOL and mock USDC for two identities that `keys.sh`
-generates and names in step 2.
+your own, devnet SOL for the connector's settlement key and mock USDC for the
+publisher's wallet: two identities that `keys.sh` generates and names in
+step 2.
 
 **1. Clone and configure.** Two files are yours, both gitignored: `.env` and
 the listings file. Nothing else in the checkout is edited, ever.
@@ -202,7 +203,7 @@ first if you have them.
 | `settlement.key` | file | The connector's EVM settlement key. |
 | `settlement-solana.key` | file | The connector's Solana settlement key. |
 | `NOSTR_PRIVATE_KEY` | `.env` | The provider's own identity. It signs the Profile, every Listing and every Liveness. |
-| `PUBLISHER_MNEMONIC` | `.env` | A 12-word BIP-39 phrase of its own for the publisher's wallet, shared with nothing else: two payers on one channel share one nonce watermark, and the loser of that race has every later claim refused. |
+| `PUBLISHER_MNEMONIC` | `.env` | A 12-word BIP-39 phrase of its own for the publisher's wallet, shared with nothing else: two payers on one channel race one running total, and every voucher of the one that falls behind is refused. |
 | `OPERATOR_BEARER_TOKEN` | `.env` | Gates the connector's `/metrics` and redeem endpoints. |
 | `OPERATOR_WRITE_KEY` | `.env` | The **public** half of a fresh ed25519 key for signing operator writes. |
 
@@ -278,8 +279,7 @@ settlement error later, never at load time.
 
 **The publisher's wallet — required to publish.** It opens a payment channel
 against the devnet relay and buys one write per directory event. Fund its
-Solana address with devnet SOL (fees, and the channel's own rent) and with mock
-USDC:
+Solana address with mock USDC:
 
 ```bash
 curl -X POST https://faucet.devnet.toonprotocol.dev/api/solana/usdc-request \
@@ -288,10 +288,18 @@ curl -X POST https://faucet.devnet.toonprotocol.dev/api/solana/usdc-request \
 
 `./keys.sh addresses` prints this command with the address already filled in.
 
+It needs **no SOL**: the relay's connector sponsors opening the channel
+(x402), so a wallet holding only USDC opens one and publishes. SOL is needed
+only to leave a channel (`request_close`, then `withdraw_payer`), which
+nothing here does on its own.
+
 At 1 µUSDC a write and a 60-second Liveness cadence this provider spends about
-**1,500 µUSDC a day** — 0.0015 USDC. The 10 USDC deposit is three orders of
-magnitude more than a year of that, because topping a channel up is the fiddly
-part, not funding it once.
+**1,500 µUSDC a day** — 0.0015 USDC. Each channel is opened with
+`PUBLISHER_DEPOSIT` (10 USDC unless `.env` says otherwise), three orders of
+magnitude more than a year of that. A Solana channel is **never topped up**:
+the connector's sponsor only opens, so the write a channel cannot cover opens
+a fresh one of `PUBLISHER_DEPOSIT` from the wallet. Keep the wallet holding at
+least that much (§ "Funding the publisher").
 
 `./keys.sh addresses` prints all three addresses from the key files and
 `PUBLISHER_MNEMONIC`, before anything has booted. Each is derived the way its
@@ -362,7 +370,8 @@ spent, remaining and runway); **leases** (capacity in use, and per lease its
 state, expiry, ports and what it has been billed); **earnings** (per payer
 channel, what is claimed, redeemed and unredeemed, and when it was last
 redeemed since the connector started); and **funding** (the connector's Solana
-settlement key's SOL). Each source is read on its own: an unreachable
+settlement key's SOL, and the publisher wallet's USDC beside what its next
+channel takes). Each source is read on its own: an unreachable
 publisher is shown as unreachable and the rest still print.
 
 To collect what the earnings section shows, run `toon-provider redeem`
@@ -398,7 +407,8 @@ own:
   never written anywhere. Each redeem is the same signed
   `POST /channels/:id/redeem-latest` as the command's.
 - **`t` top up**: an amount in base units, then the publisher's `/topup`, as
-  `toon-provider topup` sends it.
+  `toon-provider topup` sends it. Only on an EVM channel: on a Solana one,
+  `t` says to fund the wallet instead (§ "Funding the publisher").
 
 There is no eviction and no listing edit in it (ADR 0029): `toon-provider
 evict` and the deploy bundle's render stay the way to do those.
@@ -410,10 +420,10 @@ evict` and the deploy bundle's render stay the way to do those.
 | identity, directory, leases | `GET /operator/status` | `operator_url`, loopback inside this container |
 | publisher | the publisher's `GET /status` | `publish_url`'s origin, `http://directory-publisher:8081` — as `topup` does |
 | earnings | the connector's `GET /claims`, `/channels`, `/audit-log` | `TOON_CONNECTOR_OPERATOR_URL=http://provider-connector:4000`, with the bearer token from `TOON_CONNECTOR_BEARER_TOKEN_FILE` |
-| funding | `getBalance` of the connector's Solana settlement address | `TOON_SETTLEMENT_SOLANA_ADDRESS_FILE` and `TOON_SETTLEMENT_SOLANA_RPC_URL` |
+| funding | `getBalance` of the connector's Solana settlement address, and `getTokenAccountsByOwner` of the publisher's wallet in `provider.toml`'s solana `[[settlement]]` token | `TOON_SETTLEMENT_SOLANA_ADDRESS_FILE`, `TOON_PUBLISHER_SOLANA_ADDRESS_FILE` and `TOON_SETTLEMENT_SOLANA_RPC_URL`; the next channel's size from `TOON_PUBLISHER_DEPOSIT` |
 
 `docker-compose.yml` sets those variables on the `provider` service and mounts
-two files read-only beside `provider.toml`:
+three files read-only beside `provider.toml`:
 
 - **`operator-bearer.token`**, the one `render.sh` writes for the connector.
   Root in the provider container reads it although it is 0600 and owned by
@@ -424,6 +434,9 @@ two files read-only beside `provider.toml`:
   itself is never mounted into the provider. With no key file or no
   `python3`, the file is written empty and `status` says the address is
   unknown.
+- **`publisher-solana.address`**, which `render.sh` writes from
+  `PUBLISHER_MNEMONIC` the same way. It is public, and the mnemonic is never
+  handed to the provider.
 
 The connector is reached by its **compose name**, not by `connector_url`. On a
 public box `connector_url` is the public edge, so the bearer token would
@@ -435,7 +448,9 @@ nothing public directly: the balance is read from the RPC
 directly, or the public preset through the anon daemon on the circuit the
 connector keeps for Solana (spec §10, ADR 0030) — and any other source that
 is not on the box's private network is reported as "not asked" rather than
-dialled. `redeem`'s EVM gas price is read the same way, from
+dialled. The publisher's wallet is read only from your own node: asking for it
+on that circuit beside the settlement address would link the two, so through
+anon it is "not asked". `redeem`'s EVM gas price is read the same way, from
 `[anon.settlement.evm]`.
 
 ### `--check`, and the timer that runs it
@@ -453,9 +468,15 @@ dialled. `redeem`'s EVM gas price is read the same way, from
   seconds of `dns error: failed to lookup address information` rather than
   waiting a whole cadence for the regular retry to come around
   (TOON_Network#178);
-- the publisher's channel is **drained**, or its runway is under
-  `--min-runway` (default `7d`; a runway the publisher cannot estimate yet is
-  a warning, not a failure);
+- the publisher cannot pay for what comes next. On an **EVM** channel: it is
+  **drained**, or its runway is under `--min-runway` (default `7d`; a runway
+  the publisher cannot estimate yet is a warning, not a failure). On a
+  **Solana** channel, which is replaced rather than topped up: the channel is
+  drained, short of `--min-runway`, or not opened yet, **and** the wallet
+  holds less than the next channel takes (`PUBLISHER_DEPOSIT`). A drained
+  Solana channel with a funded wallet is fine, since the next write opens a
+  fresh one. A wallet that is short behind a long runway, or one that could
+  not be read when it mattered, is a warning;
 - the Profile's **sealing key** is not the connector's live one;
 - the settlement key holds less than `--min-sol` (default `0.005`, the floor
   `keys.sh` refuses to boot under).
@@ -499,16 +520,27 @@ To prove the paid path, spawn against `<ILP_ADDRESS>.<tier>.v1.spawn` at this
 edge (`g.toon.provider.basic.v1.spawn` on the devnet box). The infra
 repository's sandbox tooling drives exactly that.
 
-## Topping up the publisher
+## Funding the publisher
 
 The directory publisher pays for every Profile, Listing and Liveness this box
-writes, out of its own payment channel (`PUBLISHER_MNEMONIC`), and a channel
-that runs dry drops the provider out of the directory with no warning
-(ADR 0029). Check it, and fund it, from the box:
+writes, out of its own payment channel (`PUBLISHER_MNEMONIC`), and a publisher
+that cannot pay drops the provider out of the directory with no warning
+(ADR 0029). `toon-provider status --check` fails before that happens.
+
+**On Solana (this bundle's `TOON_CHAIN`), fund the wallet, not the channel.**
+The connector sponsors opening an x402 Solana channel and only opens, so a
+channel is never topped up. The write one cannot cover opens a fresh one of
+`PUBLISHER_DEPOSIT` from the wallet's own USDC, at no SOL. So what matters is
+that the wallet holds at least `PUBLISHER_DEPOSIT` when the current channel
+runs out. `status` shows both in its funding section. Send the wallet more
+USDC (on the devnet, the faucet command in § "The two funded identities").
+The publisher's `POST /topup` answers 400 on Solana.
+
+**On EVM, top the channel up** from the box:
 
 ```bash
 curl http://directory-publisher:8081/status                # from inside the compose network
-docker compose exec provider toon-provider topup 5000000   # 5 mock USDC at 6dp; confirms unless --yes
+docker compose exec provider toon-provider topup 5000000   # 5 USDC at 6dp; confirms unless --yes
 ```
 
 `toon-provider topup` reaches the publisher's `/topup` the same way the
@@ -742,7 +774,7 @@ The config validator refuses a non-loopback bind, and it is in no `ports:` row.
 **Neither is the publisher's `/status` or `/topup`.** Same rule as
 `/publish`: `directory-publisher` is `expose:` only, never `ports:`, so only
 another container on this compose network — in practice, `provider` — can
-read a balance or add collateral. `docker compose exec provider toon-provider
+read a balance or (on EVM) add collateral. `docker compose exec provider toon-provider
 topup …` is the way in from outside (`tools/publisher/README.md`).
 
 **`ports:` bypasses ufw.** Docker manages its own iptables rules ahead of

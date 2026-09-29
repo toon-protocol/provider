@@ -15,8 +15,10 @@ connector.toml
 listings.toml
 operator-bearer.token
 operator-write.keys
-# Public, but rendered from settlement-solana.key on the box (render.sh).
+# Public, but rendered on the box (render.sh): from settlement-solana.key,
+# and from PUBLISHER_MNEMONIC in .env.
 settlement-solana.address
+publisher-solana.address
 nginx/conf.d/
 *.key
 *.secret
