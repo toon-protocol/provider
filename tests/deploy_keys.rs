@@ -636,6 +636,18 @@ fn the_publishers_deposit_is_the_one_env_names() {
 }
 
 #[test]
+fn a_malformed_publisher_deposit_is_named() {
+    let (url, _) = stub_rpc(BTreeMap::new());
+    let dir = funded_bundle(&format!(
+        "SETTLEMENT_SOLANA_RPC_URL={url}\nSOLANA_RPC_URL={url}\nPUBLISHER_DEPOSIT=10usdc\n"
+    ));
+    let output = keys_sh(dir.path(), &["check-funded"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("PUBLISHER_DEPOSIT='10usdc'"), "{stderr}");
+}
+
+#[test]
 fn keys_py_prints_the_publisher_address_alone() {
     let dir = funded_bundle("");
     let output = Command::new("python3")

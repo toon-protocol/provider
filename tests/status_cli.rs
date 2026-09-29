@@ -1039,6 +1039,18 @@ async fn no_channel_yet_and_a_wallet_that_cannot_open_one_is_a_problem() {
     world.wallet_answers(10_000_000).await;
     let found = problems(&world.report().await);
     assert!(!any_contains(&found, "publisher:"), "{found:?}");
+
+    // Unread: the warning says why, not only that nothing is open.
+    let world = World::new().await;
+    world.operator_answers(healthy_doc()).await;
+    world
+        .publisher_answers(json!({ "channelId": null, "spent": "0", "assumptions": [] }))
+        .await;
+    let found = warnings(&world.report().await);
+    assert!(
+        any_contains(&found, "the first write opens a fresh channel of 10000000 from the wallet, whose balance could not be read"),
+        "{found:?}"
+    );
 }
 
 #[tokio::test]
@@ -1052,6 +1064,8 @@ async fn a_drained_solana_channel_and_an_unread_wallet_is_a_warning() {
     world.rpc_answers(1_500_000_000).await;
     let report = world.report().await;
     assert!(report.funding.publisher.error.is_some());
+    let text = render_text(&report);
+    assert!(text.contains("whose balance could not be read"), "{text}");
     let outcome = check(&report, &thresholds());
     assert!(
         !any_contains(&outcome.problems, "publisher:"),

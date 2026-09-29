@@ -569,6 +569,9 @@ fn a_solana_channel_is_not_topped_up_and_t_says_to_fund_the_wallet() {
         message.contains("7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy"),
         "{message}"
     );
+    // …and the footer does not offer it.
+    assert!(!frame(&app_with("healthy")).contains("top up"));
+    assert!(frame(&evm_publisher_app()).contains("top up"));
 }
 
 #[test]

@@ -242,12 +242,16 @@ pub fn section_text(report: &Report, section: Section) -> String {
                                 wallet.units.unwrap_or(0),
                             );
                         }
-                        (true, true, _) => {
+                        (true, true, short) => {
                             let _ = writeln!(
                                 out,
                                 "  spent: the next write opens a fresh channel of {} from the \
-                                 publisher's wallet.",
+                                 publisher's wallet{}.",
                                 next_deposit(wallet),
+                                match short {
+                                    Some(_) => "",
+                                    None => ", whose balance could not be read",
+                                },
                             );
                         }
                         (true, false, _) => {

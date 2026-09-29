@@ -318,7 +318,12 @@ fn check_solana_publisher(
                  for until it does",
                 holds("first")
             )),
-            _ => out.warnings.push(no_channel_yet()),
+            Some(false) => out.warnings.push(no_channel_yet()),
+            None => out.warnings.push(format!(
+                "publisher: no channel has been opened yet; the first write opens {fresh} from \
+                 the wallet, whose balance could not be read: {}",
+                unread()
+            )),
         }
         return;
     }

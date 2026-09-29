@@ -110,7 +110,7 @@ impl Sources {
         let publisher_token = config
             .settlement
             .iter()
-            .find(|s| s.chain == "solana" || s.chain.starts_with("solana:"))
+            .find(|s| is_solana(&s.chain))
             .map(|s| s.token.clone())
             .ok_or_else(|| {
                 "provider.toml names no solana [[settlement]] token to read the publisher's \
@@ -343,10 +343,13 @@ impl PublisherStatus {
     /// Whether the channel is an x402 Solana one, which is replaced from
     /// the wallet rather than topped up (`POST /topup` refuses it).
     pub fn on_solana(&self) -> bool {
-        self.chain
-            .as_deref()
-            .is_some_and(|c| c == "solana" || c.starts_with("solana:"))
+        self.chain.as_deref().is_some_and(is_solana)
     }
+}
+
+/// `solana`, or a `solana:<cluster>` chain.
+fn is_solana(chain: &str) -> bool {
+    chain == "solana" || chain.starts_with("solana:")
 }
 
 /// What the connector says this provider has earned.

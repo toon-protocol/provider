@@ -408,7 +408,10 @@ def env(name):
 
 
 def publisher_deposit():
-    return int(env("PUBLISHER_DEPOSIT") or DEFAULT_PUBLISHER_DEPOSIT)
+    value = env("PUBLISHER_DEPOSIT") or str(DEFAULT_PUBLISHER_DEPOSIT)
+    if not value.isdigit() or int(value) == 0:
+        raise KeyError(f"PUBLISHER_DEPOSIT={value!r} in .env is not a positive whole number of base units")
+    return int(value)
 
 
 def is_devnet_preset():
@@ -615,6 +618,7 @@ def cmd_check_funded(role, warn_only):
     connector_rpc = env("HIDDEN_SETTLEMENT_SOLANA_RPC_URL") if hidden else env("SETTLEMENT_SOLANA_RPC_URL")
     publisher_rpc = connector_rpc if hidden else (env("SOLANA_RPC_URL") or DEVNET_SOLANA_RPC)
     rows, _ = addresses(role)
+    deposit = publisher_deposit()
     short = []
     try:
         balance = lamports(connector_rpc, rows[0][1])
@@ -628,7 +632,6 @@ def cmd_check_funded(role, warn_only):
             # Its SOL is printed, never required: opening a channel costs
             # the payer none (the relay's connector sponsors it).
             print(f"    publisher  {publisher}  {balance / 1e9:.4f} SOL, {usdc / 1e6:g} USDC")
-            deposit = publisher_deposit()
             if usdc < deposit:
                 short.append(f"the publisher's wallet holds {usdc / 1e6:g} USDC, less than the {deposit / 1e6:g} it deposits")
     except (OSError, urllib.error.URLError, RuntimeError, KeyError, ValueError) as error:

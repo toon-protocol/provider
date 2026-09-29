@@ -41,4 +41,4 @@ expression: "frame(&app_with(\"troubled\"))"
 │                                                          ││34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU; the next    │
 │                                                          ││channel takes 10000000                                    │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
- r redeem  t top up  u refresh  Tab pane  j/k scroll  q quit
+ r redeem  u refresh  Tab pane  j/k scroll  q quit
