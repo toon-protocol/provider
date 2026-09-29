@@ -394,6 +394,30 @@ impl App {
 
     fn open_topup(&mut self) {
         match &self.report {
+            // Replaced from the wallet, never topped up: the publisher's
+            // /topup refuses it, so nothing is asked.
+            Some(report)
+                if report
+                    .publisher
+                    .status
+                    .as_ref()
+                    .is_some_and(|s| s.on_solana()) =>
+            {
+                let wallet = &report.funding.publisher;
+                self.message = Some(format!(
+                    "a Solana channel is not topped up: the next write it cannot cover opens a \
+                     fresh one of {} from the publisher's wallet{}, so fund that instead",
+                    wallet
+                        .next_deposit
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|| "TOON_DEPOSIT".to_string()),
+                    wallet
+                        .address
+                        .as_deref()
+                        .map(|a| format!(" {a}"))
+                        .unwrap_or_default(),
+                ));
+            }
             Some(report) if report.publisher.url.is_some() => {
                 self.modal = Some(Modal::TopupAmount {
                     input: String::new(),

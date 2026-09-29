@@ -4,7 +4,7 @@
     "problems": [
       "identity: the Profile's connector_seal_key 0x04325b06…ed0188 is not the key the connector reports (0x04ffffff…ffffff); every tenant will refuse to spawn",
       "directory: ws://relay-two.fixture.example:7100 refused the latest write of the Liveness: relay refused (last accepted 1m ago)",
-      "publisher: the channel PubChanne1…111111 is drained (remaining 0 of 10000000); no directory write can be paid for — `toon-provider topup <amount>`",
+      "publisher: the channel is drained, and the wallet 7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy holds 4000000, less than the 10000000 the next channel takes; no directory write can be paid for until it does",
       "funding: the connector's Solana settlement address 9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin holds 0.004 SOL, under --min-sol 0.005; the connector cannot pay for its boot transaction"
     ],
     "warnings": [
@@ -109,6 +109,13 @@
     "chain": "solana",
     "error": null,
     "lamports": 4000000,
+    "publisher": {
+      "address": "7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy",
+      "error": null,
+      "next_deposit": "10000000",
+      "token": "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU",
+      "units": "4000000"
+    },
     "rpc": "https://solana-rpc.fixture.example",
     "sol": "0.004"
   },

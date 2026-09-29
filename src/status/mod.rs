@@ -12,7 +12,7 @@
 //! | identity, directory, leases     | the running provider's `GET <operator_url>/operator/status`       |
 //! | publisher                       | the publisher's `GET /status`, on `publish_url`'s origin          |
 //! | earnings                        | the connector's operator reads `GET /claims`, `/channels`, `/audit-log`, with its bearer token |
-//! | funding                         | `getBalance` of the connector's Solana settlement address         |
+//! | funding                         | `getBalance` of the connector's Solana settlement address, and `getTokenAccountsByOwner` of the publisher's wallet |
 //!
 //! Printed in ADR 0029's order, human-readable by default; `--json` prints
 //! one document — the operator status document with `publisher`, `earnings`
@@ -40,7 +40,7 @@ pub(crate) use check::abbreviate;
 pub use check::{check, CheckOutcome, Thresholds};
 pub use gather::{
     gather, ChannelEarnings, EarningsSection, FundingSection, OperatorSource, PublisherSection,
-    PublisherStatus, Report, Sources,
+    PublisherStatus, PublisherWallet, Report, Sources,
 };
 // What `redeem` shares with `status`: the same connector, the same earnings.
 pub(crate) use gather::{
@@ -59,7 +59,8 @@ pub const SOURCE_TIMEOUT: Duration = Duration::from_secs(10);
 pub const DEFAULT_MIN_SOL: &str = "0.005";
 
 /// A week of publisher runway: long enough for an operator who reads the
-/// journal once a week to top up before the Liveness stops.
+/// journal once a week to top up (on Solana, fund the wallet) before the
+/// Liveness stops.
 pub const DEFAULT_MIN_RUNWAY: &str = "7d";
 
 /// `toon-provider status`'s flags: its two output modes, and the
@@ -72,8 +73,9 @@ pub struct StatusArgs {
 
     /// Exit non-zero, naming each problem, when something needs a person:
     /// Liveness close to expiry, a relay refusing the latest write, the
-    /// publisher's runway short, the sealing key mismatched, or the
-    /// settlement key low on SOL.
+    /// publisher unable to pay for the next write (its runway short, or on
+    /// Solana its wallet short of the next channel), the sealing key
+    /// mismatched, or the settlement key low on SOL.
     #[arg(long)]
     pub check: bool,
 
@@ -126,6 +128,25 @@ pub struct ReportArgs {
     /// through anon (spec §10, ADR 0030).
     #[arg(long, env = "TOON_SETTLEMENT_SOLANA_RPC_URL")]
     pub settlement_rpc_url: Option<String>,
+
+    /// The publisher's Solana wallet (public): what it opens each x402
+    /// channel from, since a Solana channel is replaced, never topped up.
+    /// Its balance is read in the provider's `[[settlement]]` solana token,
+    /// from the same RPC as the settlement address.
+    #[arg(long, env = "TOON_PUBLISHER_SOLANA_ADDRESS")]
+    pub publisher_address: Option<String>,
+
+    /// A file holding the publisher's Solana wallet address, as
+    /// `deploy/render.sh` writes it (`publisher-solana.address`).
+    #[arg(long, env = "TOON_PUBLISHER_SOLANA_ADDRESS_FILE")]
+    pub publisher_address_file: Option<PathBuf>,
+
+    /// What the publisher opens each Solana channel with, in the token's
+    /// base units: its `TOON_DEPOSIT`. `--check` fails when the wallet holds
+    /// less and the channel it pays from is drained or short of runway.
+    /// Unset, only an empty wallet counts as short.
+    #[arg(long, env = "TOON_PUBLISHER_DEPOSIT")]
+    pub publisher_deposit: Option<u128>,
 }
 
 impl ReportArgs {

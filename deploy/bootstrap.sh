@@ -287,8 +287,9 @@ echo "==> [9/9] The auto-apply and check timers"
 #
 # And every five minutes `toon-provider status --check` asks whether anything
 # needs a person (TOON_Network#172, ADR 0029 "Alerts are an exit code"): a
-# Liveness close to expiry, a relay refusing writes, the publisher's runway
-# short, the sealing key mismatched, the settlement key low on SOL. Each
+# Liveness close to expiry, a relay refusing writes, the publisher unable to
+# pay for what comes next (its runway short, or its wallet short of the next
+# Solana channel), the sealing key mismatched, the settlement key low on SOL. Each
 # problem is a line in `journalctl -u toon-provider-check`, and a failed run
 # is in `systemctl --failed`. auto-apply.sh keeps both units current.
 install -m 644 toon-auto-apply.service /etc/systemd/system/toon-auto-apply.service

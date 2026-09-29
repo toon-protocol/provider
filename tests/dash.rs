@@ -49,6 +49,17 @@ fn app_with(name: &str) -> App {
     app
 }
 
+/// The healthy box with its publisher paying on Base, whose channel a
+/// deposit tops up. (The fixture's publisher pays on Solana.)
+fn evm_publisher_app() -> App {
+    let mut report = fixture("healthy");
+    let status = report.publisher.status.as_mut().unwrap();
+    status.chain = Some("evm:84532".into());
+    let mut app = App::new(thresholds());
+    app.apply(Update::Report(Box::new(report)));
+    app
+}
+
 fn buffer(app: &App, width: u16, height: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
@@ -256,7 +267,7 @@ fn u_refreshes_now_and_q_quits() {
 
 #[test]
 fn a_refresh_keeps_an_open_dialog() {
-    let mut app = app_with("healthy");
+    let mut app = evm_publisher_app();
     press(&mut app, KeyCode::Char('t'));
     type_text(&mut app, "12");
     app.apply(Update::Report(Box::new(fixture("healthy"))));
@@ -445,7 +456,7 @@ fn estimates_for_a_dialog_since_closed_are_not_taken_for_the_open_one() {
 
 #[test]
 fn ctrl_c_waits_while_money_is_moving() {
-    let mut app = app_with("healthy");
+    let mut app = evm_publisher_app();
     press(&mut app, KeyCode::Char('t'));
     type_text(&mut app, "1");
     press(&mut app, KeyCode::Enter);
@@ -488,7 +499,7 @@ fn a_pane_scrolls_no_further_than_its_last_line() {
 
 #[test]
 fn top_up_asks_an_amount_and_a_typed_confirmation() {
-    let mut app = app_with("healthy");
+    let mut app = evm_publisher_app();
     assert!(press(&mut app, KeyCode::Char('t')).is_none());
     // Only digits are taken.
     type_text(&mut app, "5x00.0000");
@@ -516,7 +527,7 @@ fn top_up_asks_an_amount_and_a_typed_confirmation() {
 
 #[test]
 fn a_zero_amount_is_refused_before_anything_is_asked() {
-    let mut app = app_with("healthy");
+    let mut app = evm_publisher_app();
     press(&mut app, KeyCode::Char('t'));
     type_text(&mut app, "000");
     assert!(press(&mut app, KeyCode::Enter).is_none());
@@ -526,7 +537,7 @@ fn a_zero_amount_is_refused_before_anything_is_asked() {
 
 #[test]
 fn a_refused_top_up_is_shown() {
-    let mut app = app_with("healthy");
+    let mut app = evm_publisher_app();
     press(&mut app, KeyCode::Char('t'));
     type_text(&mut app, "1");
     press(&mut app, KeyCode::Enter);
@@ -536,6 +547,31 @@ fn a_refused_top_up_is_shown() {
         "top-up refused: 400 Bad Request".into()
     )));
     assert!(frame(&app).contains("400 Bad Request"));
+}
+
+#[test]
+fn a_solana_channel_is_not_topped_up_and_t_says_to_fund_the_wallet() {
+    // An x402 Solana channel is replaced from the wallet, never topped up:
+    // the publisher's /topup refuses it, so the dash asks nothing.
+    let mut app = app_with("healthy");
+    assert!(press(&mut app, KeyCode::Char('t')).is_none());
+    assert!(app.modal().is_none());
+    let message = app.message().unwrap_or_default().to_string();
+    assert!(
+        message.contains("a Solana channel is not topped up"),
+        "{message}"
+    );
+    assert!(
+        message.contains("fresh one of 10000000 from the publisher's wallet"),
+        "{message}"
+    );
+    assert!(
+        message.contains("7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy"),
+        "{message}"
+    );
+    // …and the footer does not offer it.
+    assert!(!frame(&app_with("healthy")).contains("top up"));
+    assert!(frame(&evm_publisher_app()).contains("top up"));
 }
 
 #[test]

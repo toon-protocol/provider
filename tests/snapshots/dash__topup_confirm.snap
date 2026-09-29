@@ -18,7 +18,7 @@ expression: frame(&app)
 └──────────────────────────────────────────────────────────┘└──────────────────────────────── ↓ more: Tab here, then j ┘
 ┌ PUBLISHER ───────────────────────────────────────────────┐┌ LEASES ──────────────────────────────────────────────────┐
 │channel       PubChanne1111111111111111111111111111111111 ││basic v1: 1 of 2 in use, 1 available — 1000 per 3600s     │
-│on s┌ Top up ────────────────────────────────────────────────────────────────────────────────────────────────────┐    │
+│on e┌ Top up ────────────────────────────────────────────────────────────────────────────────────────────────────┐    │
 │depo│Add 5000000 (token base units) to the publisher's channel PubChanne1111111111111111111111111111111111?      │400 │
 │(tok│It has 9997019 remaining now.                                                                               │    │
 │runw│The publisher deposits it on chain from its own wallet.                                                     │ssh │
@@ -32,10 +32,10 @@ expression: frame(&app)
 │0xabababab…ababab (open): claimed 3400, redeemed 1000,    ││settlement    9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin│
 │unredeemed 2400; last redeemed 10m ago                    ││holds 1.5 SOL (read from                                  │
 │2aEVJ8koKD…zQ7Rip: claimed 600, redeemed 0, unredeemed    ││https://solana-rpc.fixture.example)                       │
-│600; last redeemed not since the connector started        ││                                                          │
-│total unredeemed 3000 (token base units)                  ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
+│600; last redeemed not since the connector started        ││publisher     7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy│
+│total unredeemed 3000 (token base units)                  ││holds 25000000 of                                         │
+│                                                          ││34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU; the next    │
+│                                                          ││channel takes 10000000                                    │
 │                                                          ││                                                          │
 │                                                          ││                                                          │
 │                                                          ││                                                          │

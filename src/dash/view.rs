@@ -240,12 +240,17 @@ fn styled_line(line: &str) -> Line<'static> {
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
     let key = |k: &'static str| Span::styled(k, Style::default().add_modifier(Modifier::BOLD));
-    let mut spans = vec![
-        Span::raw(" "),
-        key("r"),
-        Span::raw(" redeem  "),
-        key("t"),
-        Span::raw(" top up  "),
+    // A Solana channel is replaced from the wallet, never topped up: `t`
+    // only says so, so it is not offered.
+    let solana = app
+        .report()
+        .and_then(|r| r.publisher.status.as_ref())
+        .is_some_and(|s| s.on_solana());
+    let mut spans = vec![Span::raw(" "), key("r"), Span::raw(" redeem  ")];
+    if !solana {
+        spans.extend([key("t"), Span::raw(" top up  ")]);
+    }
+    spans.extend([
         key("u"),
         Span::raw(" refresh  "),
         key("Tab"),
@@ -254,7 +259,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         Span::raw(" scroll  "),
         key("q"),
         Span::raw(" quit"),
-    ];
+    ]);
     if let Some(message) = app.message() {
         spans.push(Span::raw("  ── "));
         spans.push(Span::styled(

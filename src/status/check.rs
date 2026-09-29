@@ -6,7 +6,7 @@
 
 use crate::directory::{RefusalKind, RelayOutcome};
 
-use super::gather::Report;
+use super::gather::{PublisherStatus, PublisherWallet, Report};
 use super::{format_duration, format_sol};
 
 /// The operator's thresholds (`--min-runway`, `--min-sol`).
@@ -220,6 +220,34 @@ fn check_publisher(report: &Report, thresholds: &Thresholds, out: &mut CheckOutc
         out.problems.push(format!("publisher: {why}"));
         return;
     };
+    let wallet = &report.funding.publisher;
+    // With no channel yet the publisher names no chain; a wallet to read is
+    // what says it will open one on Solana.
+    let on_solana = match &status.chain {
+        Some(_) => status.on_solana(),
+        None => wallet.address.is_some(),
+    };
+    if on_solana {
+        check_solana_publisher(status, wallet, thresholds, out);
+    } else {
+        check_topped_up_publisher(status, thresholds, out);
+    }
+    if status.watermark_uncertain {
+        out.warnings.push(
+            "publisher: the channel's watermark is uncertain (a write's outcome was not \
+             confirmed); spent may be understated"
+                .to_string(),
+        );
+    }
+}
+
+/// A channel the operator tops up (`toon-provider topup`): on EVM, a
+/// deposit adds to it.
+fn check_topped_up_publisher(
+    status: &PublisherStatus,
+    thresholds: &Thresholds,
+    out: &mut CheckOutcome,
+) {
     if status.drained() {
         out.problems.push(format!(
             "publisher: the channel{} is drained (remaining 0 of {}); no directory write can \
@@ -234,11 +262,7 @@ fn check_publisher(report: &Report, thresholds: &Thresholds, out: &mut CheckOutc
         return;
     }
     if status.channel_id.is_none() {
-        out.warnings.push(
-            "publisher: no channel has been opened yet, so there is nothing to measure a \
-             runway on"
-                .to_string(),
-        );
+        out.warnings.push(no_channel_yet());
         return;
     }
     match status.runway_s {
@@ -250,22 +274,124 @@ fn check_publisher(report: &Report, thresholds: &Thresholds, out: &mut CheckOutc
             status.remaining.as_deref().unwrap_or("?"),
         )),
         Some(_) => {}
-        None => out.warnings.push(format!(
-            "publisher: the runway is unknown{}",
-            status
-                .assumptions
-                .first()
-                .map(|a| format!(": {a}"))
-                .unwrap_or_default()
+        None => out.warnings.push(unknown_runway(status)),
+    }
+}
+
+/// An x402 Solana channel: opened by the connector's sponsor, which only
+/// opens, so it is never topped up. The payment it cannot cover opens a
+/// fresh one of `TOON_DEPOSIT` from the publisher's wallet, and whether the
+/// next write can be paid for is the wallet's to say.
+fn check_solana_publisher(
+    status: &PublisherStatus,
+    wallet: &PublisherWallet,
+    thresholds: &Thresholds,
+    out: &mut CheckOutcome,
+) {
+    let address = wallet.address.as_deref().unwrap_or("?");
+    let holds = |which: &str| {
+        format!(
+            "the wallet {address} holds {}, {}",
+            wallet.units.unwrap_or(0),
+            match wallet.next_deposit {
+                Some(n) => format!("less than the {n} the {which} channel takes"),
+                None => format!("nothing to open the {which} channel with"),
+            }
+        )
+    };
+    let unread = || {
+        wallet
+            .error
+            .as_deref()
+            .unwrap_or("it did not answer")
+            .to_string()
+    };
+    let fresh = match wallet.next_deposit {
+        Some(n) => format!("a fresh channel of {n}"),
+        None => "a fresh channel".to_string(),
+    };
+
+    if status.channel_id.is_none() {
+        match wallet.short() {
+            Some(true) => out.problems.push(format!(
+                "publisher: no channel is open yet, and {}; no directory write can be paid \
+                 for until it does",
+                holds("first")
+            )),
+            Some(false) => out.warnings.push(no_channel_yet()),
+            None => out.warnings.push(format!(
+                "publisher: no channel has been opened yet; the first write opens {fresh} from \
+                 the wallet, whose balance could not be read: {}",
+                unread()
+            )),
+        }
+        return;
+    }
+    if status.drained() {
+        match wallet.short() {
+            Some(true) => out.problems.push(format!(
+                "publisher: the channel is drained, and {}; no directory write can be paid \
+                 for until it does",
+                holds("next")
+            )),
+            Some(false) => {}
+            None => out.warnings.push(format!(
+                "publisher: the channel is drained; the next write opens {fresh} from the \
+                 wallet, whose balance could not be read: {}",
+                unread()
+            )),
+        }
+        return;
+    }
+    match (status.runway_s, wallet.short()) {
+        (Some(runway), Some(true)) if runway < thresholds.min_runway_s => {
+            out.problems.push(format!(
+                "publisher: {} of runway left, under --min-runway {} (remaining {}), and {}",
+                format_duration(runway),
+                format_duration(thresholds.min_runway_s),
+                status.remaining.as_deref().unwrap_or("?"),
+                holds("next")
+            ))
+        }
+        (Some(runway), Some(true)) => out.warnings.push(format!(
+            "publisher: {}; fund it before this channel's {} run out",
+            holds("next"),
+            format_duration(runway)
         )),
+        (Some(runway), None) if runway < thresholds.min_runway_s => out.warnings.push(format!(
+            "publisher: {} of runway left, under --min-runway {}; the next write after \
+                 that opens {fresh} from the wallet, whose balance could not be read: {}",
+            format_duration(runway),
+            format_duration(thresholds.min_runway_s),
+            unread()
+        )),
+        (Some(_), _) => {}
+        (None, short) => {
+            out.warnings.push(unknown_runway(status));
+            if short == Some(true) {
+                out.warnings.push(format!(
+                    "publisher: {}; fund it before this channel runs out",
+                    holds("next")
+                ));
+            }
+        }
     }
-    if status.watermark_uncertain {
-        out.warnings.push(
-            "publisher: the channel's watermark is uncertain (a write's outcome was not \
-             confirmed); spent may be understated"
-                .to_string(),
-        );
-    }
+}
+
+fn no_channel_yet() -> String {
+    "publisher: no channel has been opened yet, so there is nothing to measure a runway on"
+        .to_string()
+}
+
+fn unknown_runway(status: &PublisherStatus) -> String {
+    format!(
+        "publisher: the runway is unknown{}",
+        status
+            .assumptions
+            .first()
+            .map(|a| format!(": {a}"))
+            .unwrap_or_default()
+    )
 }
 
 fn check_earnings(report: &Report, out: &mut CheckOutcome) {

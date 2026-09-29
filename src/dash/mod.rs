@@ -15,7 +15,9 @@
 //!   redeems are signed and sent, then wiped; it is never written anywhere.
 //!   Each redeem is `redeem::redeem_one`, exactly as the command sends it.
 //! - **top up** (`t`): an amount, then the publisher's `POST /topup`, as
-//!   `toon-provider topup` sends it.
+//!   `toon-provider topup` sends it. Not on a Solana channel, which the
+//!   next write it cannot cover replaces from the publisher's wallet: `t`
+//!   says to fund the wallet instead.
 //!
 //! No eviction and no listing edits (ADR 0029). ANSI colours only, the
 //! Console's visual rule (ADR 0028), and none of its code.

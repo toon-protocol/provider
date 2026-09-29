@@ -34,11 +34,11 @@ expression: "frame(&app_with(\"provider_down\"))"
 │0xabababab…ababab (open): claimed 3400, redeemed 1000,    ││settlement    9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin│
 │unredeemed 2400; last redeemed 10m ago                    ││holds 1.5 SOL (read from                                  │
 │2aEVJ8koKD…zQ7Rip: claimed 600, redeemed 0, unredeemed    ││https://solana-rpc.fixture.example)                       │
-│600; last redeemed not since the connector started        ││                                                          │
-│total unredeemed 3000 (token base units)                  ││                                                          │
-│                                                          ││                                                          │
-│                                                          ││                                                          │
+│600; last redeemed not since the connector started        ││publisher     7cVfgArCheMR6Cs4t6vz5rfnqd56vZq4ndaBrY5xkxXy│
+│total unredeemed 3000 (token base units)                  ││holds 25000000 of                                         │
+│                                                          ││34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU; the next    │
+│                                                          ││channel takes 10000000                                    │
 │                                                          ││                                                          │
 │                                                          ││                                                          │
 └──────────────────────────────────────────────────────────┘└──────────────────────────────────────────────────────────┘
- r redeem  t top up  u refresh  Tab pane  j/k scroll  q quit
+ r redeem  u refresh  Tab pane  j/k scroll  q quit
