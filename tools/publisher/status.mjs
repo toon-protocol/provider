@@ -42,6 +42,7 @@ export function loadChannelStatus(store) {
       channelId: binding.channelId,
       chain: binding.batchSettlement.chain,
       depositTotal: binding.depositTotal,
+      pendingDeposit: binding.pendingDeposit,
       entry,
     };
   }
@@ -132,8 +133,17 @@ function runwaySeconds({ remaining, pricePerCadence, cadenceS }, assumptions) {
  * `process.env` here, so this stays a pure function fixtures can drive
  * directly.
  */
-export function statusBody({ channelId, chain, entry, depositTotal, pricePerCadence, cadenceS }) {
+export function statusBody({ channelId, chain, entry, depositTotal, pendingDeposit, pricePerCadence, cadenceS }) {
   const assumptions = [];
+  // Recorded before it leaves, so a lost answer never loses the channel
+  // (client 4.x). Not counted: only the chain says whether it landed, and the
+  // next payment reads it there.
+  if (pendingDeposit !== undefined) {
+    assumptions.push(
+      `a deposit of ${pendingDeposit.toString()} is pending: sent, not yet confirmed on chain, ` +
+        'so it is not counted in deposit or remaining until the next payment confirms it.',
+    );
+  }
   const spent = entry?.cumulativeAmount ?? 0n;
   const deposit = depositTotal;
   const remaining = deposit === undefined ? undefined : deposit > spent ? deposit - spent : 0n;

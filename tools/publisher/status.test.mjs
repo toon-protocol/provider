@@ -107,6 +107,16 @@ describe('loadChannelStatus', () => {
     assert.equal(status.entry.cumulativeAmount, 200_000n);
   });
 
+  it('carries a deposit the client recorded before it left, whose fate is not known yet', () => {
+    const path = freshStore();
+    new BatchChannelManager(new JsonFileChannelStore(path)).adoptPending(CONNECTOR, evmChannel('0xpending'), 1_000_000n);
+
+    const status = loadChannelStatus(new JsonFileChannelStore(path));
+    assert.equal(status.channelId, '0xpending');
+    assert.equal(status.depositTotal, 0n);
+    assert.equal(status.pendingDeposit, 1_000_000n);
+  });
+
   it('skips a channel the client has started leaving', () => {
     const path = freshStore();
     const manager = new BatchChannelManager(new JsonFileChannelStore(path));
@@ -185,6 +195,24 @@ describe('statusBody', () => {
     // remaining(9000) * cadence(60) / pricePerCadence(100) = 5400s
     assert.equal(body.runway_s, 5400);
     assert.ok(body.assumptions.some((a) => /60s/.test(a)));
+  });
+
+  it('names a pending deposit rather than counting it, or leaving it unsaid', () => {
+    // Recorded before it leaves (client 4.x); only the chain says whether it
+    // landed, and the next payment reads it. Until then remaining is what is
+    // known to be funded.
+    const body = statusBody({
+      channelId: '0xpending',
+      chain: 'evm',
+      entry: { cumulativeAmount: 0n },
+      depositTotal: 0n,
+      pendingDeposit: 1_000_000n,
+      pricePerCadence: 1n,
+      cadenceS: 60,
+    });
+    assert.equal(body.deposit, '0');
+    assert.equal(body.remaining, '0');
+    assert.ok(body.assumptions.some((a) => /1000000/.test(a) && /pending/.test(a)), body.assumptions.join(' | '));
   });
 
   it('never reports remaining below zero when spent exceeds deposit', () => {

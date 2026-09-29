@@ -91,13 +91,12 @@ facilitator the connector names, as the opening one did. A Solana channel
 cannot be topped up — the connector's sponsor only opens channels, so the
 payment one cannot cover opens a fresh one sized by `TOON_DEPOSIT` — and on
 `TOON_CHAIN=solana` this answers 400 without building a client. `amount` is
-validated (a positive integer,
-in the token's smallest unit, same units as `TOON_DEPOSIT`) **before** this
-process builds or reuses a client, so a bad request never dials the connector
-(or, beside a hidden provider, opens a hidden-service circuit) only to be
-refused. It shares `/publish`'s serialization queue: a deposit and a voucher
-both touch this channel's tracked state, and the client is not safe to use
-from two calls at once.
+validated (a positive integer, in the token's smallest unit, same units as
+`TOON_DEPOSIT`) **before** this process builds or reuses a client, so a bad
+request never dials the connector (or, beside a hidden provider, opens a
+hidden-service circuit) only to be refused. It shares `/publish`'s
+serialization queue: a deposit and a voucher both touch this channel's
+tracked state, and the client is not safe to use from two calls at once.
 
 `toon-provider topup <amount>` (the provider CLI) is the guided way to call
 this from the box: `docker compose exec provider toon-provider topup 5000000`,
@@ -256,7 +255,8 @@ rides, what is refused at startup, whether the chain RPC rides it, what the
 client is handed, and that the `fetch` and the BTP socket take the same
 route — `blob.mjs` below,
 `status.mjs` (`status.test.mjs`, against channel files written by the
-client's own `BatchChannelManager`, plus the 3.x file in `test/fixtures/`) and `topup.mjs` (`topup.test.mjs`, against a stubbed
+client's own `BatchChannelManager`, plus the 3.x file in
+`test/fixtures/`) and `topup.mjs` (`topup.test.mjs`, against a stubbed
 client). None of these needs network, a chain or a mnemonic.
 
 ## Deciding a Blob Record's shape: `blob.mjs`

@@ -92,8 +92,10 @@ describe('topup', () => {
       built = true;
       return stubClient({});
     };
-    await assert.rejects(() => topup(getClient, '5000000', 'solana'), TopupUnsupportedError);
-    await assert.rejects(() => topup(getClient, '5000000', 'solana'), /opens a fresh sponsored one/);
+    await assert.rejects(
+      () => topup(getClient, '5000000', 'solana'),
+      (e) => e instanceof TopupUnsupportedError && /opens a fresh sponsored one/.test(e.message),
+    );
     assert.equal(built, false);
   });
 
