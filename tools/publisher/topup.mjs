@@ -32,26 +32,41 @@ export function parseAmount(amount) {
 }
 
 /**
+ * A top-up this publisher's chain cannot do: an x402 Solana channel is opened
+ * through the connector's sponsor, which only opens, so a channel that runs
+ * short is replaced by a fresh sponsored one on the next payment instead
+ * (client 4.0.0). A caller's error, not the connector's.
+ */
+export class TopupUnsupportedError extends Error {}
+
+/**
  * Add collateral to the open channel and report the new state.
  *
  * `getClient` is a factory, not the client itself, and is called ONLY once
- * `amount` has already parsed — an invalid amount must never build a client
- * (dial the connector, and beside a hidden provider open a hidden-service
- * circuit) just to be refused. It resolves to anything shaped like
- * `ChannelFacade`'s owner — real (`ToonClient`) in production, a stub
- * `{ channel: { deposit: async () => … } }` in tests.
- * `client.channel.deposit` is monotonic on both chains (a deposit can never
- * decrease it), so this never needs to read the channel first.
+ * `amount` has already parsed and `chain` can be topped up at all — a refused
+ * request must never build a client (dial the connector, and beside a hidden
+ * provider open a hidden-service circuit) just to be refused. It resolves to
+ * anything shaped like `ChannelFacade`'s owner — real (`ToonClient`) in
+ * production, a stub `{ channel: { deposit: async () => … } }` in tests.
+ * `client.channel.deposit` resolves to the channel's `BatchChannelSummary`,
+ * and is monotonic (a deposit can never decrease it), so this never needs to
+ * read the channel first.
  */
-export async function topup(getClient, amount) {
+export async function topup(getClient, amount, chain) {
   const parsed = parseAmount(amount);
+  if (chain === 'solana') {
+    throw new TopupUnsupportedError(
+      'a Solana channel is not topped up: the next payment it cannot cover opens a fresh sponsored one (TOON_DEPOSIT sizes it)',
+    );
+  }
   const client = await getClient();
-  const state = await client.channel.deposit(parsed);
+  const summary = await client.channel.deposit(parsed);
+  const remaining = summary.depositTotal > summary.signed ? summary.depositTotal - summary.signed : 0n;
   return {
-    channelId: state.channelId,
-    chain: state.chain,
-    deposit: state.depositTotal.toString(),
-    spent: state.spent.toString(),
-    remaining: state.available.toString(),
+    channelId: summary.channel.channelId,
+    chain: summary.channel.chain,
+    deposit: summary.depositTotal.toString(),
+    spent: summary.signed.toString(),
+    remaining: remaining.toString(),
   };
 }

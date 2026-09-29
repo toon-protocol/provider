@@ -5,8 +5,8 @@ The provider's payer for relay writes.
 A provider publishes its Provider Profile, its Listings and its Liveness to
 every relay in its Relay Set, and on the TOON Network **every relay write is a
 paid packet** — on the paid relay route, never on the free ephemeral lane
-(ADR 0007). Paying one means holding a payment channel on Solana or EVM,
-signing a balance proof per packet, and sealing an ILP prepare to the
+(ADR 0007). Paying one means holding an x402 batch-settlement channel on
+Solana or EVM, signing a voucher per packet, and sealing an ILP prepare to the
 terminating connector's key.
 
 There is one proven implementation of all of that, `@toon-protocol/client`,
@@ -52,9 +52,9 @@ GET /status
           "assumptions": [ "runway = remaining ÷ (price per write × writes per cadence): …" ] }
 
 POST /topup  { "amount": "5000000" }
--> 200       { "channelId": "…", "chain": "solana",
+-> 200       { "channelId": "…", "chain": "evm",
                "deposit": "15000000", "spent": "1500000", "remaining": "13500000" }
--> 400       { "error": "…" }   amount is not a positive integer
+-> 400       { "error": "…" }   amount is not a positive integer, or TOON_CHAIN is solana
 -> 502       { "error": "…" }   the deposit could not be made (no channel, chain error, …)
 ```
 
@@ -63,9 +63,16 @@ POST /topup  { "amount": "5000000" }
 `JsonFileChannelStore` already writes for the channel this process pays on:
 
 - `TOON_CHANNEL_STORE` (default `channels.json`) — the watermark: `spent`
-  (`cumulativeAmount`), `signedCeiling` and `watermarkUncertain`.
+  (`cumulativeAmount`, the running total of every voucher signed),
+  `signedCeiling` and `watermarkUncertain`.
 - its sibling `channels.peers.json` — the binding: `deposit` (`depositTotal`,
   kept current on every deposit) and which chain it is on.
+
+Only the x402 channel the client would pay from counts: not one it archived
+(an exhausted Solana channel is replaced, never topped up), not one it has
+started leaving, and not a `toon-channel` binding a 3.x client left on the
+volume. With none of those, `/status` answers as if no channel was ever
+opened.
 
 `remaining` is `deposit - spent`, floored at zero. `runway_s` is
 `remaining ÷ (price per write × writes per cadence)`: the cadence comes from
@@ -78,12 +85,17 @@ means `runway_s: null`, and `assumptions` always says exactly what the figure
 does or does not rest on, rather than leaving a number to be trusted blind or
 a `null` to be guessed at.
 
-`POST /topup` calls the client's own `channel.deposit(amount)` on the channel
-already open with this connector — `amount` is validated (a positive integer,
+`POST /topup` calls the client's own `channel.deposit(amount)` on the Base
+channel already open with this connector; the deposit goes through the
+facilitator the connector names, as the opening one did. A Solana channel
+cannot be topped up — the connector's sponsor only opens channels, so the
+payment one cannot cover opens a fresh one sized by `TOON_DEPOSIT` — and on
+`TOON_CHAIN=solana` this answers 400 without building a client. `amount` is
+validated (a positive integer,
 in the token's smallest unit, same units as `TOON_DEPOSIT`) **before** this
 process builds or reuses a client, so a bad request never dials the connector
 (or, beside a hidden provider, opens a hidden-service circuit) only to be
-refused. It shares `/publish`'s serialization queue: a deposit and a claim
+refused. It shares `/publish`'s serialization queue: a deposit and a voucher
 both touch this channel's tracked state, and the client is not safe to use
 from two calls at once.
 
@@ -99,12 +111,12 @@ Environment only; there is no config file.
 |---|---|---|
 | `PORT` / `BIND_ADDR` | `8081` / `0.0.0.0` | Where `/publish` listens. PRIVATE — only the provider app should reach it. |
 | `TOON_CONNECTOR_URL` | `http://localhost:3200` | The connector client edge this process pays through. |
-| `TOON_MNEMONIC` | — | **Required.** The BIP-39 phrase whose key signs the balance proofs. |
+| `TOON_MNEMONIC` | — | **Required.** The BIP-39 phrase whose key signs the vouchers. |
 | `TOON_ACCOUNT_INDEX` | `0` | Which account of that phrase, so a publisher need not share a wallet with anything else. |
 | `TOON_CHAIN` | `solana` | Settlement chain of the channel it opens. |
 | `TOON_RPC_URL` | `http://127.0.0.1:8899` | That chain's RPC. |
 | `TOON_CHANNEL_STORE` | `/var/lib/toon-publisher/channels.json` | The channel watermark. Must outlive a restart and die with the chain. |
-| `TOON_DEPOSIT` | `10000000` | Channel deposit in the token's smallest unit (10 USDC at 6 dp). |
+| `TOON_DEPOSIT` | `10000000` | Channel deposit in the token's smallest unit (10 USDC at 6 dp). On Solana, at least the connector's published `minDeposit`. |
 | `TOON_TIMEOUT_MS` | `60000` | Per-packet timeout. |
 | `TOON_LIVENESS_CADENCE_S` | — | Seconds between this provider's Liveness writes, used by `GET /status` to estimate a runway. Optional: unset means `/status` reports `runway_s: null` and says why. |
 | `TOON_TRANSPORT` | `http` | The ILP carriage the packets are paid over: `http`, `auto` or `btp`. See below. |
@@ -243,8 +255,8 @@ exactly as it did before the field existed — absent means direct.
 rides, what is refused at startup, whether the chain RPC rides it, what the
 client is handed, and that the `fetch` and the BTP socket take the same
 route — `blob.mjs` below,
-`status.mjs` (`status.test.mjs`, against real fixture channel files in
-`test/fixtures/`) and `topup.mjs` (`topup.test.mjs`, against a stubbed
+`status.mjs` (`status.test.mjs`, against channel files written by the
+client's own `BatchChannelManager`, plus the 3.x file in `test/fixtures/`) and `topup.mjs` (`topup.test.mjs`, against a stubbed
 client). None of these needs network, a chain or a mnemonic.
 
 ## Deciding a Blob Record's shape: `blob.mjs`

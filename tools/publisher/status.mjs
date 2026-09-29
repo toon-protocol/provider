@@ -6,41 +6,46 @@
 // read. So this reads exactly the two files the client's own
 // `JsonFileChannelStore` already writes —
 //
-//   channels.json         { [channelId]: { nonce, cumulativeAmount, … } }
-//   channels.peers.json   { [peerKey]:  { channelId, context, depositTotal, … } }
+//   channels.json         { [channelId]: { cumulativeAmount, signedCeiling, … } }
+//   channels.peers.json   { [bindingKey]: { channelId, depositTotal, batchSettlement, … } }
 //
-// through that same class, and joins them: `cumulativeAmount` (spent) lives on
-// the watermark file, `depositTotal` (what was actually funded — kept current
-// by `ChannelManager.setDepositTotal` on every deposit, ChannelManager.ts) on
-// the binding. Neither file alone answers "how much is left".
+// through that same class, and joins them: `cumulativeAmount` (the running
+// total of every voucher signed) lives on the watermark file, `depositTotal`
+// (what was actually funded — kept current by `BatchChannelManager` on every
+// deposit) on the binding. Neither file alone answers "how much is left".
 
 /**
- * The channel this publisher is using, read from `store` (a
+ * The channel this publisher is paying from, read from `store` (a
  * `JsonFileChannelStore`, or anything shaped like one — tests pass the real
- * class pointed at a fixture directory). `null` when no channel has ever been
- * opened.
+ * class, written by the client's own `BatchChannelManager`). `null` when no
+ * channel is open.
+ *
+ * Only x402 `batch-settlement` channels count (client 4.x, connector ADR
+ * 0075): a binding without `batchSettlement` is a `toon-channel` one that a
+ * 3.x client left on the volume, and nothing pays from it any more. Nor does
+ * a binding the client archived (`supersededAt`: a newer channel replaced it,
+ * as an exhausted Solana channel always is) or one it has started leaving
+ * (`closedAt` on its watermark).
  *
  * A publisher pays exactly one connector on one chain for its whole life
  * (`TOON_CONNECTOR_URL` / `TOON_CHAIN` are process config, not per-request),
- * so there is normally exactly one binding that isn't superseded. If more
- * than one somehow is — a config that changed connector or chain mid-flight —
- * the most recently opened one wins, since that is the channel a fresh
- * `deposit()` would resume.
+ * so exactly one channel is normally left. If more than one somehow is — a
+ * config that changed connector or chain mid-flight — the first listed wins.
  */
 export function loadChannelStatus(store) {
   const bindings = typeof store.listBindings === 'function' ? store.listBindings() : [];
-  const active = bindings
-    .filter(({ binding }) => binding.supersededAt === undefined)
-    .sort((a, b) => (b.binding.openedAt ?? '').localeCompare(a.binding.openedAt ?? ''));
-  const chosen = active[0];
-  if (chosen === undefined) return null;
-  const entry = store.load(chosen.binding.channelId);
-  return {
-    channelId: chosen.binding.channelId,
-    chain: chosen.binding.context?.chainType ?? null,
-    depositTotal: chosen.binding.depositTotal,
-    entry,
-  };
+  for (const { binding } of bindings) {
+    if (binding.batchSettlement === undefined || binding.supersededAt !== undefined) continue;
+    const entry = store.load(binding.channelId);
+    if (entry?.closedAt !== undefined) continue;
+    return {
+      channelId: binding.channelId,
+      chain: binding.batchSettlement.chain,
+      depositTotal: binding.depositTotal,
+      entry,
+    };
+  }
+  return null;
 }
 
 /**

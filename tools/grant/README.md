@@ -320,7 +320,7 @@ does, and reads the same environment name for name.
 | Variable | Default | Meaning |
 |---|---|---|
 | `TOON_ROOT_SECRET` | — | The lease's root secret, hex. Or `--root-secret`. **Required.** |
-| `TOON_MNEMONIC` | — | **Required to seal** (not for `--dry-run`). The BIP-39 phrase whose key signs the balance proofs. It pays; it is not an identity. |
+| `TOON_MNEMONIC` | — | **Required to seal** (not for `--dry-run`). The BIP-39 phrase whose key signs the vouchers. It pays; it is not an identity. |
 | `TOON_CONNECTOR_URL` | `http://localhost:3200` | The connector client edge this process pays through. |
 | `TOON_ACCOUNT_INDEX` | `0` | Which account of that phrase. |
 | `TOON_CHAIN` | `solana` | Settlement chain of the channel it opens. |

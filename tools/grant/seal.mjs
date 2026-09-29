@@ -213,10 +213,14 @@ async function openClient() {
     transport: 'http',
     fetch: (input, init) => fetch(rewrite(input), init),
   });
-  const opened = await client.channel.open({ deposit: DEPOSIT });
+  // `deposit` above sizes it: on Base it goes through the facilitator the
+  // connector names, which pays its gas, and on Solana the connector sponsors
+  // it (tools/publisher).
+  const opened = await client.channel.open();
   log(
-    `paying ${CONNECTOR} from ${client.identity?.solanaPublicKey ?? '(unknown)'} ` +
-      `on channel ${opened.channelId ?? '(id unreported)'}`,
+    `paying ${CONNECTOR} from ` +
+      `${(CHAIN === 'evm' ? client.identity?.evmAddress : client.identity?.solanaPublicKey) ?? '(unknown)'} ` +
+      `on channel ${opened.channel.channelId}`,
   );
   return client;
 }

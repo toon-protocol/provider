@@ -1,43 +1,125 @@
-// `GET /status`'s maths (`status.mjs`), against real fixture channel files —
-// no network, no chain, no mnemonic. Run with `npm test` in this directory.
+// `GET /status`'s maths (`status.mjs`), against channel files the real client
+// writes — no network, no chain, no mnemonic. Run with `npm test` in this
+// directory.
+//
+// The channel files are written by @toon-protocol/client's own
+// `BatchChannelManager` into a scratch directory, not hand-made, so what is
+// proved is that `/status` reads exactly what this client version leaves on
+// the publisher's volume. The one hand-made fixture is the file a 3.x client
+// left behind (`test/fixtures/toon-channel`), which a 4.x volume may still
+// hold after an upgrade.
 
 import { strict as assert } from 'node:assert';
-import { describe, it } from 'node:test';
+import { after, describe, it } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { JsonFileChannelStore, InMemoryChannelStore } from '@toon-protocol/client';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { BatchChannelManager, JsonFileChannelStore, InMemoryChannelStore } from '@toon-protocol/client';
 
 import { estimateSpendPerCadence, loadChannelStatus, noChannelStatusBody, statusBody } from './status.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixture = (name) => join(here, 'test', 'fixtures', name, 'channels.json');
 
+const CONNECTOR = 'http://relay-connector:3000';
+const scratch = [];
+after(() => {
+  for (const dir of scratch) rmSync(dir, { recursive: true, force: true });
+});
+
+/** A fresh `channels.json` path, as `TOON_CHANNEL_STORE` names one. */
+function freshStore() {
+  const dir = mkdtempSync(join(tmpdir(), 'publisher-status-'));
+  scratch.push(dir);
+  return join(dir, 'channels.json');
+}
+
+const solanaChannel = (channelId, salt = 1n) => ({
+  chain: 'solana',
+  channelId,
+  network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
+  sponsor: 'GzvGVjq3dnNM79MpWRvYCvVcAgPWzDdYisMwGxHF4u9F',
+  config: {
+    payer: 'W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV',
+    payerAuthorizer: 'W6yK72j365eK7t4Qj5An1AaYtUEJcJK7TBPvGeDk1LV',
+    receiver: 'GzvGVjq3dnNM79MpWRvYCvVcAgPWzDdYisMwGxHF4u9F',
+    token: '34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU',
+    withdrawDelay: 86400,
+    salt,
+    openSlot: 1000n,
+  },
+});
+
+const evmChannel = (channelId) => ({
+  chain: 'evm',
+  channelId,
+  network: 'eip155:84532',
+  config: {
+    payer: '0x0657330A600bfb6CeaDe39FFa4fDBE7a98CBfeBE',
+    payerAuthorizer: '0x0657330A600bfb6CeaDe39FFa4fDBE7a98CBfeBE',
+    receiver: '0x3f43d923a611bcb2d0bfb5d6ee2c3ac3efeaf308',
+    receiverAuthorizer: '0x3f43d923a611bcb2d0bfb5d6ee2c3ac3efeaf308',
+    token: '0x0C996d7c934c79a6255254875607Fe69df25C0E1',
+    withdrawDelay: 86400,
+    salt: `0x${'00'.repeat(31)}01`,
+  },
+});
+
 describe('loadChannelStatus', () => {
-  it('joins the watermark file and the binding for the one active channel', () => {
-    const store = new JsonFileChannelStore(fixture('basic'));
-    const status = loadChannelStatus(store);
+  it('joins the watermark and the binding the client wrote for its one channel', () => {
+    const path = freshStore();
+    const manager = new BatchChannelManager(new JsonFileChannelStore(path));
+    manager.adopt(CONNECTOR, solanaChannel('chan-basic-1'), 10_000_000n);
+    manager.reserve('chan-basic-1', 1_500_000n);
+
+    const status = loadChannelStatus(new JsonFileChannelStore(path));
     assert.equal(status.channelId, 'chan-basic-1');
     assert.equal(status.chain, 'solana');
-    assert.equal(status.depositTotal, 10000000n);
-    assert.equal(status.entry.cumulativeAmount, 1500000n);
+    assert.equal(status.depositTotal, 10_000_000n);
+    assert.equal(status.entry.cumulativeAmount, 1_500_000n);
+    assert.equal(status.entry.signedCeiling, 1_500_000n);
   });
 
-  it('ignores a superseded binding and picks the active one', () => {
-    const store = new JsonFileChannelStore(fixture('superseded'));
-    const status = loadChannelStatus(store);
-    assert.equal(status.channelId, 'chan-new');
-    assert.equal(status.depositTotal, 5000000n);
-    assert.equal(status.entry.cumulativeAmount, 200000n);
-    assert.equal(status.entry.signedCeiling, 250000n);
-    assert.equal(status.entry.watermarkUncertain, true);
-  });
+  it('reads an EVM channel as evm', () => {
+    const path = freshStore();
+    new BatchChannelManager(new JsonFileChannelStore(path)).adopt(CONNECTOR, evmChannel('0xabc'), 5_000_000n);
 
-  it('reports a binding with no recorded deposit as depositTotal undefined', () => {
-    const store = new JsonFileChannelStore(fixture('no-deposit'));
-    const status = loadChannelStatus(store);
-    assert.equal(status.channelId, 'chan-nodep');
+    const status = loadChannelStatus(new JsonFileChannelStore(path));
+    assert.equal(status.channelId, '0xabc');
     assert.equal(status.chain, 'evm');
-    assert.equal(status.depositTotal, undefined);
+    assert.equal(status.depositTotal, 5_000_000n);
+  });
+
+  it('picks the channel that replaced an exhausted one, not the archived one', () => {
+    // A Solana channel is never topped up: the payment it cannot cover opens
+    // a fresh sponsored one, and the client archives the old binding.
+    const path = freshStore();
+    const manager = new BatchChannelManager(new JsonFileChannelStore(path));
+    manager.adopt(CONNECTOR, solanaChannel('chan-old', 1n), 1_000_000n);
+    manager.reserve('chan-old', 1_000_000n);
+    manager.adopt(CONNECTOR, solanaChannel('chan-new', 2n), 5_000_000n);
+    manager.reserve('chan-new', 200_000n);
+
+    const status = loadChannelStatus(new JsonFileChannelStore(path));
+    assert.equal(status.channelId, 'chan-new');
+    assert.equal(status.depositTotal, 5_000_000n);
+    assert.equal(status.entry.cumulativeAmount, 200_000n);
+  });
+
+  it('skips a channel the client has started leaving', () => {
+    const path = freshStore();
+    const manager = new BatchChannelManager(new JsonFileChannelStore(path));
+    manager.adopt(CONNECTOR, evmChannel('0xclosing'), 5_000_000n);
+    manager.markClosing('0xclosing', 1_000n, 87_400n);
+
+    assert.equal(loadChannelStatus(new JsonFileChannelStore(path)), null);
+  });
+
+  it('ignores the toon-channel binding a 3.x client left on the volume', () => {
+    // The x402-only client never resumes one (toon-protocol/provider#52), so
+    // reporting it would describe a channel nothing pays from any more.
+    assert.equal(loadChannelStatus(new JsonFileChannelStore(fixture('toon-channel'))), null);
   });
 
   it('returns null when no channel has ever been opened', () => {

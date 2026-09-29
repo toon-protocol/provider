@@ -1,9 +1,9 @@
 // The directory publisher: the provider's payer for relay writes.
 //
 // A relay write on the TOON Network is a PAID packet (ADR 0007), and paying
-// one means holding a payment channel on Solana or EVM, signing a balance
-// proof per packet and sealing an ILP prepare to the terminating connector's
-// key. There is exactly one proven implementation of that — @toon-protocol/
+// one means holding an x402 batch-settlement channel on Solana or EVM, signing
+// a voucher per packet and sealing an ILP prepare to the terminating
+// connector's key. There is exactly one proven implementation of that — @toon-protocol/
 // client — and it is not a Rust crate. So the provider app decides WHAT to
 // publish and this process decides HOW it is paid for. The seam between them
 // is one HTTP call:
@@ -34,7 +34,7 @@ import {
   startupRefusal,
 } from './proxy.mjs';
 import { estimateSpendPerCadence, loadChannelStatus, noChannelStatusBody, statusBody } from './status.mjs';
-import { topup } from './topup.mjs';
+import { TopupUnsupportedError, topup } from './topup.mjs';
 
 const PORT = Number(process.env.PORT ?? 8081);
 const BIND = process.env.BIND_ADDR ?? '0.0.0.0';
@@ -193,10 +193,15 @@ async function client(socksProxy) {
         // proxy, the direct carriage, rewritten.
         ...clientRouteOptions(socksProxy, carriage, RPC_PROXIED),
       });
-      const opened = await c.channel.open({ deposit: DEPOSIT });
+      // Opened now rather than on the first paid write, so a publisher that
+      // cannot pay says so at its first publication. `deposit` above sizes
+      // it; on Base the deposit goes through the facilitator the connector
+      // names, which pays its gas, and on Solana the connector sponsors it.
+      const opened = await c.channel.open();
       console.log(
-        `[publisher] paying ${CONNECTOR} from ${c.identity?.solanaPublicKey ?? '(unknown)'} ` +
-          `on channel ${opened.channelId ?? '(id unreported)'}` +
+        `[publisher] paying ${CONNECTOR} from ` +
+          `${(CHAIN === 'evm' ? c.identity?.evmAddress : c.identity?.solanaPublicKey) ?? '(unknown)'} ` +
+          `on channel ${opened.channel.channelId}` +
           (socksProxy === undefined
             ? ''
             : ` through ${socksProxy}, chain RPC ${RPC_PROXIED ? 'through it too' : 'direct (a private address)'}`),
@@ -214,9 +219,9 @@ async function client(socksProxy) {
   return current.promise;
 }
 
-// A channel claim carries a strictly increasing nonce per channel, so two
-// packets in flight at once on one channel race each other. Publications are
-// therefore serialized through this tail.
+// Each voucher names the channel's running total, which must strictly
+// increase, so two packets in flight at once on one channel race each other.
+// Publications are therefore serialized through this tail.
 let queue = Promise.resolve();
 
 function serialize(work) {
@@ -278,10 +283,10 @@ async function publish({ event, relays, proxy }) {
 }
 
 // The channel store this process's client already writes
-// (`ChannelManager`/`JsonFileChannelStore`, `channels.json` +
+// (`BatchChannelManager`/`JsonFileChannelStore`, `channels.json` +
 // `channels.peers.json`). `/status` reads it directly rather than through a
-// live client — a status read must never build one, since building one can
-// open a channel (`ChannelFacade.open`/`ensure`).
+// live client — a status read must never build one, since building one opens
+// a channel (`client()` above).
 const channelStore = new JsonFileChannelStore(CHANNEL_STORE);
 
 const server = createServer((req, res) => {
@@ -339,16 +344,17 @@ const server = createServer((req, res) => {
       if (request?.amount === undefined) {
         return answer(400, { error: 'body must be { amount }' });
       }
-      // Serialized behind the same queue as `/publish`: a deposit and a claim
-      // both touch this channel's tracked state, and the client is not safe
-      // to use from two calls at once.
-      serialize(() => topup(() => client(SOCKS_PROXY), request.amount)).then(
+      // Serialized behind the same queue as `/publish`: a deposit and a
+      // voucher both touch this channel's tracked state, and the client is
+      // not safe to use from two calls at once.
+      serialize(() => topup(() => client(SOCKS_PROXY), request.amount, CHAIN)).then(
         (body) => {
           console.log(`[publisher] topped up channel ${body.channelId} to ${body.deposit}`);
           answer(200, body);
         },
         (e) => {
-          const badRequest = e instanceof RangeError || e instanceof TypeError;
+          const badRequest =
+            e instanceof RangeError || e instanceof TypeError || e instanceof TopupUnsupportedError;
           answer(badRequest ? 400 : 502, { error: e?.message ?? String(e) });
         },
       );
