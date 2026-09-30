@@ -100,24 +100,21 @@ jobs:
       # gate runs inside the sandbox.
       - run: npm ci --prefix .sandcastle
 
-      # The sandbox image is prebuilt because its Rust and Claude Code layers
-      # take minutes to build. It's built with AGENT_UID/GID=1001 to match the
-      # runner user, then retagged to the name sandcastle expects. Rebuild and push
-      # it whenever .sandcastle/Dockerfile changes:
-      #   docker build --build-arg AGENT_UID=1001 --build-arg AGENT_GID=1001 \
-      #     -t ghcr.io/toon-protocol/provider:sandcastle-agent .sandcastle/
-      #   docker push ghcr.io/toon-protocol/provider:sandcastle-agent
-      # An image built before the skills plugin was added can't run /implement, so
-      # it counts as missing.
-      - name: 'Pull prebuilt sandcastle agent image (fallback: build)'
+      # Every factory repo shares ONE sandbox image, built from connector's
+      # .sandcastle/Dockerfile with AGENT_UID/GID=1001 to match the runner user. This repo
+      # has no Dockerfile of its own for it. The image is retagged to the local name sandcastle
+      # expects here. An image without the skills plugin can't run /implement, so it counts
+      # as missing, and then we build connector's Dockerfile on the runner.
+      - name: 'Pull the shared sandcastle agent image (fallback: build)'
         run: |
-          image=ghcr.io/toon-protocol/provider:sandcastle-agent
+          image=ghcr.io/toon-protocol/sandcastle-agent:latest
           if docker pull "$image" \
             && docker run --rm --entrypoint bash "$image" -lc 'claude plugin list | grep -q mattpocock-skills'; then
             docker tag "$image" sandcastle:provider
           else
-            echo "::warning::No usable prebuilt image (missing, or without the skills plugin) — building on the runner."
-            npx --yes @ai-hero/sandcastle@0.12.0 docker build-image
+            echo "::warning::No usable shared image (missing, or without the skills plugin) — building connector's on the runner."
+            docker build --build-arg AGENT_UID=1001 --build-arg AGENT_GID=1001 \
+              -t sandcastle:provider https://github.com/toon-protocol/connector.git#main:.sandcastle
           fi
 
       # A PR opened with the App token (unlike GITHUB_TOKEN) triggers ci.yml. This
