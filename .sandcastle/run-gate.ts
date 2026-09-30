@@ -8,7 +8,7 @@
 // byte-identical to it. A gate that runs something similar to CI teaches the agent the
 // wrong lesson. If ci.yml changes, change GATE_STEPS with it.
 //
-// Unlike a repo with separate Rust and npm surfaces, this one has a single gate and no
+// There is a single gate and no
 // path filter: `cargo test` here also runs the deploy-bundle, wire-fixture and Node
 // tool tests, so a change outside src/ can still break it.
 
