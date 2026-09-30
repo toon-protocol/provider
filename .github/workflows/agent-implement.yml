@@ -1,0 +1,250 @@
+# The AFK factory: a ready-for-agent issue becomes a reviewed PR.
+#
+# The flow is the local one, run on GitHub. `to-tickets` (or `/triage`) puts
+# `ready-for-agent` on an issue. This workflow finds the issues an agent can start
+# now (.sandcastle/ready-issues.ts), and for each one the runner
+# (.sandcastle/agent-implement-issue.ts) runs /implement and then /code-review in a
+# sandbox, runs CI's gate, pushes `sandcastle/issue-N` and opens a PR. A human merges.
+#
+# The labels are only the canonical triage set (docs/agents/triage-labels.md):
+#   ready-for-agent  the queue. Removed from the issue once its PR is open.
+#   ready-for-human  put on the PR: ready for a human to merge.
+#   needs-triage     put on the issue when a run fails, with a link to the run.
+#
+# Triggers:
+#   issues: labeled   `ready-for-agent` was just applied. Consider that issue.
+#   issues: closed    a blocker may have cleared. Sweep every ready-for-agent issue.
+#   schedule          the same sweep, in case an event was missed.
+#   workflow_dispatch one issue, or a sweep when `issue` is empty.
+#
+# Label events from PRs on forks carry no secrets. Only people with triage access
+# or higher can label an issue, so there is no separate permission guard here.
+
+name: agent:implement
+
+on:
+  issues:
+    types: [labeled, closed]
+  schedule:
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: 'Issue number to implement. Leave empty to sweep every ready-for-agent issue.'
+        type: string
+        required: false
+
+# Read-only on purpose. Every write (push, PR, labels) uses the GitHub App token
+# the runner mints, so an agent can't write with the ambient job token.
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  select:
+    if: >-
+      github.event_name != 'issues' ||
+      github.event.action == 'closed' ||
+      github.event.label.name == 'ready-for-agent'
+    runs-on: ubuntu-latest
+    outputs:
+      issues: ${{ steps.ready.outputs.issues }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          cache: 'npm'
+          cache-dependency-path: .sandcastle/package-lock.json
+      # The runner's dependencies live in .sandcastle/, not the repository root, which
+      # has no package.json. Scripts still run from the root: sandcastle reads
+      # `.sandcastle/.env` and the prompt files relative to the working directory.
+      - run: npm ci --prefix .sandcastle
+      - name: Find issues an agent can start now
+        id: ready
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # A label event names its issue. A close, the schedule or an empty dispatch sweeps.
+          ONLY: ${{ github.event.action == 'labeled' && github.event.issue.number || inputs.issue }}
+        run: .sandcastle/node_modules/.bin/tsx .sandcastle/ready-issues.ts $ONLY
+
+  implement:
+    needs: select
+    if: needs.select.outputs.issues != '' && needs.select.outputs.issues != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        issue: ${{ fromJSON(needs.select.outputs.issues) }}
+    # A large ticket can run past 90 minutes. The runner step's own
+    # timeout is lower, so a wall-clock kill still leaves time for the always()
+    # steps below.
+    timeout-minutes: 180
+    concurrency:
+      group: agent-implement-issue-${{ matrix.issue }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.12.0'
+          cache: 'npm'
+          cache-dependency-path: .sandcastle/package-lock.json
+
+      # The host only needs tsx and @ai-hero/sandcastle to launch the runner. The
+      # gate runs inside the sandbox.
+      - run: npm ci --prefix .sandcastle
+
+      # The sandbox image is prebuilt because its Rust and Claude Code layers
+      # take minutes to build. It's built with AGENT_UID/GID=1001 to match the
+      # runner user, then retagged to the name sandcastle expects. Rebuild and push
+      # it whenever .sandcastle/Dockerfile changes:
+      #   docker build --build-arg AGENT_UID=1001 --build-arg AGENT_GID=1001 \
+      #     -t ghcr.io/toon-protocol/provider:sandcastle-agent .sandcastle/
+      #   docker push ghcr.io/toon-protocol/provider:sandcastle-agent
+      # An image built before the skills plugin was added can't run /implement, so
+      # it counts as missing.
+      - name: 'Pull prebuilt sandcastle agent image (fallback: build)'
+        run: |
+          image=ghcr.io/toon-protocol/provider:sandcastle-agent
+          if docker pull "$image" \
+            && docker run --rm --entrypoint bash "$image" -lc 'claude plugin list | grep -q mattpocock-skills'; then
+            docker tag "$image" sandcastle:provider
+          else
+            echo "::warning::No usable prebuilt image (missing, or without the skills plugin) — building on the runner."
+            npx --yes @ai-hero/sandcastle@0.12.0 docker build-image
+          fi
+
+      # A PR opened with the App token (unlike GITHUB_TOKEN) triggers ci.yml. This
+      # token expires after an hour, so the runner mints a fresh one before each
+      # push from APP_ID and APP_PRIVATE_KEY (toon-protocol/connector#462).
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Run the implement runner
+        timeout-minutes: 170
+        env:
+          SANDCASTLE_ISSUE_NUMBER: ${{ matrix.issue }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Host only: .sandcastle/sandbox-secrets.ts forwards just the two keys above.
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: .sandcastle/node_modules/.bin/tsx .sandcastle/agent-implement-issue.ts
+
+      # Take the issue out of the queue so it doesn't retry on every sweep, and say
+      # why. A fresh token, because the one above may have expired.
+      - name: Fresh App token for the failure hand-back
+        id: fail-token
+        if: failure()
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Move the issue to needs-triage
+        if: failure()
+        env:
+          GH_TOKEN: ${{ steps.fail-token.outputs.token }}
+          ISSUE: ${{ matrix.issue }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue edit "$ISSUE" --remove-label ready-for-agent --add-label needs-triage
+          gh issue comment "$ISSUE" --body "The AFK run for this issue failed: $RUN_URL. Any committed work is on \`sandcastle/issue-$ISSUE\`. Put \`ready-for-agent\` back on the issue to retry."
+
+      # REDACT BEFORE UPLOAD. This repository is public, and Actions masks secrets
+      # in step logs but not in uploaded artifacts. Three passes, since none is
+      # enough alone: the exact values this job holds, known token and key shapes,
+      # and BIP-39-shaped word runs or 64-hex keys next to a key-like label. A bare,
+      # unlabelled 64-hex key looks like a hash and survives, so don't treat these
+      # artifacts as safe to publish a secret through.
+      - name: Redact credentials from agent logs
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          [ -d .sandcastle ] || { echo "No .sandcastle directory — nothing to redact."; exit 0; }
+          python3 - <<'PY'
+          import os, pathlib, re
+
+          exact = sorted(
+              (v for v in (os.environ.get(k, "") for k in
+                           ("GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "APP_PRIVATE_KEY"))
+               if v and len(v.strip()) >= 8),
+              key=len, reverse=True,
+          )
+
+          patterns = [
+              (re.compile(r"gh[pousr]_[A-Za-z0-9]{16,}"), "***REDACTED***"),
+              (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "***REDACTED***"),
+              (re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}"), "***REDACTED***"),
+              (re.compile(r"nsec1[a-z0-9]{20,}"), "***REDACTED***"),
+              (re.compile(r"-----BEGIN[^-]*PRIVATE KEY-----.*?-----END[^-]*PRIVATE KEY-----",
+                          re.DOTALL), "***REDACTED***"),
+              (re.compile(
+                  r"((?:private[_\-]?key|secret[_\-]?key|signer[_\-]?key|priv[_\-]?key|keyId)"
+                  r"[\"'\s:=]{0,6})(?:0x)?[0-9a-fA-F]{64}",
+                  re.IGNORECASE,
+               ), r"\1***REDACTED***"),
+          ]
+
+          # BIP-39 phrases, longest first so a 24-word phrase isn't half-consumed
+          # by the 12-word rule.
+          for n in (24, 21, 18, 15, 12):
+              patterns.append((
+                  re.compile(r"(?<![A-Za-z0-9'\-])(?:[a-z]{3,8}[ \n]+){%d}[a-z]{3,8}(?![A-Za-z0-9'\-])"
+                             % (n - 1)),
+                  "***REDACTED***",
+              ))
+
+          roots = [pathlib.Path(".sandcastle/logs"),
+                   *pathlib.Path(".sandcastle/worktrees").glob("*/.sandcastle/logs")]
+
+          hits = 0
+          for root in roots:
+              if not root.is_dir():
+                  continue
+              for path in root.rglob("*"):
+                  if not path.is_file():
+                      continue
+                  raw = path.read_text(encoding="utf-8", errors="replace")
+                  out = raw
+                  for value in exact:
+                      for form in {value, value.strip(), value.replace("\n", "\\n")}:
+                          if form and form in out:
+                              out = out.replace(form, "***REDACTED***")
+                  for pat, repl in patterns:
+                      out = pat.sub(repl, out)
+                  if out != raw:
+                      hits += 1
+                      path.write_text(out, encoding="utf-8")
+          print(f"Redaction complete. Files modified: {hits}")
+          PY
+
+      # The agents' reasoning goes to .sandcastle/logs/, not the step output, so
+      # without this a failed run has nothing to diagnose from. The worktree glob
+      # picks up a handoff note from a run that was killed before it pushed.
+      - name: Upload agent logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandcastle-implement-logs-issue-${{ matrix.issue }}
+          path: |
+            .sandcastle/logs/
+            .sandcastle/worktrees/*/.sandcastle/logs/
+          if-no-files-found: warn
+          # upload-artifact v4.4+ skips dot-dirs in globs unless this is set.
+          include-hidden-files: true
+          retention-days: 14

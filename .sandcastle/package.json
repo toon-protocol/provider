@@ -1,0 +1,14 @@
+{
+  "name": "sandcastle-runner",
+  "private": true,
+  "type": "module",
+  "description": "The AFK factory's host-side runner. The repository root has no package.json on purpose; this is the only Node manifest the runner needs.",
+  "scripts": {
+    "ready": "tsx ready-issues.ts",
+    "implement": "tsx agent-implement-issue.ts"
+  },
+  "dependencies": {
+    "@ai-hero/sandcastle": "0.12.0",
+    "tsx": "4.20.6"
+  }
+}
