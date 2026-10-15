@@ -3,7 +3,7 @@
 The provider's payer for relay writes.
 
 A provider publishes its Provider Profile, its Listings and its Liveness to
-every relay in its Relay Set, and on the TOON Network **every relay write is a
+every relay in its Relay Set, and on TOON Compute **every relay write is a
 paid packet** — on the paid relay route, never on the free ephemeral lane
 (ADR 0007). Paying one means holding an x402 batch-settlement channel on
 Solana or EVM, signing a voucher per packet, and sealing an ILP prepare to the

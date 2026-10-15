@@ -2,7 +2,7 @@
 name = "toon-provider"
 version = "0.1.0"
 edition = "2021"
-description = "Sell leases on workloads over the TOON Network"
+description = "Sell leases on workloads through TOON Compute"
 license = "Apache-2.0"
 readme = "README.md"
 keywords = ["toon", "compute", "marketplace", "nostr", "lease"]

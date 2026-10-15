@@ -1,4 +1,4 @@
-//! `toon-provider` — sell leases on workloads over the TOON Network.
+//! `toon-provider` — sell leases on workloads through TOON Compute.
 //!
 //! A hard fork of Paygress with its payments (Cashu, Lightning, `ngx_l402`),
 //! its transport (Nostr DMs), its discovery (offer and heartbeat events) and

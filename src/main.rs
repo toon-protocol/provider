@@ -8,7 +8,7 @@ use toon_provider::topup::{confirmed, publisher_origin, validate_amount};
 use toon_provider::{load_config, persisted_leases, render_routes, ProviderService};
 
 #[derive(Parser)]
-#[command(name = "toon-provider", version, about = "Sell leases on workloads over the TOON Network", long_about = None)]
+#[command(name = "toon-provider", version, about = "Sell leases on workloads through TOON Compute", long_about = None)]
 struct Cli {
     /// Path to the provider's TOML config file. Defaults to
     /// `TOON_PROVIDER_CONFIG` when that is set, which the image sets to the

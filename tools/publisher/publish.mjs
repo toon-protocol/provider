@@ -1,6 +1,6 @@
 // The directory publisher: the provider's payer for relay writes.
 //
-// A relay write on the TOON Network is a PAID packet (ADR 0007), and paying
+// A relay write on TOON Compute is a PAID packet (ADR 0007), and paying
 // one means holding an x402 batch-settlement channel on Solana or EVM, signing
 // a voucher per packet and sealing an ILP prepare to the terminating
 // connector's key. There is exactly one proven implementation of that —

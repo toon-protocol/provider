@@ -5,7 +5,7 @@
 // arrive as ordinary HTTP through the provider's TOON connector, carrying a
 // Lease Request (`lease_request`) that is signed by nobody and authenticated
 // by a Continuation Token (`continuation`), and the directory events of the
-// TOON Network spec are named in `kinds` and built in `directory_events`.
+// TOON Compute spec are named in `kinds` and built in `directory_events`.
 //
 // So this module holds no tenant identity at all any more: every event named
 // here is signed by a PROVIDER or by a PUBLISHER.
