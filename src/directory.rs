@@ -7,7 +7,7 @@
 // relay, and the Takeovers claimed on a workload — arrives through
 // `get_profile`, `liveness_state` and `find_takeovers` (spec §7.1).
 //
-// Why a port at all: a relay write on the TOON Network is PAID (ADR 0007), so
+// Why a port at all: a relay write on TOON Compute is PAID (ADR 0007), so
 // publishing is a payment, a network round trip and a per-relay outcome, none
 // of which belongs in the lease lifecycle. Tests drive a fake and assert on
 // what was published; the real implementation is the only place that knows

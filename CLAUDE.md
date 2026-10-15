@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-`toon-provider` sells leases on workloads over the TOON Network. `README.md` is the operator's
+`toon-provider` sells leases on workloads through TOON Compute. `README.md` is the operator's
 guide, and it says where the spec, glossary and ADRs live (the `TOON_Network` repository, not
 here). `docs/agents/` covers the issue tracker, the triage labels and the domain docs.
 

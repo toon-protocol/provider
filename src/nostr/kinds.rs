@@ -1,10 +1,10 @@
-// Event kinds of the TOON Network protocol.
+// Event kinds of the TOON Compute protocol.
 //
 // These numbers are ALLOCATED (spec §3.1, ADR 0012): one contiguous block of
 // ten per NIP-01 class, all sharing the `432` suffix — regular 4432..=4441,
 // replaceable 10432..=10441, addressable 30432..=30441. The class decides how
 // a relay stores and replaces the event; the block keeps a relay filter on
-// all TOON Network kinds cheap. New kinds take the next free number in their
+// all TOON Compute kinds cheap. New kinds take the next free number in their
 // class's block; the spec's kind table is the register.
 //
 // Two numbers were allocated and then given back. `4432` was the Lease
@@ -48,7 +48,7 @@ pub const K_TEMPLATE: u16 = 30_436;
 
 /// Deployment: a TENANT-signed statement that a repo's environment is served
 /// by a lease. Addressable with `d` = the environment. Reserved in the
-/// TOON Network block (spec §3.1.2) but never published by a provider.
+/// TOON Compute block (spec §3.1.2) but never published by a provider.
 pub const K_DEPLOYMENT: u16 = 30_437;
 
 /// Eviction Notice: a provider's signed public record that it evicted a

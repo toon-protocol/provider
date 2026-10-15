@@ -58,7 +58,7 @@ liveness_cadence_s = 60
 
 # Where directory events are handed over to be PAID FOR and written to the
 # Relay Set: the directory publisher sidecar (tools/publisher/README.md). A
-# relay write on the TOON Network is a paid packet, so something has to hold a
+# relay write on TOON Compute is a paid packet, so something has to hold a
 # payment channel, and that is not the provider app. Unset means this provider
 # publishes nothing — legal, it simply does not appear in the directory.
 publish_url = "http://directory-publisher:8081/publish"

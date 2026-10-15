@@ -9,7 +9,7 @@
 // as the provider that reads what it published.
 //
 // They are still DIRECTORY events in the sense §4 means: each carries
-// `["L", "toon.network"]`, so one relay filter finds every TOON Network
+// `["L", "toon.network"]`, so one relay filter finds every TOON Compute
 // event whatever its kind. Everything a relay should search on is a tag
 // (`d`, `x`, `L`); only the numbers and the lists live in content, the same
 // rule `directory_events` follows.
@@ -394,7 +394,7 @@ pub fn template_event(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpawnImage {
     /// `{ reference, digest }`: pull `reference@digest` from an upstream OCI
-    /// registry. The only form with a source that needs no TOON Network
+    /// registry. The only form with a source that needs no TOON Compute
     /// lookup at all, and the only one Milestone 1 spoke.
     Upstream { reference: String, digest: String },
     /// `{ digest, registry_entry }`: the Image Registry entry at `address`
@@ -548,7 +548,7 @@ fn looks_like_repository(reference: &str) -> bool {
 
 // ── shared event plumbing ────────────────────────────────────────────────────
 
-/// The `["L", "toon.network"]` every TOON Network event carries.
+/// The `["L", "toon.network"]` every TOON Compute event carries.
 fn label_tag() -> Result<Tag> {
     Ok(Tag::parse(["L", TOON_LABEL])?)
 }

@@ -1,6 +1,6 @@
 # toon-provider
 
-Sell leases on workloads over the [TOON Network](https://github.com/toon-protocol/TOON_Network).
+Sell leases on workloads through [TOON Compute](https://github.com/toon-protocol/TOON_Network).
 
 A **provider** runs this on hardware it controls. It publishes what it sells to
 its relays, and a **tenant** pays a listing's route over a TOON payment channel
@@ -1312,7 +1312,7 @@ the config. A retired version is served but never advertised — two events
 under one `d` would not be two Listings on a relay, only a race to be the one
 that survives (see [Changing a listing's price](#changing-a-listings-price)).
 
-**Publishing costs money.** A relay write on the TOON Network is a paid packet
+**Publishing costs money.** A relay write on TOON Compute is a paid packet
 on the paid relay route, never the free ephemeral lane (ADR 0007). The
 provider app states *what* to publish; `publish_url` names the process that
 decides *how* it is paid for — the directory publisher in
