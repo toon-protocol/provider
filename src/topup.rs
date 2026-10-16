@@ -76,7 +76,9 @@ pub async fn send(
 ) -> Result<(reqwest::StatusCode, serde_json::Value)> {
     let origin = publisher_origin(publish_url)?;
     let url = format!("{}/topup", origin.trim_end_matches('/'));
-    let response = reqwest::Client::new()
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .build()?
         .post(&url)
         .json(&serde_json::json!({ "amount": amount }))
         .send()

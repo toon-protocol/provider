@@ -1179,6 +1179,46 @@ Enter. Its rendering is snapshot-tested from `status --json --check`
 fixtures under `tests/fixtures/status/`, which `tests/status_cli.rs`
 generates from the real `gather` and `to_json`.
 
+### From a laptop: `--ssh`
+
+```bash
+toon-provider status --ssh root@<box>          # or --json, --check
+toon-provider dash   --ssh root@<box>          # the same six panes
+```
+
+Both run on your laptop and use your own `ssh` and its config (host aliases,
+`IdentityFile`, `ProxyJump`, your agent); there is no provider.toml on the
+laptop and **nothing new is exposed on the box**. The provider's operator port
+is loopback inside its container and the publisher's status port is only on
+the compose network, so a plain `ssh -L` has nothing to point at. Instead
+each local connection is relayed by an `ssh` of its own that runs
+`docker compose exec -T provider bash` in the box's deploy directory
+(`--ssh-dir`, default `provider/deploy`, relative to the login directory) and
+opens the connection from inside the container: to the operator port, the
+publisher and the connector's operator API. The box needs only what
+`bootstrap.sh` installs. One master connection is opened first (Unix), so a
+passphrase is asked once, before `dash` takes the terminal.
+
+**Earnings go over the tunnel**, not the public edge: the connector's
+operator API on the compose network, with the bearer token read over SSH from
+the file the provider container already mounts. The token stays in memory and
+is sent only to the tunnel; nothing is written to the laptop. The Solana
+balances are read from the laptop, from the RPC the box's
+`SETTLEMENT_SOLANA_RPC_URL` names (or `--settlement-rpc-url`); a Hidden
+Provider's are not, and say to read them on the box. The tunnels listen on
+loopback ports of the laptop, like `ssh -L`: other users of that laptop can
+reach them. In `dash`, `r` and `t` work as on the box.
+
+Errors say which step failed: `no ssh` (the OpenSSH client is not on `PATH`),
+`host unreachable` (ssh could not connect, with ssh's own words) and
+`provider not running` (`docker compose exec provider` failed there).
+
+**Installing it on the laptop** (Rust 1.85+; there are no release binaries):
+
+```bash
+cargo install --locked --git https://github.com/toon-protocol/provider toon-provider
+```
+
 ## Availability and image policy
 
 `POST /availability` (free, unsigned) answers whether a spawn would run,

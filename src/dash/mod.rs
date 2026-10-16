@@ -66,6 +66,23 @@ pub struct DashArgs {
     /// estimate (as `toon-provider redeem --evm-rpc-url`).
     #[arg(long, env = "TOON_SETTLEMENT_EVM_RPC_URL", value_name = "URL")]
     pub evm_rpc_url: Option<String>,
+
+    #[command(flatten)]
+    pub remote: crate::remote::RemoteArgs,
+}
+
+/// Where each effect goes: the box's own services, or (with `--ssh`) their
+/// tunnelled stand-ins.
+struct Wiring {
+    sources: Sources,
+    /// The connector's operator API, for the redeem effect.
+    redeem_base: Result<String, String>,
+    /// The publisher's `/publish`, for the top-up effect.
+    publish_url: Option<String>,
+    evm_rpc_url: Option<String>,
+    /// The provider's config, which a hidden provider's gas estimate needs;
+    /// none over `--ssh`.
+    config: Option<ProviderConfig>,
 }
 
 /// What the loop hears: a key, or an effect's outcome.
@@ -97,13 +114,63 @@ impl Drop for Screen {
 }
 
 pub async fn run(config: &ProviderConfig, args: &DashArgs) -> Result<()> {
+    drive(
+        Wiring {
+            sources: Sources::from_config(config, &args.report),
+            redeem_base: connector_operator_url(
+                config,
+                args.report.connector_operator_url.as_deref(),
+            ),
+            publish_url: config.publish_url.clone(),
+            evm_rpc_url: args.evm_rpc_url.clone(),
+            config: Some(config.clone()),
+        },
+        args,
+    )
+    .await
+}
+
+/// `dash --ssh <host>`: the same panes, read (and acted on) through the
+/// operator's own `ssh` (see `remote`). Needs no provider.toml here.
+pub async fn run_over_ssh(args: &DashArgs) -> Result<()> {
+    // Before the terminal is taken: a passphrase prompt needs it.
+    ensure_terminal()?;
+    let link = crate::remote::connect(&args.remote, &args.report).await?;
+    let wiring = Wiring {
+        sources: link.sources.clone(),
+        redeem_base: link.redeem_base.clone(),
+        publish_url: link.publish_url.clone(),
+        evm_rpc_url: args
+            .evm_rpc_url
+            .clone()
+            .or_else(|| link.evm_rpc_url.clone()),
+        config: None,
+    };
+    // `link` is held to the end: it owns the tunnels.
+    let result = drive(wiring, args).await;
+    drop(link);
+    result
+}
+
+fn ensure_terminal() -> Result<()> {
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
         bail!(
             "dash needs a terminal: run it as `docker compose exec provider toon-provider dash` \
              (exec allocates one), or use `toon-provider status` for text or JSON"
         );
     }
-    let sources = Sources::from_config(config, &args.report);
+    Ok(())
+}
+
+async fn drive(wiring: Wiring, args: &DashArgs) -> Result<()> {
+    ensure_terminal()?;
+    let Wiring {
+        sources,
+        redeem_base,
+        publish_url,
+        evm_rpc_url,
+        config,
+    } = wiring;
     let mut app = App::new(args.report.thresholds());
     let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
 
@@ -168,17 +235,15 @@ pub async fn run(config: &ProviderConfig, args: &DashArgs) -> Result<()> {
                 refresh(&sources, &tx);
             }
             Some(Effect::EstimateGas { round, channels }) => {
-                let (config, evm_rpc_url, tx) =
-                    (config.clone(), args.evm_rpc_url.clone(), tx.clone());
+                let (config, evm_rpc_url, tx) = (config.clone(), evm_rpc_url.clone(), tx.clone());
                 tokio::spawn(async move {
                     let estimates =
-                        estimates(Some(&config), evm_rpc_url.as_deref(), &channels).await;
+                        estimates(config.as_ref(), evm_rpc_url.as_deref(), &channels).await;
                     let _ = tx.send(Message::Update(Update::Estimates { round, estimates }));
                 });
             }
             Some(Effect::Redeem { channels, key }) => {
-                let base =
-                    connector_operator_url(config, args.report.connector_operator_url.as_deref());
+                let base = redeem_base.clone();
                 let tx = tx.clone();
                 tokio::spawn(async move {
                     let say = |line: String| {
@@ -215,7 +280,7 @@ pub async fn run(config: &ProviderConfig, args: &DashArgs) -> Result<()> {
                 });
             }
             Some(Effect::Topup { amount }) => {
-                let (publish_url, tx) = (config.publish_url.clone(), tx.clone());
+                let (publish_url, tx) = (publish_url.clone(), tx.clone());
                 tokio::spawn(async move {
                     let answer = match publish_url {
                         None => Err("no publish_url is configured".to_string()),

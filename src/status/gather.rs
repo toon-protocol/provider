@@ -30,6 +30,10 @@ pub struct Sources {
     pub connector_operator_url: Result<String, String>,
     /// Where the bearer token for it is read from.
     pub bearer_token_file: Option<PathBuf>,
+    /// The token itself, when it was read somewhere this process cannot
+    /// open a file from (`--ssh` reads it over the SSH connection). Wins
+    /// over `bearer_token_file`.
+    pub bearer_token: Option<Secret>,
     /// `<connector edge>/dashboard`, told to the operator in the earnings
     /// section (ADR 0029: `status` is where they learn it exists).
     pub dashboard_url: Option<String>,
@@ -54,6 +58,24 @@ pub struct Sources {
     /// The publisher's `TOON_DEPOSIT`: what the next channel takes.
     pub publisher_deposit: Option<u128>,
     pub timeout: Duration,
+}
+
+/// A bearer token held in memory: `Debug` never prints it.
+#[derive(Clone)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Secret(..)")
+    }
+}
+
+/// Where `read_earnings_from` finds the connector's operator bearer token.
+#[derive(Clone, Copy)]
+pub(crate) enum Bearer<'a> {
+    Missing,
+    File(&'a std::path::Path),
+    Value(&'a str),
 }
 
 impl Sources {
@@ -180,6 +202,7 @@ impl Sources {
             publisher_status_url,
             connector_operator_url,
             bearer_token_file: args.bearer_token_file.clone(),
+            bearer_token: None,
             dashboard_url,
             settlement_address,
             settlement_rpc_url,
@@ -677,7 +700,11 @@ async fn read_earnings(client: &reqwest::Client, sources: &Sources) -> EarningsS
     read_earnings_from(
         client,
         &sources.connector_operator_url,
-        sources.bearer_token_file.as_deref(),
+        match (&sources.bearer_token, sources.bearer_token_file.as_deref()) {
+            (Some(token), _) => Bearer::Value(&token.0),
+            (None, Some(path)) => Bearer::File(path),
+            (None, None) => Bearer::Missing,
+        },
         sources.dashboard_url.clone(),
     )
     .await
@@ -690,7 +717,7 @@ async fn read_earnings(client: &reqwest::Client, sources: &Sources) -> EarningsS
 pub(crate) async fn read_earnings_from(
     client: &reqwest::Client,
     connector_operator_url: &Result<String, String>,
-    bearer_token_file: Option<&std::path::Path>,
+    bearer: Bearer<'_>,
     dashboard_url: Option<String>,
 ) -> EarningsSection {
     let mut section = EarningsSection {
@@ -705,8 +732,13 @@ pub(crate) async fn read_earnings_from(
         }
     };
     section.url = Some(base.clone());
-    let token = match bearer_token_file {
-        None => {
+    let token = match bearer {
+        Bearer::Value(token) if !token.trim().is_empty() => token.trim().to_string(),
+        Bearer::Value(_) => {
+            section.error = Some("the bearer token read over ssh is empty".to_string());
+            return section;
+        }
+        Bearer::Missing => {
             section.error = Some(
                 "no bearer token: set TOON_CONNECTOR_BEARER_TOKEN_FILE to the rendered \
                  operator-bearer.token"
@@ -714,7 +746,7 @@ pub(crate) async fn read_earnings_from(
             );
             return section;
         }
-        Some(path) => match std::fs::read_to_string(path) {
+        Bearer::File(path) => match std::fs::read_to_string(path) {
             Ok(token) if !token.trim().is_empty() => token.trim().to_string(),
             Ok(_) => {
                 section.error = Some(format!("{} is empty", path.display()));

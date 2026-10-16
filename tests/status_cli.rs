@@ -1673,3 +1673,190 @@ fn a_document_that_is_not_a_status_is_refused() {
     assert!(from_json(&json!([1, 2])).is_err());
     assert!(from_json(&json!({ "version": 1 })).is_err());
 }
+
+// ── `--ssh` ───────────────────────────────────────────────────────────────────
+//
+// The operator's own `ssh`, replaced by a script that runs the remote command
+// locally, and a `docker` that runs `compose exec -T provider <cmd>` locally
+// with the provider container's environment (the file named by
+// FAKE_PROVIDER_ENV) — so the real relay command, the real probe and the real
+// tunnels run, and the laptop side has none of the box's environment.
+
+const FAKE_SSH: &str = r#"#!/bin/sh
+master=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|-S) shift 2 ;;
+    -O) exit 0 ;;
+    -fN) master=1; shift ;;
+    -M|-N|-f) shift ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+host="$1"; shift
+case "$host" in
+  unreachable.example)
+    echo "ssh: Could not resolve hostname unreachable.example: Name or service not known" >&2
+    exit 255 ;;
+esac
+[ "$master" = 1 ] && exit 0
+exec sh -c "$*"
+"#;
+
+const FAKE_DOCKER: &str = r#"#!/bin/sh
+if [ -n "$FAKE_PROVIDER_DOWN" ]; then
+  echo 'service "provider" is not running' >&2
+  exit 1
+fi
+shift 4
+. "$FAKE_PROVIDER_ENV"
+exec "$@"
+"#;
+
+struct FakeBox {
+    dir: tempfile::TempDir,
+}
+
+impl FakeBox {
+    fn new(world: &World) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        for (name, body) in [("ssh", FAKE_SSH), ("docker", FAKE_DOCKER)] {
+            let path = bin.join(name);
+            std::fs::write(&path, body).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let config = write_config(world, &dir);
+        std::fs::write(
+            dir.path().join("settlement.address"),
+            format!("{ADDRESS}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("publisher.address"),
+            format!("{PUBLISHER}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("env.sh"),
+            format!(
+                "export TOON_PROVIDER_CONFIG={}\n\
+                 export TOON_CONNECTOR_OPERATOR_URL={}\n\
+                 export TOON_CONNECTOR_BEARER_TOKEN_FILE={}\n\
+                 export TOON_SETTLEMENT_SOLANA_ADDRESS_FILE={}\n\
+                 export TOON_PUBLISHER_SOLANA_ADDRESS_FILE={}\n\
+                 export TOON_SETTLEMENT_SOLANA_RPC_URL={}\n\
+                 export TOON_PUBLISHER_DEPOSIT={NEXT_DEPOSIT}\n",
+                config.display(),
+                world.connector.uri(),
+                world.token_file.path().display(),
+                dir.path().join("settlement.address").display(),
+                dir.path().join("publisher.address").display(),
+                world.rpc.uri(),
+            ),
+        )
+        .unwrap();
+        FakeBox { dir }
+    }
+
+    /// `toon-provider status <extra> --ssh <host>` on a laptop whose only
+    /// `ssh` and `docker` are the fakes.
+    fn status(&self, host: &str, extra: &[&str]) -> std::process::Output {
+        Command::new(env!("CARGO_BIN_EXE_toon-provider"))
+            .env_clear()
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", self.dir.path().join("bin").display()),
+            )
+            .env("FAKE_PROVIDER_ENV", self.dir.path().join("env.sh"))
+            .arg("status")
+            .args(extra)
+            .args(["--ssh", host, "--ssh-dir", "/"])
+            .output()
+            .expect("run toon-provider status --ssh")
+    }
+}
+
+#[tokio::test]
+async fn status_over_ssh_reads_every_source_through_the_tunnels() {
+    let world = World::healthy().await;
+    let fake = FakeBox::new(&world);
+
+    let out = fake.status("root@box.example", &["--json"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["provider_name"], healthy_doc()["provider_name"]);
+    // The publisher and the connector were reached too, not just the provider.
+    assert_eq!(doc["publisher"]["error"], Value::Null, "{doc}");
+    assert_eq!(doc["earnings"]["error"], Value::Null, "{doc}");
+    assert_eq!(doc["earnings"]["channels"][0]["channel_id"], EVM_CHANNEL);
+    // The balances are read from the RPC the box names.
+    assert_eq!(doc["funding"]["error"], Value::Null, "{doc}");
+    assert_eq!(doc["funding"]["lamports"], 1_500_000_000u64);
+    // The publisher's wallet, with the mint read from the box's config.
+    assert_eq!(doc["funding"]["publisher"]["units"], "25000000", "{doc}");
+}
+
+#[tokio::test]
+async fn check_over_ssh_gives_the_same_exit_code() {
+    let world = World::healthy().await;
+    let fake = FakeBox::new(&world);
+    let out = fake.status("root@box.example", &["--check"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("toon-provider status --check: OK"),
+        "{stdout}"
+    );
+}
+
+#[tokio::test]
+async fn ssh_that_is_not_installed_says_so() {
+    let world = World::healthy().await;
+    let empty = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_toon-provider"))
+        .env_clear()
+        .env("PATH", empty.path())
+        .args(["status", "--ssh", "root@box.example"])
+        .output()
+        .unwrap();
+    let _ = world;
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no ssh"), "{stderr}");
+}
+
+#[tokio::test]
+async fn ssh_to_an_unreachable_host_says_so() {
+    let world = World::healthy().await;
+    let fake = FakeBox::new(&world);
+    let out = fake.status("unreachable.example", &[]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("host unreachable"), "{stderr}");
+    assert!(stderr.contains("Could not resolve hostname"), "{stderr}");
+}
+
+#[tokio::test]
+async fn ssh_to_a_box_without_a_running_provider_says_so() {
+    let world = World::healthy().await;
+    let fake = FakeBox::new(&world);
+    let out = Command::new(env!("CARGO_BIN_EXE_toon-provider"))
+        .env_clear()
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", fake.dir.path().join("bin").display()),
+        )
+        .env("FAKE_PROVIDER_DOWN", "1")
+        .args(["status", "--ssh", "root@box.example", "--ssh-dir", "/"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("provider not running"), "{stderr}");
+    assert!(stderr.contains("is not running"), "{stderr}");
+}

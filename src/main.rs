@@ -91,6 +91,9 @@ enum Command {
     /// that does not answer is shown as such; the rest still print. With
     /// `--check`, exits 1 naming each problem that needs a person — what
     /// `toon-provider-check.timer` runs every five minutes.
+    ///
+    /// `--ssh <user@host>` reads all of it from a laptop through your own
+    /// `ssh` (and its config), with nothing new exposed on the box.
     Status(toon_provider::status::StatusArgs),
 
     /// Land earnings NOW: put the connector's latest voucher on chain,
@@ -119,7 +122,7 @@ enum Command {
     /// operator key typed into a field that never shows it, held in memory
     /// only), `t` tops up the publisher, `u` refreshes, `q` quits. Both money
     /// actions ask for `y` then Enter. Needs a terminal: `docker compose exec
-    /// provider toon-provider dash`.
+    /// provider toon-provider dash`, or `--ssh <user@host>` from a laptop.
     Dash(toon_provider::dash::DashArgs),
 
     /// Run the Hidden Provider's DNS shim (TOON_Network#166): forward A (and
@@ -174,6 +177,19 @@ async fn main() -> Result<()> {
     if let Some(Command::Redeem(args)) = &cli.command {
         let code = toon_provider::redeem::run(&cli.config, args).await?;
         std::process::exit(code)
+    }
+    // Also before it: `--ssh` reads the box's report from a laptop, which has
+    // no provider.toml.
+    if let Some(Command::Status(args)) = &cli.command {
+        if args.remote.ssh.is_some() {
+            let code = toon_provider::status::run_over_ssh(args).await?;
+            std::process::exit(code)
+        }
+    }
+    if let Some(Command::Dash(args)) = &cli.command {
+        if args.remote.ssh.is_some() {
+            return toon_provider::dash::run_over_ssh(args).await;
+        }
     }
     // Also before the config is loaded: the DNS shim is not this provider's
     // config at all, it is a compose service of its own on the egress
