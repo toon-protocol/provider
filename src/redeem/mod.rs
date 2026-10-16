@@ -393,6 +393,22 @@ pub fn render_outcome(channel: &ChannelEarnings, outcome: &Outcome, keyid: &str)
              the OPERATOR_WRITE_KEY in operator-write.keys, and this machine's clock right?",
             channel.channel_id
         ),
+        // The x402-only connector (`2026.09.28.1` on) has no `redeem-latest`:
+        // it lands vouchers itself and offers `POST /channels/:id/land`
+        // instead. What `redeem` should become is open (provider#66), so
+        // it is not re-pointed here; it only says why nothing was collected.
+        Outcome::Refused { status: 404, body } => format!(
+            "  REFUSED   {}: 404{}. This connector has no POST /channels/:id/redeem-latest: \
+             the x402-only connector lands what it holds on its own, every ten minutes, and \
+             `redeem` has not been moved to its replacement, POST /channels/:id/land, while \
+             provider#66 decides what it should do. Nothing was collected.",
+            channel.channel_id,
+            if body.is_empty() {
+                String::new()
+            } else {
+                format!(", {body}")
+            }
+        ),
         Outcome::Refused { status, body } => {
             format!("  REFUSED   {}: {status}, {body}", channel.channel_id)
         }

@@ -376,20 +376,28 @@ impl EarningsSection {
 pub struct ChannelEarnings {
     pub channel_id: String,
     pub counterparty: Option<String>,
-    /// `open`, `closed` or `settled`; `None` for a channel the connector
-    /// holds claims on but did not list.
+    /// The connector's own word for where the channel stands: on an x402
+    /// channel `opening`, `open`, `withdrawing`, `closing`, `sealed` or
+    /// `unreadable`; on an older connector's TOON channel `open`, `closed`
+    /// or `settled`. `None` for a channel the connector holds claims on but
+    /// did not list.
     pub status: Option<String>,
-    /// What the payer deposited: the most that can ever be redeemed.
+    /// The most the channel can ever pay this provider: on an x402 channel
+    /// `landed + collateral`, read from the chain now (it falls when the
+    /// payer starts a withdrawal); on a TOON channel the payer's deposit.
     pub deposited: Option<u128>,
     /// The latest inbound claim's cumulative amount: everything the payer
     /// has signed over.
     pub claimed: u128,
-    /// What has been redeemed on chain.
+    /// What is on chain in this provider's favour: an x402 channel's
+    /// `landed`, a TOON channel's `redeemed`.
     pub redeemed: u128,
-    /// `claimed - redeemed`: what a redeem would collect now.
+    /// `claimed - redeemed`: held by the connector, not yet on chain.
     pub unredeemed: u128,
-    /// The latest redeem write the connector's audit log holds for the
+    /// The latest operator landing write (`land`, or an older connector's
+    /// `redeem`/`redeem-latest`) the connector's audit log holds for the
     /// channel — since the connector started, since the log is in memory.
+    /// The x402 connector's own periodic landings are not in it.
     pub last_redeemed_at: Option<u64>,
 }
 
@@ -572,7 +580,13 @@ async fn read_publisher(client: &reqwest::Client, sources: &Sources) -> Publishe
     }
 }
 
-/// The connector's `ChannelView`, as much of it as is read.
+/// One `GET /channels` row, as much of it as is read.
+///
+/// The x402-only connector (`2026.09.28.1` on, connector ADR 0075,
+/// provider#66) answers its `BatchChannelView`: `direction`,
+/// `collateral`, `landed` and `watermark`. An older one answered the
+/// TOON-channel `ChannelView`: `deposited` and `redeemed`. Both are read, so
+/// `status` still reads a box whose connector has not moved yet.
 #[derive(Deserialize)]
 struct ChannelView {
     id: String,
@@ -580,10 +594,51 @@ struct ChannelView {
     counterparty: Option<String>,
     #[serde(default)]
     status: Option<String>,
+    /// x402: `inbound` (a tenant pays this node) or `outbound` (this node
+    /// pays). Absent on a TOON channel, which was always the payer's.
+    #[serde(default)]
+    direction: Option<String>,
+    /// x402: what still backs a voucher above `landed`; absent while the
+    /// chain could not be read.
+    #[serde(default)]
+    collateral: Option<u128>,
+    /// x402: what the chain records in this node's favour.
+    #[serde(default)]
+    landed: Option<u128>,
+    /// x402: the highest voucher accepted on an inbound channel.
+    #[serde(default)]
+    watermark: Option<u128>,
+    /// TOON channel: the payer's deposit.
     #[serde(default)]
     deposited: Option<u128>,
+    /// TOON channel: what had been redeemed on chain.
     #[serde(default)]
-    redeemed: u128,
+    redeemed: Option<u128>,
+}
+
+impl ChannelView {
+    /// Whether the row is money owed to this provider: an inbound x402
+    /// channel, or any TOON-channel row (which had no direction).
+    fn is_inbound(&self) -> bool {
+        self.direction.as_deref().is_none_or(|d| d == "inbound")
+    }
+
+    /// What has reached the chain in this node's favour: x402's `landed`,
+    /// or a TOON channel's `redeemed`. Zero when the chain could not be
+    /// read, so nothing is shown as collected that is not known to be.
+    fn on_chain(&self) -> u128 {
+        self.landed.or(self.redeemed).unwrap_or(0)
+    }
+
+    /// The most the channel can ever pay this node: x402's voucher ceiling
+    /// `landed + collateral`, or a TOON channel's deposit.
+    fn ceiling(&self) -> Option<u128> {
+        match (self.landed, self.collateral) {
+            (Some(landed), Some(collateral)) => Some(landed.saturating_add(collateral)),
+            _ if self.direction.is_some() => None,
+            _ => self.deposited,
+        }
+    }
 }
 
 /// The connector's `ClaimView`, as much of it as is read.
@@ -710,8 +765,10 @@ pub(crate) async fn read_earnings_from(
         }
     };
 
-    // The latest redeem write per channel: `POST /channels/:id/redeem` or
-    // `/redeem-latest`.
+    // The latest operator landing per channel: `POST /channels/:id/land` on
+    // the x402-only connector, `/redeem` or `/redeem-latest` on an older one.
+    // The x402 connector's own watchers and sweeps also land, every ten
+    // minutes, and are not operator writes: they are not in the audit log.
     let mut last_redeemed: BTreeMap<String, u64> = BTreeMap::new();
     for record in &audit {
         if !record.method.eq_ignore_ascii_case("POST") {
@@ -723,7 +780,7 @@ pub(crate) async fn read_earnings_from(
         let Some((id, action)) = rest.split_once('/') else {
             continue;
         };
-        if action == "redeem" || action == "redeem-latest" {
+        if matches!(action, "land" | "redeem" | "redeem-latest") {
             let at = last_redeemed.entry(channel_key(id)).or_insert(0);
             *at = (*at).max(record.created);
         }
@@ -738,19 +795,28 @@ pub(crate) async fn read_earnings_from(
     }
 
     let mut rows: BTreeMap<String, ChannelEarnings> = BTreeMap::new();
-    for channel in channels {
+    // This node's own outbound x402 channels are money it pays, not money
+    // it earned: they are not earnings.
+    for channel in channels.into_iter().filter(ChannelView::is_inbound) {
         let key = channel_key(&channel.id);
-        let claimed_here = claimed.remove(&key).unwrap_or(0);
+        // A claim row and the channel's own watermark say the same thing on
+        // an x402 channel; the larger is everything signed over.
+        let claimed_here = claimed
+            .remove(&key)
+            .unwrap_or(0)
+            .max(channel.watermark.unwrap_or(0));
+        let on_chain = channel.on_chain();
+        let ceiling = channel.ceiling();
         rows.insert(
             key.clone(),
             ChannelEarnings {
                 channel_id: channel.id,
                 counterparty: channel.counterparty,
                 status: channel.status,
-                deposited: channel.deposited,
+                deposited: ceiling,
                 claimed: claimed_here,
-                redeemed: channel.redeemed,
-                unredeemed: claimed_here.saturating_sub(channel.redeemed),
+                redeemed: on_chain,
+                unredeemed: claimed_here.saturating_sub(on_chain),
                 last_redeemed_at: last_redeemed.get(&key).copied(),
             },
         );
