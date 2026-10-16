@@ -13,7 +13,9 @@
 //!   the same gas estimates, then the operator key typed into a field that
 //!   shows only how much has been typed. The key is held in memory while the
 //!   redeems are signed and sent, then wiped; it is never written anywhere.
-//!   Each redeem is `redeem::redeem_one`, exactly as the command sends it.
+//!   Each redeem is `redeem::redeem_one`, exactly as the command sends it:
+//!   a signed `POST /channels/:id/land`, landing now what the connector
+//!   would otherwise land on its own within ten minutes.
 //! - **top up** (`t`): an amount, then the publisher's `POST /topup`, as
 //!   `toon-provider topup` sends it. Not on a Solana channel, which the
 //!   next write it cannot cover replaces from the publisher's wallet: `t`
@@ -203,7 +205,7 @@ pub async fn run(config: &ProviderConfig, args: &DashArgs) -> Result<()> {
                                 }
                                 say(render_outcome(channel, &outcome, &keyid));
                             }
-                            say(format!("{redeemed} of {} redeemed.", channels.len()));
+                            say(format!("{redeemed} of {} landed.", channels.len()));
                         }
                     }
                     // Wiped here (SigningKey zeroises on drop), before the

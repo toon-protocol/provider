@@ -510,7 +510,7 @@ async fn earnings_join_claims_to_channels_and_name_the_dashboard() {
     );
     assert!(text.contains("total unredeemed 3000"), "{text}");
     assert!(
-        text.contains("To collect it: `toon-provider redeem`"),
+        text.contains("To land it now: `toon-provider redeem`"),
         "the earnings section points at redeem:\n{text}"
     );
 }

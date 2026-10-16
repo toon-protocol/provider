@@ -418,10 +418,10 @@ own:
 - **`r` redeem**: the channels `toon-provider redeem` offers, with its gas
   estimates. Pick with Space (`a` for all), confirm, then type the operator
   key into a field that shows only how many characters are in it. The key is
-  held in memory while the redeems are signed and sent, then wiped, and is
-  never written anywhere. Each redeem is the same signed
-  `POST /channels/:id/redeem-latest` as the command's — which the x402-only
-  connector no longer has (§ "Redeeming earnings").
+  held in memory while the landings are signed and sent, then wiped, and is
+  never written anywhere. Each is the same signed `POST /channels/:id/land`
+  as the command's: it lands now what the connector would otherwise land on
+  its own within ten minutes (§ "Redeeming earnings").
 - **`t` top up**: an amount in base units, then the publisher's `/topup`, as
   `toon-provider topup` sends it. Only on an EVM channel: on a Solana one,
   `t` says to fund the wallet instead (§ "Funding the publisher").
@@ -567,53 +567,53 @@ runway figure assumes.
 
 ## Redeeming earnings
 
-> **On the x402-only connector this bundle pins (provider#66), `redeem`
-> does not collect anything.** The connector's `POST /channels/:id/redeem-latest`
-> is deleted. Its replacement, `POST /channels/:id/land`, lands the latest
-> voucher held on an inbound channel now, and the connector **also lands on its
-> own**: every ten minutes it lands every held voucher above what the chain
-> records (on EVM one batched `claim` then `settle`, on Solana a `settle` per
-> busy channel), and at once on a channel whose payer starts to withdraw or
-> close. That automatic landing is not something this bundle can switch off.
-> Whether it fits ADR 0029's "nothing is automatic", and whether `redeem` (and
-> `dash`'s `r`) should become a "land now" lever, is an open question on
-> provider#66. Until it is answered, `redeem` is unchanged: it lists the
-> same channels and signs the same `redeem-latest`, which this connector answers
-> `404`, and it says so. What the section below describes is how it behaves
-> against a connector before `2026.09.28.1`.
+A tenant's payments reach this box as vouchers on the tenant's own x402
+channel, held by the connector. They are money only once a voucher is
+**landed** on chain ("redeemed", in `status`'s words), and **the connector
+lands them on its own** (connector ADR 0074/0075, provider#66):
 
-A tenant's payments reach this box as signed claims on a payment channel, held
-by the connector. They are money only once a claim is **redeemed** on chain,
-and nothing here redeems on its own (ADR 0029: money is shown everywhere and
-moved only by a person). `toon-provider status` shows what is unredeemed;
-`toon-provider redeem` collects it.
+- every **600 seconds**, every voucher it holds above what the chain records
+  (on EVM one batched `claim`, then `settle` to this node's address; on
+  Solana a `settle` per busy channel);
+- **at once** when a payer starts to withdraw (EVM) or close (Solana) a
+  channel, so a payer's exit can never take back what it already paid.
+
+That landing protects money already owed; it spends nothing of the
+operator's beyond the gas (ADR 0029, as amended: the connector's own landing
+is protection, not spending; a top-up of the publisher still waits for a
+person). `toon-provider redeem` is the **"land now" lever**: it lands the
+channels you pick right away, through the connector's
+`POST /channels/:id/land` — before maintenance, say, or to see a figure on
+chain without waiting for the next sweep. `toon-provider status` shows what
+is held and not yet landed.
 
 ```bash
 cd /root/provider/deploy
-docker compose exec provider toon-provider redeem --list           # what is owed, and the gas to collect it
+docker compose exec provider toon-provider redeem --list           # what is held, and the gas to land it now
 docker compose exec provider toon-provider redeem                  # pick rows, type yes, then paste the key
-docker compose exec provider toon-provider redeem --all-above 1000 # every channel over 1000 base units
+docker compose exec provider toon-provider redeem --all-above 1000 # land now every channel over 1000 base units
 docker compose exec provider toon-provider redeem --channel <id>   # repeatable
 ```
 
 It lists each inbound channel with its unredeemed amount (token base units:
 1000 is 0.001 USDC at 6dp) and an **estimated gas cost** for its chain, then
-redeems the channels you pick at the prompt, or those `--channel` names, or
+lands the channels you pick at the prompt, or those `--channel` names, or
 every one over `--all-above` (strictly more than the amount). It asks for a
-typed `yes` unless `--yes`. Each redeem is one on-chain transaction, and the
+typed `yes` unless `--yes`. Each landing is one on-chain transaction, and the
 connector's settlement key pays its gas in that chain's own coin, not out of
 the channel. That is why `keys.sh addresses` says the EVM key needs ETH
-"before your first redeem". The estimate is:
+before a tenant pays on Base. The estimate is:
 
-- **EVM:** 160,000 gas (the most `claimFromChannel` has taken in the
-  connector's own gas report, plus the transaction's base cost) times the
+- **EVM:** 160,000 gas, a ceiling for the one-row `x402BatchSettlement.claim`
+  that `land` sends (no gas report for it is published yet; the figure is
+  the old `claimFromChannel` bound, kept until one is measured) times the
   chain's current `eth_gasPrice`, read from `SETTLEMENT_EVM_RPC_URL`. On Base
   the L1 data fee is extra. With no RPC it says `unknown`.
-- **Solana:** 10,000 lamports, the base fee for the redeem transaction's two
+- **Solana:** 10,000 lamports, the base fee for the landing transaction's two
   signatures (the fee payer's and the Ed25519 precompile's). The connector
   sets no priority fee.
 
-It is an estimate. A redeem never waits on one.
+It is an estimate. A landing never waits on one.
 
 **The operator key is read from stdin, and only from stdin.** It is the
 private half `./keys.sh init` printed once (64 hex characters), whose public
@@ -623,13 +623,16 @@ never written anywhere. A key given on the command line (`--operator-key`, or
 as an argument) is refused before anything is dialled, because `ps` and your
 shell's history have already seen it. Replace a key you have typed there.
 
-Each redeem signs the connector's `POST /channels/:id/redeem-latest` exactly as
+Each landing signs the connector's `POST /channels/:id/land` exactly as
 `connector send` signs a write: RFC 9421 over `@method`, `@path` and an RFC
 9530 `Content-Digest`, keyid the public key, valid for 60 seconds. The
-connector submits the latest claim it holds and answers the channel as it now
-stands. `redeem` prints what was collected and what the chain now shows as
-redeemed. The connector returns no transaction id, so look for the
-transaction under the settlement key's address on the chain's explorer.
+connector lands the latest voucher it holds on that channel and answers the
+channel as it now stands. `redeem` prints what was landed now and what the
+chain now shows as landed, and the landing transaction when the connector
+names it (connector #1508 on; `2026.09.29.1` does not, so look under the
+settlement key's address on the chain's explorer). A channel with nothing
+above what is already landed is refused by the connector, which is what you
+see when its own sweep got there first.
 
 **Without typing the key on the box.** The key can come from the machine you
 administer from, through SSH's stdin, and never touch the box's disk:

@@ -3,12 +3,11 @@
 //! operator write allowlist holds one test key and which configures no
 //! settlement backend, so no write can move anything.
 //!
-//! What proves the signing: a correctly signed write gets past the
-//! connector's RFC 9421 check and fails on what comes AFTER it — `land`
-//! on this node having no x402 settlement backend (503) — and the
-//! connector's own `GET /audit-log` records it under the test keyid. Since
-//! the pin is the x402-only connector (provider#66), `redeem-latest` itself
-//! is gone and `redeem` meets a 404; the signing is proven on `land`.
+//! What proves the signing: `redeem`'s `POST /channels/:id/land` (the
+//! x402-only connector's, provider#66), correctly signed, gets past the
+//! connector's RFC 9421 check and fails on what comes AFTER it — this node
+//! has no x402 settlement backend (503) — and the connector's own
+//! `GET /audit-log` records it under the test keyid.
 //! A key it does not allowlist, a signature over another path, and a replay
 //! each get its 401 and its reason.
 //!
@@ -215,23 +214,18 @@ async fn the_real_connector_accepts_redeems_signature_and_refuses_the_rest() {
     let client = reqwest::Client::new();
     let base = connector.base.as_str();
 
-    // 1. The pin is the x402-only connector (provider#66): `redeem-latest`
-    //    is deleted, so `redeem` as it stands meets a 404 there, before any
-    //    signature is looked at. What `redeem` becomes is still open.
+    // 1. `land`, exactly as the command sends it: past the signature check,
+    //    refused only because this connector configures no settlement.
+    let land = format!("/channels/{EVM_CHANNEL}/land");
     let outcome = redeem_one(&client, base, &key, EVM_CHANNEL, now()).await;
-    assert_eq!(
-        outcome,
-        Outcome::Refused {
-            status: 404,
-            body: String::new()
-        },
-        "the x402-only connector has no redeem-latest"
+    assert!(
+        matches!(outcome, Outcome::Refused { status: 503, .. }),
+        "a correctly signed land gets past write auth: {outcome:?}"
     );
 
-    // 2. The signing itself still holds: `land`, its replacement, signed
-    //    exactly as `redeem` signs, gets past write auth and fails only on
-    //    what comes after it — this connector configures no settlement.
-    let land = format!("/channels/{EVM_CHANNEL}/land");
+    // 2. Signed the same way by hand, for the replay below. A second later:
+    //    ed25519 is deterministic, so the same second would be a replay of 1.
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
     let (status, body, headers) = post_signed(&client, base, &key, &land, &land).await;
     assert_eq!(status, 503, "{body}");
 
@@ -259,10 +253,13 @@ async fn the_real_connector_accepts_redeems_signature_and_refuses_the_rest() {
     );
 
     // 5. A key the connector does not allowlist: refused, with its reason.
-    let (status, body, _) = post_signed(&client, base, &stranger, &land, &land).await;
+    let outcome = redeem_one(&client, base, &stranger, EVM_CHANNEL, now()).await;
     assert_eq!(
-        (status, body.as_str()),
-        (401, "keyid is not on the operator write allowlist")
+        outcome,
+        Outcome::Refused {
+            status: 401,
+            body: "keyid is not on the operator write allowlist".into()
+        }
     );
 
     // 6. The right key, over a different path than the one sent: refused.

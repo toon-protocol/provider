@@ -93,14 +93,18 @@ enum Command {
     /// `toon-provider-check.timer` runs every five minutes.
     Status(toon_provider::status::StatusArgs),
 
-    /// Collect earnings: redeem the connector's inbound claims on chain,
+    /// Land earnings NOW: put the connector's latest voucher on chain,
     /// channel by channel, only the ones a person picks (ADR 0029).
     ///
-    /// Lists each inbound channel with its unredeemed amount and an
-    /// estimated gas cost, then redeems the ones picked at the prompt, or
+    /// The connector also lands on its own: every ~600s, and at once when a
+    /// payer starts to withdraw or close a channel. `redeem` is for landing
+    /// now, before that (ahead of maintenance, say).
+    ///
+    /// Lists each inbound channel with its unlanded ("unredeemed") amount and
+    /// an estimated gas cost, then lands the ones picked at the prompt, or
     /// `--channel <id>` (repeatable), or everything `--all-above <amount>`,
-    /// after a typed `yes` unless `--yes`. Each redeem is the connector's
-    /// `POST /channels/:id/redeem-latest`, signed with the operator key.
+    /// after a typed `yes` unless `--yes`. Each is the connector's
+    /// `POST /channels/:id/land`, signed with the operator key.
     ///
     /// THE OPERATOR KEY IS READ FROM STDIN ONLY (64 hex characters): typed
     /// at a prompt that does not echo it, or piped in. It is never written
@@ -111,7 +115,7 @@ enum Command {
     /// with whatever `status --check` would fail on in red (ADR 0029).
     ///
     /// Six panes: identity, directory, publisher, leases, earnings,
-    /// funding. `r` redeems earnings (the channels `redeem` offers, then the
+    /// funding. `r` lands earnings now (the channels `redeem` offers, then the
     /// operator key typed into a field that never shows it, held in memory
     /// only), `t` tops up the publisher, `u` refreshes, `q` quits. Both money
     /// actions ask for `y` then Enter. Needs a terminal: `docker compose exec

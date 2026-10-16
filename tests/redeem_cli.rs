@@ -1,6 +1,7 @@
 //! `toon-provider redeem` (TOON_Network#173, ADR 0029) end to end, against
-//! a stubbed connector: the same bearer-gated reads `status` makes, and a
-//! `POST /channels/:id/redeem-latest` that answers only a request whose RFC
+//! a stubbed x402-only connector (provider#66): the same bearer-gated reads
+//! `status` makes, and a `POST /channels/:id/land` that answers only a
+//! request whose RFC
 //! 9421 signature verifies — checked here by a verifier written from the
 //! connector's `rfc9421.rs`, independently of the signer under test. The
 //! signer is also pinned byte for byte to the connector's own in
@@ -18,6 +19,8 @@ use sha2::{Digest, Sha256};
 use wiremock::matchers::{header, method, path, path_regex};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
+/// The landing transaction the stub connector answers for `EVM_BIG`.
+const EVM_TX: &str = "0x5151515151515151515151515151515151515151515151515151515151515151";
 const TOKEN: &str = "fixture-bearer-token";
 /// The operator key: seed 32 × 0x42. Its keyid is [`KEYID`].
 const KEY: &str = "4242424242424242424242424242424242424242424242424242424242424242";
@@ -114,10 +117,12 @@ async fn connector() -> MockServer {
         .and(path("/channels"))
         .and(header("authorization", auth.as_str()))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            { "id": EVM_BIG, "counterparty": "0x11", "status": "open",
-              "deposited": 5_000_000u64, "own_deposited": 0, "redeemed": 1_000 },
-            { "id": EVM_SMALL, "counterparty": "0x22", "status": "open",
-              "deposited": 5_000_000u64, "own_deposited": 0, "redeemed": 0 },
+            { "id": EVM_BIG, "scheme": "batch-settlement", "chain": "evm",
+              "direction": "inbound", "status": "open", "counterparty": "0x11",
+              "collateral": 4_999_000u64, "landed": 1_000, "watermark": 3_400 },
+            { "id": EVM_SMALL, "scheme": "batch-settlement", "chain": "evm",
+              "direction": "inbound", "status": "open", "counterparty": "0x22",
+              "collateral": 5_000_000u64, "landed": 0, "watermark": 600 },
         ])))
         .mount(&server)
         .await;
@@ -126,11 +131,14 @@ async fn connector() -> MockServer {
         .and(header("authorization", auth.as_str()))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
             { "peer_id": null, "channel_id": format!("evm:{EVM_BIG}"), "direction": "inbound",
-              "nonce": 7, "cumulative_amount": 3_400, "pending": false },
+              "nonce": 0, "cumulative_amount": 3_400, "pending": false,
+              "book": "client", "scheme": "batch-settlement" },
             { "peer_id": null, "channel_id": format!("evm:{EVM_SMALL}"), "direction": "inbound",
-              "nonce": 2, "cumulative_amount": 600, "pending": false },
+              "nonce": 0, "cumulative_amount": 600, "pending": false,
+              "book": "client", "scheme": "batch-settlement" },
             { "peer_id": null, "channel_id": format!("solana:{SOLANA}"), "direction": "inbound",
-              "nonce": 3, "cumulative_amount": 1_200, "pending": false },
+              "nonce": 0, "cumulative_amount": 1_200, "pending": false,
+              "book": "client", "scheme": "batch-settlement" },
         ])))
         .mount(&server)
         .await;
@@ -140,28 +148,33 @@ async fn connector() -> MockServer {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
         .mount(&server)
         .await;
-    // A signed redeem: the channel as it now stands.
+    // A signed land: the channel as it now stands, and (connector #1508 on)
+    // the transaction that landed it.
     Mock::given(method("POST"))
-        .and(path(format!("/channels/{EVM_BIG}/redeem-latest")))
+        .and(path(format!("/channels/{EVM_BIG}/land")))
         .and(SignedBy(allowlisted()))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": EVM_BIG, "counterparty": "0x11", "status": "open",
-            "deposited": 5_000_000u64, "own_deposited": 0, "redeemed": 3_400,
+            "id": EVM_BIG, "scheme": "batch-settlement", "chain": "evm",
+            "direction": "inbound", "status": "open", "counterparty": "0x11",
+            "collateral": 4_996_600u64, "landed": 3_400, "watermark": 3_400,
+            "transaction": EVM_TX,
         })))
         .mount(&server)
         .await;
+    // `2026.09.29.1` answers the channel alone, with no transaction.
     Mock::given(method("POST"))
-        .and(path(format!("/channels/{SOLANA}/redeem-latest")))
+        .and(path(format!("/channels/{SOLANA}/land")))
         .and(SignedBy(allowlisted()))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": SOLANA, "counterparty": "0x33", "status": "open",
-            "deposited": 5_000_000u64, "own_deposited": 0, "redeemed": 1_200,
+            "id": SOLANA, "scheme": "batch-settlement", "chain": "solana",
+            "direction": "inbound", "status": "open", "counterparty": "0x33",
+            "collateral": 4_998_800u64, "landed": 1_200, "watermark": 1_200,
         })))
         .mount(&server)
         .await;
     // Anything else signed wrongly: the connector's 401 and its reason.
     Mock::given(method("POST"))
-        .and(path_regex("^/channels/.*/redeem-latest$"))
+        .and(path_regex("^/channels/.*/land$"))
         .respond_with(
             ResponseTemplate::new(401)
                 .set_body_string("keyid is not on the operator write allowlist"),
@@ -278,8 +291,8 @@ async fn all_above_redeems_only_the_channels_over_the_floor_with_the_key_from_st
     assert_eq!(
         asked,
         [
-            format!("/channels/{EVM_BIG}/redeem-latest"),
-            format!("/channels/{SOLANA}/redeem-latest"),
+            format!("/channels/{EVM_BIG}/land"),
+            format!("/channels/{SOLANA}/land"),
         ]
     );
     assert!(
@@ -289,11 +302,22 @@ async fn all_above_redeems_only_the_channels_over_the_floor_with_the_key_from_st
     );
     assert!(
         run.stdout
-            .contains(&format!("redeemed  {EVM_BIG}: 2400 collected")),
+            .contains(&format!("landed    {EVM_BIG}: 2400 landed now")),
         "{}",
         run.stdout
     );
-    assert!(run.stdout.contains("2 of 2 redeemed."), "{}", run.stdout);
+    assert!(
+        run.stdout.contains(&format!("Transaction {EVM_TX}.")),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        run.stdout
+            .contains("The connector returned no transaction id"),
+        "the Solana answer carries none:\n{}",
+        run.stdout
+    );
+    assert!(run.stdout.contains("2 of 2 landed."), "{}", run.stdout);
 }
 
 #[tokio::test]
@@ -308,7 +332,7 @@ async fn a_named_channel_is_the_only_one_redeemed() {
     assert_eq!(run.code, Some(0), "{}\n{}", run.stdout, run.stderr);
     assert_eq!(
         redeems_asked(&connector).await,
-        [format!("/channels/{SOLANA}/redeem-latest")]
+        [format!("/channels/{SOLANA}/land")]
     );
 }
 
@@ -330,7 +354,7 @@ async fn a_key_the_connector_does_not_allowlist_is_refused_and_named_by_keyid() 
         "{}",
         run.stdout
     );
-    assert!(run.stdout.contains("0 of 1 redeemed."), "{}", run.stdout);
+    assert!(run.stdout.contains("0 of 1 landed."), "{}", run.stdout);
 }
 
 #[tokio::test]
