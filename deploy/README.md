@@ -368,6 +368,10 @@ docker compose exec provider toon-provider status --json   # one document, for a
 docker compose exec provider toon-provider status --check  # exit 1 naming each problem
 ```
 
+From a laptop, with your own `ssh` and nothing new exposed on the box:
+`toon-provider status --ssh root@<box>` (and `dash --ssh`); see the
+[README](../README.md#from-a-laptop---ssh).
+
 It prints, in this order: **identity** (the npub, the ILP address, public or
 hidden, and whether the Profile's sealing key matches the connector's live
 one); **directory** (per relay, when the Profile, each Listing and the Liveness

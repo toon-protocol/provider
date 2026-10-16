@@ -43,8 +43,9 @@ pub use gather::{
     PublisherStatus, PublisherWallet, Report, Sources,
 };
 // What `redeem` shares with `status`: the same connector, the same earnings.
+pub use gather::Secret;
 pub(crate) use gather::{
-    channel_key, connector_operator_url, error_chain, origin, read_earnings_from,
+    channel_key, connector_operator_url, error_chain, origin, read_earnings_from, Bearer,
 };
 pub use render::{from_json, render_text, section_text, to_json, Section};
 
@@ -81,6 +82,9 @@ pub struct StatusArgs {
 
     #[command(flatten)]
     pub report: ReportArgs,
+
+    #[command(flatten)]
+    pub remote: crate::remote::RemoteArgs,
 }
 
 /// What the report is gathered from and judged by, shared by `status` and
@@ -161,12 +165,25 @@ impl ReportArgs {
 /// Run the command: gather, print, and return the process exit code — 0,
 /// or 1 when `--check` found a problem.
 pub async fn run(config: &ProviderConfig, args: &StatusArgs) -> Result<i32> {
-    let sources = Sources::from_config(config, &args.report);
+    print_report(&Sources::from_config(config, &args.report), args).await
+}
+
+/// `status --ssh <host>`: the same report, read through the operator's own
+/// `ssh` (see `remote`). Needs no provider.toml here.
+pub async fn run_over_ssh(args: &StatusArgs) -> Result<i32> {
+    crate::remote::until_interrupted(async {
+        let link = crate::remote::connect(&args.remote, &args.report).await?;
+        print_report(&link.sources, args).await
+    })
+    .await
+}
+
+async fn print_report(sources: &Sources, args: &StatusArgs) -> Result<i32> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let report = gather(&sources, now).await;
+    let report = gather(sources, now).await;
     let outcome = args
         .check
         .then(|| check(&report, &args.report.thresholds()));

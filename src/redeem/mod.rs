@@ -48,7 +48,9 @@ use ed25519_dalek::SigningKey;
 use serde_json::Value;
 
 use crate::outbound_proxy::{SettlementChain, SettlementRpcRoute};
-use crate::status::{connector_operator_url, error_chain, read_earnings_from, ChannelEarnings};
+use crate::status::{
+    connector_operator_url, error_chain, read_earnings_from, Bearer, ChannelEarnings,
+};
 use gas::{chain_of, estimate, Chain, Estimate};
 use sign::{keyid_hex, sign_write, SIGNATURE_TTL_SECONDS};
 
@@ -518,7 +520,9 @@ pub async fn run(config_path: &str, args: &RedeemArgs) -> Result<i32> {
     let earnings = read_earnings_from(
         &read_client,
         &Ok(base.clone()),
-        args.bearer_file.as_deref(),
+        args.bearer_file
+            .as_deref()
+            .map_or(Bearer::Missing, Bearer::File),
         None,
     )
     .await;
