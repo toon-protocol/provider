@@ -9,12 +9,14 @@
 //! `connector-operator`): an EVM id is `0x`-optional 64 hex characters, a
 //! Solana one is base58 decoding to exactly 32 bytes.
 //!
-//! - **EVM** (`TokenNetwork.claimFromChannel`): [`EVM_REDEEM_GAS`] gas ×
+//! - **EVM** (`x402BatchSettlement.claim` with one voucher row, what the
+//!   connector's `POST /channels/:id/land` sends): [`EVM_REDEEM_GAS`] gas ×
 //!   the chain's current `eth_gasPrice`, read from the settlement EVM RPC.
 //!   On an L2 such as Base, the L1 data fee comes on top and is not
 //!   included.
-//! - **Solana** (`[Ed25519SigVerify, ClaimFromChannel]` in one
-//!   transaction): [`SOLANA_REDEEM_LAMPORTS`], the base fee for that
+//! - **Solana** (`payment-channels`' `[Ed25519SigVerify, settle]`, or
+//!   `settle_and_seal` on a closing channel, in one transaction):
+//!   [`SOLANA_REDEEM_LAMPORTS`], the base fee for that
 //!   transaction's signatures. The connector sets no priority fee, so there
 //!   is nothing else to read.
 //!
@@ -28,9 +30,12 @@ use serde_json::Value;
 
 use crate::outbound_proxy::{is_private_url, SettlementRpcRoute};
 
-/// Gas for one `claimFromChannel`, rounded up: the connector's own
-/// `forge test --gas-report` for `TokenNetwork` (tag 2026.09.11.1) puts the
-/// call at 127,255 gas at most, plus 21,000 intrinsic and its calldata.
+/// Gas for one landing, as a ceiling. It was sized for the old
+/// `TokenNetwork.claimFromChannel` (127,255 gas at most in the connector's
+/// `forge test --gas-report` at 2026.09.11.1, plus 21,000 intrinsic and its
+/// calldata). No gas report for `x402BatchSettlement.claim` is published;
+/// a one-row `claim` (an ECDSA recovery and the channel's claimed total) is
+/// kept under the same bound until one is measured (provider#66).
 pub const EVM_REDEEM_GAS: u64 = 160_000;
 
 /// Lamports for one Solana redeem: 5,000 per signature, and the

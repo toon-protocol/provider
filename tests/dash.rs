@@ -354,12 +354,12 @@ fn redeem_needs_a_pick_a_typed_confirmation_and_the_key() {
     // Keys do nothing while the redeem runs; its outcome is shown, and the
     // report is read again.
     assert!(press(&mut app, KeyCode::Esc).is_none());
-    app.apply(Update::Redeemed("  redeemed  2aEV…: 600 collected".into()));
+    app.apply(Update::Redeemed("  landed    2aEV…: 600 landed now".into()));
     assert!(matches!(
         app.apply(Update::RedeemFinished),
         Some(Effect::Refresh)
     ));
-    assert!(frame(&app).contains("600 collected"));
+    assert!(frame(&app).contains("600 landed now"));
     press(&mut app, KeyCode::Enter);
     assert!(app.modal().is_none());
 }

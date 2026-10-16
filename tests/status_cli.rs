@@ -145,57 +145,90 @@ impl World {
     }
 
     /// The connector's operator reads, gated on the bearer token exactly as
-    /// `connector-operator` gates them: anything else is a 401.
+    /// `connector-operator` gates them: anything else is a 401. The shapes
+    /// are the x402-only connector's (`rust-2026.09.29.1`, connector ADR
+    /// 0075, provider#66): `BatchChannelView` rows and
+    /// `batch-settlement` claim rows.
     async fn connector_answers(&self) {
+        self.connector_answers_with(
+            json!([
+                {
+                    "id": EVM_CHANNEL,
+                    "scheme": "batch-settlement",
+                    "chain": "evm",
+                    "direction": "inbound",
+                    "status": "open",
+                    "counterparty": "0x1111111111111111111111111111111111111111",
+                    // landed + collateral is the most it can ever pay.
+                    "collateral": 4_999_000u64,
+                    "landed": 1_000,
+                    "watermark": 3_400,
+                },
+                // This node's own outbound channel: money it pays, not
+                // money it earned.
+                {
+                    "id": "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+                    "scheme": "batch-settlement",
+                    "chain": "evm",
+                    "direction": "outbound",
+                    "status": "open",
+                    "counterparty": "0x2222222222222222222222222222222222222222",
+                    "collateral": 1_000_000u64,
+                    "landed": 0,
+                    "watermark": 99_999,
+                },
+            ]),
+            format!("/channels/{EVM_CHANNEL}/land"),
+        )
+        .await;
+    }
+
+    /// [`Self::connector_answers`] with `channels` as `GET /channels`, and
+    /// one operator write to `landing_path` in the audit log.
+    async fn connector_answers_with(&self, channels: Value, landing_path: String) {
         let auth = format!("Bearer {TOKEN}");
         Mock::given(method("GET"))
             .and(path("/channels"))
             .and(header("authorization", auth.as_str()))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-                {
-                    "id": EVM_CHANNEL,
-                    "counterparty": "0x1111111111111111111111111111111111111111",
-                    "status": "open",
-                    "deposited": 5_000_000u64,
-                    "own_deposited": 0,
-                    "redeemed": 1_000,
-                },
-            ])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(channels))
             .mount(&self.connector)
             .await;
         Mock::given(method("GET"))
             .and(path("/claims"))
             .and(header("authorization", auth.as_str()))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-                // A peer-book row and a client-edge row, whose channel id is
-                // the chain-prefixed key and in upper case.
+                // Client-edge rows, whose channel id is the chain-prefixed
+                // key, and in upper case.
                 {
                     "peer_id": null,
                     "channel_id": format!("evm:{}", EVM_CHANNEL.to_uppercase().replace("0X", "0x")),
                     "direction": "inbound",
-                    "nonce": 7,
+                    "nonce": 0,
                     "cumulative_amount": 3_400,
                     "pending": false,
                     "book": "client",
+                    "scheme": "batch-settlement",
                 },
                 {
                     "peer_id": null,
                     "channel_id": format!("solana:{SOLANA_CHANNEL}"),
                     "direction": "inbound",
-                    "nonce": 2,
+                    "nonce": 0,
                     "cumulative_amount": 600,
                     "pending": false,
                     "book": "client",
+                    "scheme": "batch-settlement",
                 },
                 // Outbound is money this node signed away, not earnings.
                 {
-                    "peer_id": "hub",
+                    "peer_id": null,
                     "channel_id": "0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
                     "direction": "outbound",
-                    "nonce": 1,
+                    "nonce": 0,
                     "cumulative_amount": 99_999,
                     "pending": false,
-                    "book": "peer",
+                    "book": "outbound",
+                    "scheme": "batch-settlement",
                 },
             ])))
             .mount(&self.connector)
@@ -208,7 +241,7 @@ impl World {
                     "keyid": "k",
                     "signature": "s",
                     "method": "POST",
-                    "path": format!("/channels/{EVM_CHANNEL}/redeem-latest"),
+                    "path": landing_path,
                     "created": AT - 600,
                     "expires": AT,
                 },
@@ -477,9 +510,120 @@ async fn earnings_join_claims_to_channels_and_name_the_dashboard() {
     );
     assert!(text.contains("total unredeemed 3000"), "{text}");
     assert!(
-        text.contains("To collect it: `toon-provider redeem`"),
+        text.contains("To land it now: `toon-provider redeem`"),
         "the earnings section points at redeem:\n{text}"
     );
+}
+
+#[tokio::test]
+async fn an_x402_channel_reads_landed_as_redeemed_and_its_ceiling_as_deposited() {
+    // provider#66: on the x402-only connector, `landed` is what is on
+    // chain, `watermark` what is signed over, and `landed + collateral` the
+    // most the channel can pay. An outbound channel is not earnings.
+    let world = World::healthy().await;
+    let earnings = world.report().await.earnings;
+    let evm = earnings
+        .channels
+        .iter()
+        .find(|c| c.channel_id == EVM_CHANNEL)
+        .unwrap();
+    assert_eq!(evm.deposited, Some(5_000_000));
+    assert_eq!(evm.redeemed, 1_000);
+    assert_eq!(
+        evm.last_redeemed_at,
+        Some(AT - 600),
+        "an operator `land` is the last landing the audit log knows of"
+    );
+    assert!(
+        earnings
+            .channels
+            .iter()
+            .all(|c| !c.channel_id.starts_with("0xcdcd")),
+        "an outbound x402 channel is listed as earnings: {:?}",
+        earnings.channels
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_x402_channel_counts_nothing_as_landed() {
+    // The chain could not be read: `landed` and `collateral` are absent.
+    // Nothing is shown as on chain that is not known to be, and the ceiling
+    // is unknown rather than zero.
+    let world = World::new().await;
+    world.operator_answers(healthy_doc()).await;
+    world
+        .publisher_answers(publisher_body("9997019", json!(1_209_600)))
+        .await;
+    world.rpc_answers(1_500_000_000).await;
+    world.wallet_answers(25_000_000).await;
+    world
+        .connector_answers_with(
+            json!([{
+                "id": EVM_CHANNEL,
+                "scheme": "batch-settlement",
+                "chain": "evm",
+                "direction": "inbound",
+                "status": "unreadable",
+                "counterparty": "0x1111111111111111111111111111111111111111",
+                "collateral": null,
+                "landed": null,
+                "watermark": 3_400,
+                "detail": "the RPC timed out",
+            }]),
+            "/peers".to_string(),
+        )
+        .await;
+    let earnings = world.report().await.earnings;
+    let evm = earnings
+        .channels
+        .iter()
+        .find(|c| c.channel_id == EVM_CHANNEL)
+        .unwrap();
+    assert_eq!(evm.status.as_deref(), Some("unreadable"));
+    assert_eq!(
+        (evm.claimed, evm.redeemed, evm.unredeemed),
+        (3_400, 0, 3_400)
+    );
+    assert_eq!(evm.deposited, None);
+    assert_eq!(evm.last_redeemed_at, None);
+}
+
+#[tokio::test]
+async fn a_connector_from_before_x402_is_still_read() {
+    // A box whose connector has not moved yet answers the TOON-channel
+    // `ChannelView` and audits `redeem-latest`; `status` still reads it.
+    let world = World::new().await;
+    world.operator_answers(healthy_doc()).await;
+    world
+        .publisher_answers(publisher_body("9997019", json!(1_209_600)))
+        .await;
+    world.rpc_answers(1_500_000_000).await;
+    world.wallet_answers(25_000_000).await;
+    world
+        .connector_answers_with(
+            json!([{
+                "id": EVM_CHANNEL,
+                "counterparty": "0x1111111111111111111111111111111111111111",
+                "status": "open",
+                "deposited": 5_000_000u64,
+                "own_deposited": 0,
+                "redeemed": 1_000,
+            }]),
+            format!("/channels/{EVM_CHANNEL}/redeem-latest"),
+        )
+        .await;
+    let earnings = world.report().await.earnings;
+    let evm = earnings
+        .channels
+        .iter()
+        .find(|c| c.channel_id == EVM_CHANNEL)
+        .unwrap();
+    assert_eq!(evm.deposited, Some(5_000_000));
+    assert_eq!(
+        (evm.claimed, evm.redeemed, evm.unredeemed),
+        (3_400, 1_000, 2_400)
+    );
+    assert_eq!(evm.last_redeemed_at, Some(AT - 600));
 }
 
 #[tokio::test]

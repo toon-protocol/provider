@@ -204,7 +204,7 @@ first if you have them.
 | `settlement-solana.key` | file | The connector's Solana settlement key. |
 | `NOSTR_PRIVATE_KEY` | `.env` | The provider's own identity. It signs the Profile, every Listing and every Liveness. |
 | `PUBLISHER_MNEMONIC` | `.env` | A 12-word BIP-39 phrase of its own for the publisher's wallet, shared with nothing else: two payers on one channel race one running total, and every voucher of the one that falls behind is refused. |
-| `OPERATOR_BEARER_TOKEN` | `.env` | Gates the connector's `/metrics` and redeem endpoints. |
+| `OPERATOR_BEARER_TOKEN` | `.env` | Gates the connector's `/metrics` and its channel and claim reads. |
 | `OPERATOR_WRITE_KEY` | `.env` | The **public** half of a fresh ed25519 key for signing operator writes. |
 
 The three files are 32 bytes as 64 hex characters, the only format the
@@ -270,12 +270,18 @@ so a DNS mistake does not burn the real rate limit. Once step 4 succeeds, set
 startup (an idempotent associated-token-account create), paid by this key. An
 unfunded key is a refuse-to-start and the container restart-loops; the log
 names it. **1–2 devnet SOL is plenty**, from <https://faucet.solana.com>.
+After boot it keeps spending: every Solana channel a tenant opens here is
+opened by this node's sponsor endpoint, which pays the channel's rent (about
+0.0047 SOL, until the channel is reclaimed), and every landing of a tenant's
+voucher is a transaction it pays for.
 
 The connector's **EVM** key needs nothing to boot: Base Sepolia startup is
-read-only (chain id, the token network resolved through the registry, the
-token's own `decimals()`). It needs ETH only when it transacts — a redeem. No
-balance is checked anywhere, so under-funding surfaces as an ordinary
-settlement error later, never at load time.
+read-only (chain id, the token's own `decimals()`, and whether it has
+ERC-3009). It needs ETH once a tenant pays on Base: the connector lands what
+it holds on its own, every ten minutes (§ "Redeeming earnings"), and each
+landing is a transaction this key pays gas for. No balance is checked
+anywhere, so under-funding surfaces as a settlement error in the connector's
+log, never at load time.
 
 **The publisher's wallet — required to publish.** It opens a payment channel
 against the devnet relay and buys one write per directory event. Fund its
@@ -318,39 +324,39 @@ the component's own on fixed keys:
 Once the node is up, `GET /ilp` serves the connector's two addresses as well,
 after the connector has proved each of them against a live chain.
 
-## `channel_index_from_block`: skip the genesis scan
+## The x402 terms: what each settlement table publishes
 
-`[settlement.evm]`'s local channel index (connector issue #661) backfills
-`ChannelOpened`/`ChannelNewDeposit`/`ChannelSettled` logs from
-`channel_index_from_block` on a cold start with no checkpoint, so that
-resolving a channel is a map hit instead of an RPC call. Left unset, that
-field defaults to `0` — and a public RPC that prunes history (this preset's
-`base-sepolia-rpc.publicnode.com` prunes below block 46000000) refuses a
-request for block `0` outright, so a cold connector never warms the index up
-and pays a direct chain read for every channel lookup instead
-(TOON_Network#182).
+Every channel a tenant opens here is an x402 `batch-settlement` channel
+(connector ADR 0075, its `docs/releases/x402-only.md`, provider#66): the
+tenant deposits into its own channel and pays each packet with a voucher, a
+signed running total. The x402 contract (EVM) and `payment-channels` program
+(Solana) are constants of the connector binary, so `.env` names neither, and
+the TOON-channel keys the connector now refuses by name —
+`contract_address`, `program_id` and `channel_index_from_block`
+(TOON_Network#182) — are gone from the template. A `.env` that still sets
+`SETTLEMENT_EVM_REGISTRY`, `SETTLEMENT_SOLANA_PROGRAM_ID` or
+`SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK` renders fine, with a note to delete
+them.
 
-`render.sh` sets it for you, from `SETTLEMENT_EVM_CHAIN_ID`:
+Each table instead publishes the terms a tenant opens a channel on.
+`render.sh` knows them for the devnet preset's own tokens and requires them
+in `.env` for any other:
 
-| `SETTLEMENT_EVM_CHAIN_ID` | `channel_index_from_block` | Source |
-| ------------------------- | --------------------------- | ------ |
-| `84532` (Base Sepolia)     | `47285026`                   | connector `packages/contracts/deployments/base-sepolia.md` |
-| `8453` (Base mainnet)      | `50745815`                   | connector `packages/contracts/deployments/base-mainnet.md` |
-| anything else              | `SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK` in `.env`, required | your own `TokenNetwork`'s deploy block |
+| `.env` | connector.toml | devnet preset |
+| --- | --- | --- |
+| `SETTLEMENT_EVM_EIP712_NAME`, `SETTLEMENT_EVM_EIP712_VERSION` | `asset_eip712_name`, `asset_eip712_version` | `USDC`, `2` (Circle FiatToken v2.2) |
+| `SETTLEMENT_EVM_ASSET_TRANSFER_METHOD` | `asset_transfer_method` | `eip3009` |
+| `SETTLEMENT_EVM_FACILITATOR_URL` (optional; empty names none) | `facilitator_url` | `https://onboard.devnet.toonprotocol.dev` |
+| `SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT` | `min_sponsored_deposit` | `1000000` (1 USDC) |
 
-Pointing `SETTLEMENT_EVM_CHAIN_ID` at a chain that is neither of the two
-presets and leaving `SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK` unset is a
-render-time refusal, not a silent scan from genesis: this bundle has no way
-to know that chain's `TokenNetwork` deploy block, and guessing one would be
-worse than asking. Find it the way connector
-`docs/protocol/configuration-spec.md` and
-`packages/contracts/deployments/*.md` describe — the block of the
-`registry.createTokenNetwork(...)` (or equivalent) transaction that created
-your `TokenNetwork` — and set it in `.env`:
-
-```bash
-SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK=12345678
-```
+The first three are facts about the token: a wrong EIP-712 domain is a
+deposit signature that never verifies, and the connector checks the transfer
+method against the token at boot. The facilitator is the operator's choice
+(connector ADR 0076): it lets a tenant with no ETH open a Base channel here,
+and the connector only publishes it. The minimum sponsored deposit bounds
+the public endpoint that spends this node's SOL on a tenant's channel rent.
+Read the devnet's back from any devnet node's `GET /ilp` (`batchSettlements`)
+rather than trusting this copy.
 
 ## Is it working? `toon-provider status`
 
@@ -367,15 +373,24 @@ hidden, and whether the Profile's sealing key matches the connector's live
 one); **directory** (per relay, when the Profile, each Listing and the Liveness
 were last accepted, or the refusal); **publisher** (the channel, deposit,
 spent, remaining and runway); **leases** (capacity in use, and per lease its
-state, expiry, ports and what it has been billed); **earnings** (per payer
-channel, what is claimed, redeemed and unredeemed, and when it was last
-redeemed since the connector started); and **funding** (the connector's Solana
+state, expiry, ports and what it has been billed); **earnings** (per inbound
+x402 channel, what is claimed, redeemed and unredeemed, and when an operator
+last landed it since the connector started — see below for what each word
+means on an x402 channel); and **funding** (the connector's Solana
 settlement key's SOL, and the publisher wallet's USDC beside what its next
 channel takes). Each source is read on its own: an unreachable
 publisher is shown as unreachable and the rest still print.
 
-To collect what the earnings section shows, run `toon-provider redeem`
-(§ "Redeeming earnings").
+On an x402 channel (provider#66) the earnings words map onto the
+connector's `GET /channels` row like this: **claimed** is the channel's
+`watermark`, the highest voucher accepted; **redeemed** is `landed`, what the
+chain records in this node's favour; **unredeemed** is the difference, what
+is held but not yet on chain; and **deposited** is `landed + collateral`, the
+most the channel can ever pay. **Last redeemed** is the latest operator
+`land` (or, on an older connector, `redeem`) write in the connector's audit
+log. The connector's own ten-minute landings are not operator writes, so
+they are not in it: an unredeemed figure that falls with no "last redeemed"
+is the connector landing on its own (§ "Redeeming earnings").
 
 **The connector's dashboard** shows every claim and channel in full:
 `https://proxy.provider.<domain>/dashboard` (or
@@ -403,9 +418,10 @@ own:
 - **`r` redeem**: the channels `toon-provider redeem` offers, with its gas
   estimates. Pick with Space (`a` for all), confirm, then type the operator
   key into a field that shows only how many characters are in it. The key is
-  held in memory while the redeems are signed and sent, then wiped, and is
-  never written anywhere. Each redeem is the same signed
-  `POST /channels/:id/redeem-latest` as the command's.
+  held in memory while the landings are signed and sent, then wiped, and is
+  never written anywhere. Each is the same signed `POST /channels/:id/land`
+  as the command's: it lands now what the connector would otherwise land on
+  its own within ten minutes (§ "Redeeming earnings").
 - **`t` top up**: an amount in base units, then the publisher's `/topup`, as
   `toon-provider topup` sends it. Only on an EVM channel: on a Solana one,
   `t` says to fund the wallet instead (§ "Funding the publisher").
@@ -551,38 +567,53 @@ runway figure assumes.
 
 ## Redeeming earnings
 
-A tenant's payments reach this box as signed claims on a payment channel, held
-by the connector. They are money only once a claim is **redeemed** on chain,
-and nothing here redeems on its own (ADR 0029: money is shown everywhere and
-moved only by a person). `toon-provider status` shows what is unredeemed;
-`toon-provider redeem` collects it.
+A tenant's payments reach this box as vouchers on the tenant's own x402
+channel, held by the connector. They are money only once a voucher is
+**landed** on chain ("redeemed", in `status`'s words), and **the connector
+lands them on its own** (connector ADR 0074/0075, provider#66):
+
+- every **600 seconds**, every voucher it holds above what the chain records
+  (on EVM one batched `claim`, then `settle` to this node's address; on
+  Solana a `settle` per busy channel);
+- **at once** when a payer starts to withdraw (EVM) or close (Solana) a
+  channel, so a payer's exit can never take back what it already paid.
+
+That landing protects money already owed; it spends nothing of the
+operator's beyond the gas (ADR 0029, as amended: the connector's own landing
+is protection, not spending; a top-up of the publisher still waits for a
+person). `toon-provider redeem` is the **"land now" lever**: it lands the
+channels you pick right away, through the connector's
+`POST /channels/:id/land` — before maintenance, say, or to see a figure on
+chain without waiting for the next sweep. `toon-provider status` shows what
+is held and not yet landed.
 
 ```bash
 cd /root/provider/deploy
-docker compose exec provider toon-provider redeem --list           # what is owed, and the gas to collect it
+docker compose exec provider toon-provider redeem --list           # what is held, and the gas to land it now
 docker compose exec provider toon-provider redeem                  # pick rows, type yes, then paste the key
-docker compose exec provider toon-provider redeem --all-above 1000 # every channel over 1000 base units
+docker compose exec provider toon-provider redeem --all-above 1000 # land now every channel over 1000 base units
 docker compose exec provider toon-provider redeem --channel <id>   # repeatable
 ```
 
 It lists each inbound channel with its unredeemed amount (token base units:
 1000 is 0.001 USDC at 6dp) and an **estimated gas cost** for its chain, then
-redeems the channels you pick at the prompt, or those `--channel` names, or
+lands the channels you pick at the prompt, or those `--channel` names, or
 every one over `--all-above` (strictly more than the amount). It asks for a
-typed `yes` unless `--yes`. Each redeem is one on-chain transaction, and the
+typed `yes` unless `--yes`. Each landing is one on-chain transaction, and the
 connector's settlement key pays its gas in that chain's own coin, not out of
 the channel. That is why `keys.sh addresses` says the EVM key needs ETH
-"before your first redeem". The estimate is:
+before a tenant pays on Base. The estimate is:
 
-- **EVM:** 160,000 gas (the most `claimFromChannel` has taken in the
-  connector's own gas report, plus the transaction's base cost) times the
+- **EVM:** 160,000 gas, a ceiling for the one-row `x402BatchSettlement.claim`
+  that `land` sends (no gas report for it is published yet; the figure is
+  the old `claimFromChannel` bound, kept until one is measured) times the
   chain's current `eth_gasPrice`, read from `SETTLEMENT_EVM_RPC_URL`. On Base
   the L1 data fee is extra. With no RPC it says `unknown`.
-- **Solana:** 10,000 lamports, the base fee for the redeem transaction's two
+- **Solana:** 10,000 lamports, the base fee for the landing transaction's two
   signatures (the fee payer's and the Ed25519 precompile's). The connector
   sets no priority fee.
 
-It is an estimate. A redeem never waits on one.
+It is an estimate. A landing never waits on one.
 
 **The operator key is read from stdin, and only from stdin.** It is the
 private half `./keys.sh init` printed once (64 hex characters), whose public
@@ -592,13 +623,16 @@ never written anywhere. A key given on the command line (`--operator-key`, or
 as an argument) is refused before anything is dialled, because `ps` and your
 shell's history have already seen it. Replace a key you have typed there.
 
-Each redeem signs the connector's `POST /channels/:id/redeem-latest` exactly as
+Each landing signs the connector's `POST /channels/:id/land` exactly as
 `connector send` signs a write: RFC 9421 over `@method`, `@path` and an RFC
 9530 `Content-Digest`, keyid the public key, valid for 60 seconds. The
-connector submits the latest claim it holds and answers the channel as it now
-stands. `redeem` prints what was collected and what the chain now shows as
-redeemed. The connector returns no transaction id, so look for the
-transaction under the settlement key's address on the chain's explorer.
+connector lands the latest voucher it holds on that channel and answers the
+channel as it now stands. `redeem` prints what was landed now and what the
+chain now shows as landed, and the landing transaction when the connector
+names it (connector #1508 on; `2026.09.29.1` does not, so look under the
+settlement key's address on the chain's explorer). A channel with nothing
+above what is already landed is refused by the connector, which is what you
+see when its own sweep got there first.
 
 **Without typing the key on the box.** The key can come from the machine you
 administer from, through SSH's stdin, and never touch the box's disk:
@@ -747,17 +781,30 @@ config it was validated against are the same commit and the box takes both with
 one fast-forward, so a build can never reach this box ahead of the config it
 needs.
 
-The current pin is `rust-2026.09.27.1` (= `rust-sha-422129a`), the first
-connector release carrying connector#1335 (connector ADR 0073): the first
-connector that accepts `rpc_via_socks_proxy` in a `[settlement.*]` table, which
-this bundle renders on every box (`false` on a public one, `true` by default on
-a hidden one, § "Running hidden"). An older connector refuses that key, so the
-pin and the template moved in one commit (TOON_Network#167), first as the
-commit build `rust-sha-854d199` until this release was cut. Before that it was
-`rust-2026.09.11.1` (= `rust-sha-f278cd6`); the rest of the devnet fleet is
-on `rust-2026.09.11.1` or `rust-2026.08.28.1`, and this box peers with none of
-them (tenants pay it at its own client edge), so nothing here needs them to
-move.
+The current pin is `rust-2026.09.29.1`, the release the devnet relay and
+gateway run. It is the **x402-only** connector (connector ADR 0075,
+`docs/releases/x402-only.md`, provider#66): every channel is an x402
+`batch-settlement` channel, and it boots on no config in the TOON-channel
+shape, so the pin and `connector.toml.template` moved in one commit (§ "The
+x402 terms"). Before it the pin was `rust-2026.09.27.1` (= `rust-sha-422129a`),
+the first release carrying connector#1335 (connector ADR 0073), which the
+`rpc_via_socks_proxy` key a hidden box renders still needs; `2026.09.29.1`
+keeps that key and the root `socks_proxy` unchanged.
+
+**Before moving a box past `2026.09.27.2`**, the last TOON-capable release:
+the x402-only connector refuses to boot on a `state_dir` whose claim journal
+(`client-edge-claims.log`, `peer-claims.log`) holds a `toon-channel` entry,
+and it can no longer land one. If a tenant has paid the box on a TOON
+channel, drain it first on the old pin, as connector
+`docs/operators/draining-toon-channels.md` says, then move the journal out of
+`state_dir` (never delete it). Check with:
+
+```bash
+docker run --rm -v <project>_connector_state:/s:ro alpine sh -c 'wc -c /s/*claims*.log'
+```
+
+Two empty files mean there is nothing to drain. The workstation hidden
+provider's were both empty on 2026-10-16.
 
 ## Privacy and exposure invariants
 
@@ -934,7 +981,7 @@ two things per chain, and the bundle does both:
   writes the connector's root `socks_proxy = "socks5h://172.30.2.2:9050"` and
   `rpc_via_socks_proxy = true` in both `[settlement.evm]` and
   `[settlement.solana]`. Every client of each table (the settlement backend,
-  and on EVM the channel-index syncer and rate source) then rides the daemon
+  its watchers and sweeps, and on EVM the rate source) then rides the daemon
   on a circuit pinned per chain by SOCKS username (`toon-settlement-evm`,
   `toon-settlement-solana`; the daemon's `IsolateSOCKSAuth`, which
   `anon/anonrc` leaves on), and a daemon that is down fails the settlement

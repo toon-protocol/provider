@@ -91,21 +91,28 @@ key_file = "/app/data/signer.key"
 
 
 # ── Getting paid ─────────────────────────────────────────────────────────────
-# Settlement is per-chain. A tenant pays in whichever of these it holds; the
-# connector verifies the claim against the chain named here, and resolves an
-# unknown buyer's channel from that chain — so anyone who opens a channel can
-# pay this node with no config edit here (connector ADR 0052).
+# Settlement is per-chain, and every channel is an x402 `batch-settlement`
+# channel (connector ADR 0075; its docs/releases/x402-only.md is the
+# migration this table followed, provider#66). A tenant opens its own
+# channel to this node on whichever chain it holds, deposits into it, and pays
+# each packet with a voucher: a signed running total. The connector resolves a
+# channel it has never seen from the chain and the voucher, so anyone can pay
+# this node with no config edit here. The x402 contract (EVM) and the
+# `payment-channels` program (Solana) are constants of the connector binary,
+# never config: there is no `contract_address` or `program_id` to set.
 #
-# Fail-closed at STARTUP: the connector resolves token_address through the
-# registry at contract_address and reads the token's own decimals(). A wrong
-# address is a refuse-to-start, not a silently mispriced node. The Solana leg
-# goes further and SUBMITS a transaction at boot (an idempotent associated
-# token account create), so that key must hold SOL before the first `up -d` —
-# deploy/README.md § "The two funded identities".
+# Fail-closed at STARTUP: the connector reads token_address's own decimals()
+# and checks asset_transfer_method against the token. A wrong value is a
+# refuse-to-start, not a silently mispriced node. The Solana leg also SUBMITS
+# a transaction at boot (an idempotent associated token account create), and
+# its key pays for every channel the sponsor endpoint opens, so that key must
+# hold SOL before the first `up -d` — deploy/README.md § "The two funded
+# identities".
 #
 # The values come from .env, the same ones provider.toml's [[settlement]]
 # publishes. .env.example ships the TOON devnet's as a preset (Base Sepolia and
-# Solana devnet mock USDC); read them back from any devnet node's `GET /ilp`
+# Solana devnet mock USDC), and render.sh knows the x402 terms of those two
+# tokens; read them back from any devnet node's `GET /ilp` (`batchSettlements`)
 # rather than trusting a second copy of them.
 #
 # `rpc_via_socks_proxy` is how each table reaches its rpc_url (connector ADR
@@ -114,55 +121,62 @@ key_file = "/app/data/signer.key"
 #   public box    false: the preset's RPC, dialled directly.
 #   hidden box    true, BY DEFAULT: the same public, keyless preset RPC, but
 #                 only through the root `socks_proxy` above — every client of
-#                 the table (the backend, and on EVM the channel-index syncer
-#                 and rate source) on that chain's pinned circuit, never
-#                 direct. The connector refuses a plain http:// rpc_url here,
-#                 because an exit relay could rewrite the answers.
+#                 the table (the backend, its watchers, and on EVM the rate
+#                 source) on that chain's pinned circuit, never direct. The
+#                 connector refuses a plain http:// rpc_url here, because an
+#                 exit relay could rewrite the answers.
 #   hidden box,   false: HIDDEN_SETTLEMENT_<CHAIN>_RPC_URL, a node the
 #   self-hosted   operator runs on a private address, in place of the
 #                 preset's, dialled directly.
 #
 # provider.toml's [anon.settlement.*] carries the same two values, so the
 # app's hiding gate judges exactly what is written here.
-#
-# `channel_index_from_block` (connector issue #661) is the block the local
-# ChannelOpened/ChannelNewDeposit/ChannelSettled index backfills from on a
-# cold start with no checkpoint. It defaults to 0, and this preset's public
-# RPC prunes history well short of genesis, so a cold connector would ask for
-# a block the RPC has already discarded and never warm the index up
-# (TOON_Network#182). render.sh picks the right value for the preset named by
-# SETTLEMENT_EVM_CHAIN_ID (the connector's own deployment records —
-# packages/contracts/deployments/base-sepolia.md and base-mainnet.md — name
-# the block for Base Sepolia and Base mainnet); a chain it does not know
-# reads SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK from .env instead, required
-# in that case. See deploy/README.md § "channel_index_from_block".
 
 [settlement.evm]
-rpc_url                  = "${SETTLEMENT_EVM_RPC_URL}"
-rpc_via_socks_proxy      = ${SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY}
-contract_address         = "${SETTLEMENT_EVM_REGISTRY}"  # TokenNetworkRegistry
-token_address            = "${SETTLEMENT_EVM_TOKEN}"
-decimals                 = ${SETTLEMENT_EVM_DECIMALS}
-channel_index_from_block = ${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK}
+rpc_url               = "${SETTLEMENT_EVM_RPC_URL}"
+rpc_via_socks_proxy   = ${SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY}
+token_address         = "${SETTLEMENT_EVM_TOKEN}"
+decimals              = ${SETTLEMENT_EVM_DECIMALS}
+# The token's EIP-712 domain: a tenant signs its deposit under it, and a wrong
+# value is a signature that never verifies. Published as `name`/`version`.
+asset_eip712_name     = "${SETTLEMENT_EVM_EIP712_NAME}"
+asset_eip712_version  = "${SETTLEMENT_EVM_EIP712_VERSION}"
+# How a deposit moves the token, published as `assetTransferMethod`: eip3009
+# for a token with ERC-3009, permit2 for any other ERC-20.
+asset_transfer_method = "${SETTLEMENT_EVM_ASSET_TRANSFER_METHOD}"
+# The x402 facilitator this operator names for deposits into its channels
+# (connector ADR 0076), published as `facilitator`, so a tenant holding no ETH
+# can still open one. The connector never dials it. render.sh drops this line
+# when .env sets SETTLEMENT_EVM_FACILITATOR_URL empty: the connector refuses ""
+# as a URL.
+facilitator_url       = "${SETTLEMENT_EVM_FACILITATOR_URL}"
+# min_withdraw_delay_secs is left at the connector's default, one day: the
+# shortest withdrawal delay a tenant's channel may carry and still be admitted.
 
 [settlement.evm.key]
+# Signs this chain's settlement transactions (landing a voucher), and is the
+# address a tenant's channel names as its receiver.
 key_file = "/app/data/settlement.key"
 
 [settlement.solana]
-rpc_url             = "${SETTLEMENT_SOLANA_RPC_URL}"
-rpc_via_socks_proxy = ${SETTLEMENT_SOLANA_RPC_VIA_SOCKS_PROXY}
-program_id          = "${SETTLEMENT_SOLANA_PROGRAM_ID}"
-token_address       = "${SETTLEMENT_SOLANA_TOKEN}"
-decimals            = ${SETTLEMENT_SOLANA_DECIMALS}
+rpc_url               = "${SETTLEMENT_SOLANA_RPC_URL}"
+rpc_via_socks_proxy   = ${SETTLEMENT_SOLANA_RPC_VIA_SOCKS_PROXY}
+token_address         = "${SETTLEMENT_SOLANA_TOKEN}"
+decimals              = ${SETTLEMENT_SOLANA_DECIMALS}
+# The smallest deposit, in the mint's base units, this node's sponsor endpoint
+# opens a channel for. The endpoint is public and spends this node's SOL, so
+# this is what bounds it.
+min_sponsored_deposit = ${SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT}
 
 [settlement.solana.key]
 key_file = "/app/data/settlement-solana.key"
 
 
 # ── The operator surface ─────────────────────────────────────────────────────
-# Gates /metrics and the redeem endpoints. Without this section they are not
-# mounted at all (404, not 401) — which also means no way to redeem what this
-# provider has earned, so it is not optional in practice.
+# Gates /metrics, the channel and claim reads and the channel writes (`land`,
+# `withdraw`, `fund`). Without this section they are not mounted at all (404,
+# not 401) — which also means no way to read or land what this provider has
+# earned, so it is not optional in practice.
 #
 # Both are FILE-VALUED. The values live in two files render.sh writes from
 # .env, 0600 and owned by uid 10001, mounted beside the key files — so the

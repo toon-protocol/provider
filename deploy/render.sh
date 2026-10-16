@@ -80,59 +80,115 @@ set -a; . ./.env; set +a
 : "${ILP_ADDRESS:?set ILP_ADDRESS in .env (the ILP address every route of this provider hangs off)}"
 : "${SETTLEMENT_EVM_CHAIN_ID:?set SETTLEMENT_EVM_CHAIN_ID in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_EVM_RPC_URL:?set SETTLEMENT_EVM_RPC_URL in .env (.env.example has the devnet preset)}"
-: "${SETTLEMENT_EVM_REGISTRY:?set SETTLEMENT_EVM_REGISTRY in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_EVM_TOKEN:?set SETTLEMENT_EVM_TOKEN in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_EVM_DECIMALS:?set SETTLEMENT_EVM_DECIMALS in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_RPC_URL:?set SETTLEMENT_SOLANA_RPC_URL in .env (.env.example has the devnet preset)}"
-: "${SETTLEMENT_SOLANA_PROGRAM_ID:?set SETTLEMENT_SOLANA_PROGRAM_ID in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_TOKEN:?set SETTLEMENT_SOLANA_TOKEN in .env (.env.example has the devnet preset)}"
 : "${SETTLEMENT_SOLANA_DECIMALS:?set SETTLEMENT_SOLANA_DECIMALS in .env (.env.example has the devnet preset)}"
 LISTINGS_FILE=${LISTINGS_FILE:-listings.toml}
 
-# ── The EVM channel index's cold-start block (TOON_Network#182) ─────────────
-# [settlement.evm] channel_index_from_block (connector issue #661) is the
-# block the connector's local ChannelOpened/ChannelNewDeposit/ChannelSettled
-# index backfills from on a cold start with no checkpoint. It defaults to 0,
-# and a public RPC that prunes history (base-sepolia-rpc.publicnode.com, this
-# preset's default, prunes below block 46000000) refuses a request for block
-# 0 outright — the index never warms up, and every channel lookup falls back
-# to a direct chain read for good.
+# ── The x402 terms each settlement table publishes (provider#66) ──────
+# Every channel is an x402 `batch-settlement` channel (connector ADR 0075,
+# docs/releases/x402-only.md), so [settlement.evm] and [settlement.solana]
+# each carry the terms a payer opens a channel on. Four of them are facts
+# about the TOKEN, not preferences, so this bundle knows them for the devnet
+# preset's own tokens and asks .env for them anywhere else:
 #
-# So this bundle picks the right value FOR THE PRESET'S CHAIN, the same way
-# the connector's own deployment records do:
+#   SETTLEMENT_EVM_EIP712_NAME / _VERSION   the token's EIP-712 domain. A
+#                                           payer signs its deposit under it;
+#                                           a wrong value is a signature that
+#                                           never verifies. Devnet USDC
+#                                           (Circle FiatToken v2.2): USDC / 2.
+#   SETTLEMENT_EVM_ASSET_TRANSFER_METHOD    eip3009 for a token with ERC-3009
+#                                           (devnet USDC), permit2 for any
+#                                           other ERC-20. The connector checks
+#                                           it against the token at boot.
+#   SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT the smallest deposit this node's
+#                                           sponsor endpoint opens a channel
+#                                           for, in the mint's base units. It
+#                                           bounds a public endpoint that
+#                                           spends this node's SOL. The devnet
+#                                           fleet's figure: 1000000 (1 USDC).
 #
-#   evm:84532 (Base Sepolia)  47285026 — the live TokenNetwork's deploy
-#                             block (connector
-#                             packages/contracts/deployments/base-sepolia.md)
-#   evm:8453  (Base mainnet)  50745815 — connector
-#                             packages/contracts/deployments/base-mainnet.md
-#   anything else             SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK in
-#                             .env, required: this bundle does not know a
-#                             custom chain's TokenNetwork deploy block, and
-#                             guessing one would be worse than refusing to
-#                             start.
-case "$SETTLEMENT_EVM_CHAIN_ID" in
-  84532) SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK=${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK:-47285026} ;;
-  8453) SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK=${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK:-50745815} ;;
+# And one is the operator's choice:
+#
+#   SETTLEMENT_EVM_FACILITATOR_URL          the x402 facilitator this node
+#                                           names for deposits into its
+#                                           channels (connector ADR 0076), so
+#                                           a tenant with no ETH can still
+#                                           open one. Published, never dialled
+#                                           by the connector. The devnet
+#                                           preset names the devnet's
+#                                           Onboarder, as every devnet node
+#                                           does; set it EMPTY in .env to name
+#                                           none.
+#
+# What the x402-only connector refuses by name and this bundle therefore no
+# longer writes: `contract_address` (SETTLEMENT_EVM_REGISTRY), `program_id`
+# (SETTLEMENT_SOLANA_PROGRAM_ID) and `channel_index_from_block`
+# (SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK, TOON_Network#182): the x402
+# contract and program are constants of the binary, and the TokenNetwork log
+# index they tuned is deleted. A .env that still sets them renders fine; they
+# are named below so an operator knows to delete them.
+DEVNET_EVM_TOKEN=0x0C996d7c934c79a6255254875607Fe69df25C0E1
+DEVNET_SOLANA_TOKEN=34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU
+if [ "$SETTLEMENT_EVM_CHAIN_ID" = 84532 ] && [ "${SETTLEMENT_EVM_TOKEN,,}" = "${DEVNET_EVM_TOKEN,,}" ]; then
+  : "${SETTLEMENT_EVM_EIP712_NAME:=USDC}"
+  : "${SETTLEMENT_EVM_EIP712_VERSION:=2}"
+  : "${SETTLEMENT_EVM_ASSET_TRANSFER_METHOD:=eip3009}"
+  # `-`, not `:-`: an EMPTY value in .env is the operator naming no
+  # facilitator, and must not be put back.
+  SETTLEMENT_EVM_FACILITATOR_URL=${SETTLEMENT_EVM_FACILITATOR_URL-https://onboard.devnet.toonprotocol.dev}
+fi
+if [ "$SETTLEMENT_SOLANA_TOKEN" = "$DEVNET_SOLANA_TOKEN" ]; then
+  : "${SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT:=1000000}"
+fi
+for name in SETTLEMENT_EVM_EIP712_NAME SETTLEMENT_EVM_EIP712_VERSION \
+  SETTLEMENT_EVM_ASSET_TRANSFER_METHOD SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT; do
+  if [ -z "${!name:-}" ]; then
+    echo "${name} is not set in .env." >&2
+    echo "It is a fact about the settlement token, and this bundle knows it only for" >&2
+    echo "the devnet preset's own tokens. Read it from your token (or from any node" >&2
+    echo "that settles in it: GET /ilp's batchSettlements), and set it in .env." >&2
+    exit 1
+  fi
+done
+case "$SETTLEMENT_EVM_ASSET_TRANSFER_METHOD" in
+  eip3009 | permit2) ;;
   *)
-    if [ -z "${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK:-}" ]; then
-      echo "SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK is not set in .env." >&2
-      echo "SETTLEMENT_EVM_CHAIN_ID=${SETTLEMENT_EVM_CHAIN_ID} has no built-in preset, so this" >&2
-      echo "bundle does not know that chain TokenNetwork deploy block. Find it the way" >&2
-      echo "connector docs/protocol/configuration-spec.md and" >&2
-      echo "packages/contracts/deployments/*.md describe it, or the connector will backfill" >&2
-      echo "its channel index from genesis against whatever RPC you name." >&2
-      exit 1
-    fi
-    ;;
-esac
-case "$SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK" in
-  '' | *[!0-9]*)
-    echo "SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK=${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK} is not a non-negative integer." >&2
+    echo "SETTLEMENT_EVM_ASSET_TRANSFER_METHOD=${SETTLEMENT_EVM_ASSET_TRANSFER_METHOD} is neither eip3009 nor permit2." >&2
     exit 1
     ;;
 esac
-export SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK
+for name in SETTLEMENT_EVM_EIP712_NAME SETTLEMENT_EVM_EIP712_VERSION SETTLEMENT_EVM_FACILITATOR_URL; do
+  case "${!name:-}" in
+    *'"'* | *'\'*)
+      echo "${name} carries a \" or a \\, and it is quoted as-is in connector.toml." >&2
+      exit 1
+      ;;
+  esac
+done
+case "$SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT" in
+  *[!0-9]*)
+    echo "SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT=${SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT} is not a whole number of the mint's base units." >&2
+    exit 1
+    ;;
+esac
+case "${SETTLEMENT_EVM_FACILITATOR_URL:-}" in
+  '' | http://* | https://*) ;;
+  *)
+    echo "SETTLEMENT_EVM_FACILITATOR_URL=${SETTLEMENT_EVM_FACILITATOR_URL} is not an http(s) URL; leave it empty to name none." >&2
+    exit 1
+    ;;
+esac
+SETTLEMENT_EVM_FACILITATOR_URL=${SETTLEMENT_EVM_FACILITATOR_URL:-}
+for stale in SETTLEMENT_EVM_REGISTRY SETTLEMENT_SOLANA_PROGRAM_ID SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK; do
+  if [ -n "${!stale:-}" ]; then
+    echo "note: ${stale} in .env is no longer used (the x402-only connector, provider#66); delete it." >&2
+  fi
+done
+export SETTLEMENT_EVM_EIP712_NAME SETTLEMENT_EVM_EIP712_VERSION SETTLEMENT_EVM_ASSET_TRANSFER_METHOD
+export SETTLEMENT_EVM_FACILITATOR_URL SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT
 
 case "${HIDDEN:-0}" in
   0 | '') HIDDEN=0 ;;
@@ -474,8 +530,10 @@ grep -q '^\[\[routes\]\]$' "$WORK/routes.toml" || {
   exit 1
 }
 
-envsubst '${NODE_HTTP_ENDPOINT} ${NODE_BTP_ENDPOINT} ${ILP_ADDRESS} ${SETTLEMENT_EVM_RPC_URL} ${SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY} ${SETTLEMENT_EVM_REGISTRY} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK} ${SETTLEMENT_SOLANA_RPC_URL} ${SETTLEMENT_SOLANA_RPC_VIA_SOCKS_PROXY} ${SETTLEMENT_SOLANA_PROGRAM_ID} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS}' \
-  < connector.toml.template | select_blocks connector.toml.template \
+# A facilitator left empty is no `facilitator_url` line at all: the connector
+# refuses "" as a URL.
+envsubst '${NODE_HTTP_ENDPOINT} ${NODE_BTP_ENDPOINT} ${ILP_ADDRESS} ${SETTLEMENT_EVM_RPC_URL} ${SETTLEMENT_EVM_RPC_VIA_SOCKS_PROXY} ${SETTLEMENT_EVM_TOKEN} ${SETTLEMENT_EVM_DECIMALS} ${SETTLEMENT_EVM_EIP712_NAME} ${SETTLEMENT_EVM_EIP712_VERSION} ${SETTLEMENT_EVM_ASSET_TRANSFER_METHOD} ${SETTLEMENT_EVM_FACILITATOR_URL} ${SETTLEMENT_SOLANA_RPC_URL} ${SETTLEMENT_SOLANA_RPC_VIA_SOCKS_PROXY} ${SETTLEMENT_SOLANA_TOKEN} ${SETTLEMENT_SOLANA_DECIMALS} ${SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT}' \
+  < connector.toml.template | sed '/^facilitator_url *= *""$/d' | select_blocks connector.toml.template \
   | splice '# @render: routes' "$WORK/routes.toml" > "$WORK/connector.toml"
 
 # Written only once everything above has succeeded, so a refusal leaves the

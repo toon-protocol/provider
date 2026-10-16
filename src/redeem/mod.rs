@@ -1,8 +1,13 @@
 //! `toon-provider redeem` (TOON_Network#173, ADR 0029 "Money: shown
-//! everywhere, moved only by a person").
+//! everywhere, moved only by a person", as amended for the x402-only
+//! connector, provider#66): the "land now" lever.
 //!
-//! Collects what payers have signed over to this provider's connector, one
-//! channel at a time, and only when a person says so:
+//! The x402-only connector lands what payers have signed over to it ON ITS
+//! OWN: every ten minutes (`BATCH_SWEEP_INTERVAL` / `OPEN_SETTLE_INTERVAL`,
+//! 600s), and at once when a payer starts to withdraw (EVM) or close
+//! (Solana). That landing protects money already owed; it is not spending.
+//! `redeem` is for landing NOW — before maintenance, say — one channel at a
+//! time, and only when a person says so:
 //!
 //! 1. Lists each inbound channel with money unredeemed — the same claims
 //!    joined to the same channels `toon-provider status` prints as earnings
@@ -12,13 +17,12 @@
 //!    <amount>`, or at the prompt. Then asks for a typed `yes`, unless
 //!    `--yes`.
 //! 3. Reads the operator key from stdin (`key`), and for each channel signs
-//!    the connector's existing `POST /channels/:id/redeem-latest` exactly
-//!    as `connector send` signs a write (`sign`): the connector submits the
-//!    latest claim it holds on chain and answers the channel as it now
-//!    stands.
+//!    the connector's `POST /channels/:id/land` exactly as `connector send`
+//!    signs a write (`sign`): the connector lands the latest voucher it
+//!    holds on chain and answers the channel as it now stands.
 //!
-//! Nothing here runs on its own: no schedule, no threshold that fires
-//! (ADR 0029 "Nothing is automatic").
+//! Nothing here runs on its own: no schedule, no threshold that fires. The
+//! connector's own landing is the connector's, not this command's.
 //!
 //! It runs inside the provider container (`docker compose exec provider
 //! toon-provider redeem`, where the deploy bundle sets
@@ -233,8 +237,9 @@ pub fn confirm(picked: &[ChannelEarnings], yes: bool, ask: &mut dyn Ask) -> Resu
     }
     let total: u128 = picked.iter().map(|c| c.unredeemed).sum();
     let answer = ask.ask(&format!(
-        "Redeem {} channel{}, {total} token base units in all? Each is one on-chain transaction \
-         the connector's settlement key pays gas for. Type \"yes\" to continue: ",
+        "Land {} channel{} now, {total} token base units in all? Each is one on-chain \
+         transaction the connector's settlement key pays gas for (the connector would also land \
+         them on its own within ten minutes). Type \"yes\" to continue: ",
         picked.len(),
         if picked.len() == 1 { "" } else { "s" },
     ))?;
@@ -300,8 +305,9 @@ pub fn render_table(
 /// What one redeem came to.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// The connector submitted the claim and answered the channel as it
-    /// now stands (its `ChannelView`).
+    /// The connector landed the voucher and answered the channel as it now
+    /// stands (its `BatchChannelView`, and from connector #1508 on the
+    /// landing `transaction`).
     Redeemed { channel: Value },
     /// The connector answered, and not with success.
     Refused { status: u16, body: String },
@@ -309,7 +315,7 @@ pub enum Outcome {
     Failed(String),
 }
 
-/// Sign and send `POST <base>/channels/<id>/redeem-latest`, valid from
+/// Sign and send `POST <base>/channels/<id>/land`, valid from
 /// `now` for [`SIGNATURE_TTL_SECONDS`]. The signed `@path` is the URL's own
 /// path, which is what the connector sees behind the deploy bundle's nginx
 /// (it passes the request URI through unchanged).
@@ -325,10 +331,7 @@ pub async fn redeem_one(
             "{channel_id:?} is not a channel id this command will put in a path"
         ));
     }
-    let url = format!(
-        "{}/channels/{channel_id}/redeem-latest",
-        base.trim_end_matches('/')
-    );
+    let url = format!("{}/channels/{channel_id}/land", base.trim_end_matches('/'));
     let path = match url::Url::parse(&url) {
         Ok(parsed) => parsed.path().to_string(),
         Err(e) => return Outcome::Failed(format!("{url} is not a URL: {e}")),
@@ -368,22 +371,34 @@ pub async fn redeem_one(
 pub fn render_outcome(channel: &ChannelEarnings, outcome: &Outcome, keyid: &str) -> String {
     match outcome {
         Outcome::Redeemed { channel: view } => {
-            let after = view.get("redeemed").and_then(|v| {
-                v.as_u64()
-                    .map(u128::from)
-                    .or_else(|| v.as_str()?.parse().ok())
-            });
-            match after {
+            // `landed` on the x402-only connector; an older one answered
+            // `redeemed`.
+            let amount = |name: &str| {
+                view.get(name).and_then(|v| {
+                    v.as_u64()
+                        .map(u128::from)
+                        .or_else(|| v.as_str()?.parse().ok())
+                })
+            };
+            let tx = view
+                .get("transaction")
+                .and_then(Value::as_str)
+                .map(|t| format!(" Transaction {t}."))
+                .unwrap_or_else(|| {
+                    " The connector returned no transaction id: find it under the settlement \
+                     key's address on the chain's explorer."
+                        .to_string()
+                });
+            match amount("landed").or_else(|| amount("redeemed")) {
                 Some(after) => format!(
-                    "  redeemed  {}: {} collected; the chain now shows {after} redeemed on this \
-                     channel (was {}). The connector returns no transaction id: find it under \
-                     the settlement key's address on the chain's explorer.",
+                    "  landed    {}: {} landed now; the chain shows {after} landed on this \
+                     channel (was {}).{tx}",
                     channel.channel_id,
                     after.saturating_sub(channel.redeemed),
                     channel.redeemed
                 ),
                 None => format!(
-                    "  redeemed  {}: the connector answered {view}",
+                    "  landed    {}: the connector answered {view}",
                     channel.channel_id
                 ),
             }
@@ -522,11 +537,11 @@ pub async fn run(config_path: &str, args: &RedeemArgs) -> Result<i32> {
     let mut terminal = Terminal::open(stdin_is_terminal);
     let picked = choose(&candidates, args, &mut terminal)?;
     if picked.is_empty() {
-        println!("\nNothing picked; nothing was redeemed.");
+        println!("\nNothing picked; nothing was landed.");
         return Ok(0);
     }
     if !confirm(&picked, args.yes, &mut terminal)? {
-        println!("\nNot confirmed; nothing was redeemed.");
+        println!("\nNot confirmed; nothing was landed.");
         return Ok(0);
     }
     drop(terminal);
@@ -548,7 +563,7 @@ pub async fn run(config_path: &str, args: &RedeemArgs) -> Result<i32> {
     }
     // Wiped here (SigningKey zeroises on drop), before the summary.
     drop(key);
-    println!("\n{} of {} redeemed.", picked.len() - failed, picked.len());
+    println!("\n{} of {} landed.", picked.len() - failed, picked.len());
     Ok(if failed == 0 { 0 } else { 1 })
 }
 
@@ -682,7 +697,7 @@ mod tests {
                 expected,
                 "{answer:?}"
             );
-            assert!(ask.1[0].contains("2 channels, 3000"), "{}", ask.1[0]);
+            assert!(ask.1[0].contains("2 channels now, 3000"), "{}", ask.1[0]);
         }
         let mut silent = Scripted(vec![], vec![]);
         assert!(confirm(&picked, true, &mut silent).unwrap());

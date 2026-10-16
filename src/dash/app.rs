@@ -678,8 +678,9 @@ fn redeem_confirm(
         .collect();
     lines.push(String::new());
     lines.push(format!(
-        "Redeem {} channel{}, {total} token base units in all? Each is one on-chain transaction \
-         the connector's settlement key pays gas for. The operator key is asked next.",
+        "Land {} channel{} now, {total} token base units in all? Each is one on-chain transaction \
+         the connector's settlement key pays gas for; the connector would also land them on its \
+         own within ten minutes. The operator key is asked next.",
         channels.len(),
         plural(channels.len()),
     ));

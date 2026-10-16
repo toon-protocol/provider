@@ -432,9 +432,10 @@ fn next_deposit(wallet: &PublisherWallet) -> String {
 fn earnings_hints(out: &mut String, e: &EarningsSection) {
     let _ = writeln!(
         out,
-        "  To collect it: `toon-provider redeem` lists each channel with a gas estimate and \
-         redeems the ones you pick, or `--all-above <amount>`; it reads the operator key from \
-         stdin (deploy/README.md \"Redeeming earnings\")."
+        "  The connector lands this on its own, every ten minutes and at once on a withdrawal \
+         or close. To land it now: `toon-provider redeem` lists each channel with a gas \
+         estimate and lands the ones you pick, or `--all-above <amount>`; it reads the operator \
+         key from stdin (deploy/README.md \"Redeeming earnings\")."
     );
     let _ = writeln!(
         out,
