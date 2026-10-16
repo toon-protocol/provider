@@ -171,8 +171,11 @@ pub async fn run(config: &ProviderConfig, args: &StatusArgs) -> Result<i32> {
 /// `status --ssh <host>`: the same report, read through the operator's own
 /// `ssh` (see `remote`). Needs no provider.toml here.
 pub async fn run_over_ssh(args: &StatusArgs) -> Result<i32> {
-    let link = crate::remote::connect(&args.remote, &args.report).await?;
-    print_report(&link.sources, args).await
+    crate::remote::until_interrupted(async {
+        let link = crate::remote::connect(&args.remote, &args.report).await?;
+        print_report(&link.sources, args).await
+    })
+    .await
 }
 
 async fn print_report(sources: &Sources, args: &StatusArgs) -> Result<i32> {

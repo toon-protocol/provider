@@ -135,21 +135,24 @@ pub async fn run(config: &ProviderConfig, args: &DashArgs) -> Result<()> {
 pub async fn run_over_ssh(args: &DashArgs) -> Result<()> {
     // Before the terminal is taken: a passphrase prompt needs it.
     ensure_terminal()?;
-    let link = crate::remote::connect(&args.remote, &args.report).await?;
-    let wiring = Wiring {
-        sources: link.sources.clone(),
-        redeem_base: link.redeem_base.clone(),
-        publish_url: link.publish_url.clone(),
-        evm_rpc_url: args
-            .evm_rpc_url
-            .clone()
-            .or_else(|| link.evm_rpc_url.clone()),
-        config: None,
-    };
-    // `link` is held to the end: it owns the tunnels.
-    let result = drive(wiring, args).await;
-    drop(link);
-    result
+    crate::remote::until_interrupted(async {
+        let link = crate::remote::connect(&args.remote, &args.report).await?;
+        let wiring = Wiring {
+            sources: link.sources.clone(),
+            redeem_base: link.redeem_base.clone(),
+            publish_url: link.publish_url.clone(),
+            evm_rpc_url: args
+                .evm_rpc_url
+                .clone()
+                .or_else(|| link.evm_rpc_url.clone()),
+            config: None,
+        };
+        // `link` is held to the end: it owns the tunnels.
+        let result = drive(wiring, args).await;
+        drop(link);
+        result
+    })
+    .await
 }
 
 fn ensure_terminal() -> Result<()> {

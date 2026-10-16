@@ -1205,9 +1205,11 @@ the file the provider container already mounts. The token stays in memory and
 is sent only to the tunnel; nothing is written to the laptop. The Solana
 balances are read from the laptop, from the RPC the box's
 `SETTLEMENT_SOLANA_RPC_URL` names (or `--settlement-rpc-url`); a Hidden
-Provider's are not, and say to read them on the box. The tunnels listen on
+Provider's are not, nor is its EVM gas price for `r` (unless you pass
+`--evm-rpc-url`), and they say to read them on the box. The tunnels listen on
 loopback ports of the laptop, like `ssh -L`: other users of that laptop can
-reach them. In `dash`, `r` and `t` work as on the box.
+reach them, the publisher's `/topup` included. In `dash`, `r` and `t` work as
+on the box.
 
 Errors say which step failed: `no ssh` (the OpenSSH client is not on `PATH`),
 `host unreachable` (ssh could not connect, with ssh's own words) and

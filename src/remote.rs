@@ -139,7 +139,9 @@ fn sh_quote(text: &str) -> String {
 /// What the probe reads from inside the provider container: the few
 /// environment variables the deploy bundle sets for `status`, the files they
 /// name (public addresses and the bearer token), and the non-secret lines of
-/// provider.toml — never the file, which holds the Nostr private key.
+/// provider.toml — never the file, which holds the Nostr private key. Of
+/// those, every table header too, so a key is read in the table it is in
+/// (`chain` and `token` of each `[[settlement]]`, in any order).
 const PROBE: &str = r#"sh -c '
 env | grep -E "^(TOON_CONNECTOR_OPERATOR_URL|TOON_SETTLEMENT_SOLANA_RPC_URL|TOON_SETTLEMENT_EVM_RPC_URL|TOON_PUBLISHER_DEPOSIT|TOON_PROVIDER_CONFIG)="
 for v in TOON_CONNECTOR_BEARER_TOKEN_FILE TOON_SETTLEMENT_SOLANA_ADDRESS_FILE TOON_PUBLISHER_SOLANA_ADDRESS_FILE; do
@@ -148,19 +150,18 @@ for v in TOON_CONNECTOR_BEARER_TOKEN_FILE TOON_SETTLEMENT_SOLANA_ADDRESS_FILE TO
 done
 printf "@@CONFIG\n"
 c=${TOON_PROVIDER_CONFIG:-/etc/toon-provider/provider.toml}
-grep -E "^(hidden|connector_url|publish_url|operator_url)[[:space:]]*=" "$c"
-grep -A2 -E "^\[\[settlement\]\]" "$c"
+grep -E "^[[:space:]]*(\[|(hidden|connector_url|publish_url|operator_url|chain|token)[[:space:]]*=)" "$c"
 printf "@@END\n"
 '"#;
 
 /// What the probe found out about the box.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default)]
 struct Facts {
     operator_connector_url: Option<String>,
     solana_rpc_url: Option<String>,
     evm_rpc_url: Option<String>,
     publisher_deposit: Option<u128>,
-    bearer_token: Option<String>,
+    bearer_token: Option<Secret>,
     settlement_address: Option<String>,
     publisher_address: Option<String>,
     hidden: bool,
@@ -175,6 +176,8 @@ fn parse_probe(text: &str) -> Facts {
     let mut file: Option<&str> = None;
     let mut content = String::new();
     let mut in_config = false;
+    // Before the first table header: where `hidden` and the URLs are.
+    let mut top_level = true;
     let mut settlement: Option<(Option<String>, Option<String>)> = None;
 
     fn finish_file(facts: &mut Facts, file: Option<&str>, content: &mut String) {
@@ -184,7 +187,7 @@ fn parse_probe(text: &str) -> Facts {
             return;
         }
         match file {
-            Some("TOON_CONNECTOR_BEARER_TOKEN_FILE") => facts.bearer_token = Some(value),
+            Some("TOON_CONNECTOR_BEARER_TOKEN_FILE") => facts.bearer_token = Some(Secret(value)),
             Some("TOON_SETTLEMENT_SOLANA_ADDRESS_FILE") => facts.settlement_address = Some(value),
             Some("TOON_PUBLISHER_SOLANA_ADDRESS_FILE") => facts.publisher_address = Some(value),
             _ => {}
@@ -242,13 +245,12 @@ fn parse_probe(text: &str) -> Facts {
             continue;
         }
         let line = line.trim();
-        if line == "[[settlement]]" {
+        if line.starts_with('[') {
             close_settlement(&mut facts, &mut settlement);
-            settlement = Some((None, None));
-            continue;
-        }
-        if line == "--" {
-            close_settlement(&mut facts, &mut settlement);
+            top_level = false;
+            if line.split('#').next().map(str::trim) == Some("[[settlement]]") {
+                settlement = Some((None, None));
+            }
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -258,10 +260,10 @@ fn parse_probe(text: &str) -> Facts {
         match (key, &mut settlement) {
             ("chain", Some((chain, _))) => *chain = Some(value),
             ("token", Some((_, token))) => *token = Some(value),
-            ("hidden", None) => facts.hidden = value == "true",
-            ("connector_url", None) => facts.connector_url = Some(value),
-            ("publish_url", None) => facts.publish_url = Some(value),
-            ("operator_url", None) => facts.operator_url = Some(value),
+            ("hidden", None) if top_level => facts.hidden = value == "true",
+            ("connector_url", None) if top_level => facts.connector_url = Some(value),
+            ("publish_url", None) if top_level => facts.publish_url = Some(value),
+            ("operator_url", None) if top_level => facts.operator_url = Some(value),
             _ => {}
         }
     }
@@ -404,7 +406,7 @@ pub async fn connect(args: &RemoteArgs, report: &ReportArgs) -> Result<Link> {
         },
         connector_operator_url: Ok(connector_local.clone()),
         bearer_token_file: None,
-        bearer_token: facts.bearer_token.clone().map(Secret),
+        bearer_token: facts.bearer_token.clone(),
         dashboard_url: facts
             .connector_url
             .as_deref()
@@ -434,7 +436,12 @@ pub async fn connect(args: &RemoteArgs, report: &ReportArgs) -> Result<Link> {
     Ok(Link {
         redeem_base: Ok(connector_local),
         publish_url: publisher_local.map(|local| format!("{local}/publish")),
-        evm_rpc_url: facts.evm_rpc_url.clone().filter(|u| !u.trim().is_empty()),
+        // A hidden box's EVM RPC is dialled from the box, through anon: not
+        // from here, as its Solana RPC is not.
+        evm_rpc_url: facts
+            .evm_rpc_url
+            .clone()
+            .filter(|u| !u.trim().is_empty() && !hidden),
         sources,
         _session: session,
     })
@@ -446,13 +453,23 @@ pub async fn connect(args: &RemoteArgs, report: &ReportArgs) -> Result<Link> {
 async fn open_master(ssh: &mut Ssh, session: &mut Session) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
 
-    // Short and in /tmp: a unix socket path is limited to ~104 bytes.
-    let dir = PathBuf::from(format!("/tmp/toon-provider-ssh-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
+    use std::hash::{BuildHasher, Hasher};
+
+    // Short and in /tmp: a unix socket path is limited to ~104 bytes. Made
+    // fresh under a name nobody can guess, never one already there (another
+    // user of a shared /tmp could have put it there).
+    let mut tries = 0;
+    let dir = loop {
+        let nonce = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish();
+        let dir = PathBuf::from(format!("/tmp/toon-provider-ssh-{nonce:016x}"));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => break dir,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && tries < 8 => tries += 1,
+            Err(e) => return Err(e).with_context(|| format!("creating {}", dir.display())),
+        }
+    };
     session.control_dir = Some(dir.clone());
 
     // stderr goes to a file: a backgrounded master keeps its pipes open,
@@ -485,6 +502,33 @@ async fn open_master(ssh: &mut Ssh, session: &mut Session) -> Result<()> {
 #[cfg(not(unix))]
 async fn open_master(_ssh: &mut Ssh, _session: &mut Session) -> Result<()> {
     Ok(())
+}
+
+/// Run `work` to its end, or until Ctrl-C (or, on Unix, SIGTERM or SIGHUP):
+/// `work` is dropped then, and with it the session, which closes the master
+/// connection. Backgrounded with `-f`, that master would otherwise outlive
+/// this process.
+pub async fn until_interrupted<T>(work: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    #[cfg(unix)]
+    let other = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::hangup()),
+        ) {
+            (Ok(mut term), Ok(mut hup)) => {
+                tokio::select! { _ = term.recv() => {}, _ = hup.recv() => {} }
+            }
+            _ => std::future::pending().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let other = std::future::pending::<()>();
+    tokio::select! {
+        result = work => result,
+        _ = tokio::signal::ctrl_c() => bail!("interrupted; the ssh connection is closed"),
+        _ = other => bail!("terminated; the ssh connection is closed"),
+    }
 }
 
 fn spawn_error(e: &std::io::Error) -> anyhow::Error {
@@ -611,11 +655,15 @@ hidden = false\n\
 connector_url = \"https://proxy.provider.example\"\n\
 publish_url = \"http://directory-publisher:8081/publish\"\n\
 operator_url = \"http://127.0.0.1:8090\"\n\
-[[settlement]]\nchain = \"evm:84532\"\ntoken = \"0xabc\"\n--\n\
+[[settlement]]\nchain = \"evm:84532\"\ntoken = \"0xabc\"\n\
 [[settlement]]\nchain = \"solana\"\ntoken = \"Mint111\"\n\
+[anon.settlement.evm]\n\
 @@END\n";
         let facts = parse_probe(text);
-        assert_eq!(facts.bearer_token.as_deref(), Some("tok-123"));
+        assert_eq!(
+            facts.bearer_token.as_ref().map(|t| t.0.as_str()),
+            Some("tok-123")
+        );
         assert_eq!(facts.settlement_address.as_deref(), Some("Settle111"));
         assert_eq!(facts.publisher_address, None);
         assert_eq!(facts.publisher_deposit, Some(10_000_000));
@@ -631,6 +679,21 @@ operator_url = \"http://127.0.0.1:8090\"\n\
     fn a_hidden_box_is_read_as_hidden() {
         let facts = parse_probe("@@CONFIG\nhidden = true # onion\n@@END\n");
         assert!(facts.hidden);
+    }
+
+    #[test]
+    fn settlement_keys_are_read_in_any_order_and_only_in_their_table() {
+        let facts = parse_probe(
+            "@@CONFIG\n\
+hidden = false\n\
+[[settlement]]\ntoken = \"Mint111\"\nchain = \"solana\"\n\
+[anon]\nhidden = true\nconnector_url = \"http://elsewhere\"\n\
+[anon.settlement.solana]\nchain = \"solana\"\ntoken = \"Other\"\n\
+@@END\n",
+        );
+        assert_eq!(facts.solana_token.as_deref(), Some("Mint111"));
+        assert!(!facts.hidden);
+        assert_eq!(facts.connector_url, None);
     }
 
     #[test]
