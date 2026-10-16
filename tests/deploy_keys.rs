@@ -340,7 +340,7 @@ fn init_generates_everything_missing_and_prints_the_operator_key_once() {
     // The preset is untouched: a JSON value with braces still reads whole.
     assert_eq!(
         env["RELAY_WRITE_ROUTES"],
-        r#"{"wss://relay-ws.devnet.toonprotocol.dev":"g.toon.relay"}"#
+        r#"{"wss://relay.toonprotocol.dev":"g.toon.relay"}"#
     );
 
     // The private half is printed, is the key OPERATOR_WRITE_KEY is the

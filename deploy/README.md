@@ -1105,7 +1105,7 @@ overlay sets `TOON_TRANSPORT: btp` for that reason. Whether the relay's pin
 still stands:
 
 ```bash
-curl -s https://proxy.relay.devnet.toonprotocol.dev/ilp \
+curl -s https://toonprotocol.dev/ilp \
   | jq '.routes[] | select(.prefix == "g.toon.relay")'
 ```
 
