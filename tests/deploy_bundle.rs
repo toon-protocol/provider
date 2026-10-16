@@ -367,78 +367,183 @@ fn the_profile_advertises_what_the_connector_actually_settles() {
         "the Profile's Solana mint is not the one the connector settles"
     );
 
-    // The registry, not the token network: the connector resolves the network
-    // through it at boot, which is why a redeploy of the network needs no edit
-    // here. Hard-coded so a silent swap fails.
+    // The x402 terms of the devnet preset's own tokens (provider#66),
+    // as the devnet relay's `GET /ilp` publishes them in `batchSettlements`.
+    // Hard-coded so a silent swap fails.
+    assert_eq!(evm["asset_eip712_name"].as_str(), Some("USDC"));
+    assert_eq!(evm["asset_eip712_version"].as_str(), Some("2"));
+    assert_eq!(evm["asset_transfer_method"].as_str(), Some("eip3009"));
     assert_eq!(
-        evm["contract_address"].as_str().unwrap(),
-        "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5"
+        evm["facilitator_url"].as_str(),
+        Some("https://onboard.devnet.toonprotocol.dev")
     );
     assert_eq!(
-        solana["program_id"].as_str().unwrap(),
-        "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+        solana["min_sponsored_deposit"].as_integer(),
+        Some(1_000_000)
     );
 }
 
 #[test]
-fn channel_index_from_block_matches_the_chain_preset_and_can_be_overridden() {
-    // TOON_Network#182: [settlement.evm] channel_index_from_block (connector
-    // issue #661) defaults to 0, and a cold connector against a public RPC
-    // that prunes history refuses to backfill from genesis. render.sh must
-    // pick the right value for the preset's chain id, and let an operator on
-    // a chain this bundle does not know override it.
-    let connector: toml::Value = toml::from_str(&rendered_connector_toml()).unwrap();
-    assert_eq!(
-        connector["settlement"]["evm"]["channel_index_from_block"].as_integer(),
-        Some(47_285_026),
-        "the devnet preset (Base Sepolia, evm:84532) should backfill from its live \
-         TokenNetwork's deploy block (connector packages/contracts/deployments/base-sepolia.md), \
-         not scan from genesis into base-sepolia-rpc.publicnode.com's pruned history"
-    );
+fn the_connector_toml_carries_no_key_the_x402_only_connector_refuses() {
+    // connector docs/releases/x402-only.md, "Refused by name": a node naming
+    // any of these does not boot, so a stale one here is a restart loop on
+    // the box (provider#66).
+    let connector = rendered_connector_toml();
+    let value: toml::Value = toml::from_str(&connector).unwrap();
+    for (chain, key) in [
+        ("evm", "contract_address"),
+        ("evm", "channel_index_from_block"),
+        ("evm", "channel_index_confirmations"),
+        ("evm", "batch_settlement"),
+        ("solana", "program_id"),
+        ("solana", "batch_settlement"),
+    ] {
+        assert!(
+            value["settlement"][chain].get(key).is_none(),
+            "[settlement.{chain}] carries {key}, which the x402-only connector refuses by name"
+        );
+    }
+    for key in ["client_channels", "peer_channels", "pay_channels", "peers"] {
+        assert!(value.get(key).is_none(), "connector.toml carries [[{key}]]");
+    }
+}
 
-    // Base mainnet preset: connector packages/contracts/deployments/base-mainnet.md
-    // records channel_index_from_block = 50745815 for the same reason.
+#[test]
+fn the_x402_terms_come_from_the_token_preset_or_from_env() {
+    // provider#66: the EIP-712 domain, the transfer method and the
+    // minimum sponsored deposit are facts about the TOKEN. render.sh knows
+    // them for the devnet preset's own tokens and nothing else.
+
+    // Another token on Base: required in .env, and refused by name without.
     let mut env = acme_env();
     env.insert("SETTLEMENT_EVM_CHAIN_ID", "8453");
     env.insert("SETTLEMENT_EVM_RPC_URL", "https://mainnet.base.org");
-    env.insert(
-        "SETTLEMENT_EVM_REGISTRY",
-        "0x61d31e7Fd9a57A0611e29Bd7eB162f15AC8B3427",
-    );
     env.insert(
         "SETTLEMENT_EVM_TOKEN",
         "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
     );
     let render = run_render(&env, Some(ACME_LISTINGS), None, &[]);
+    assert!(!render.ok, "render.sh guessed another token's x402 terms");
     assert!(
-        render.ok,
-        "render.sh refused the mainnet preset:\n{}",
+        render
+            .stderr
+            .contains("SETTLEMENT_EVM_EIP712_NAME is not set"),
+        "{}",
         render.stderr
-    );
-    let connector: toml::Value = toml::from_str(&render.read("connector.toml")).unwrap();
-    assert_eq!(
-        connector["settlement"]["evm"]["channel_index_from_block"].as_integer(),
-        Some(50_745_815),
-        "the Base mainnet preset should backfill from the block base-mainnet.md records"
     );
 
-    // A chain this bundle has no preset for gets an explicit env override
-    // rather than a made-up default — and without one, refuses to scan from
-    // an unstated genesis.
-    let mut env = acme_env();
-    env.insert("SETTLEMENT_EVM_CHAIN_ID", "31337");
-    env.insert("SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK", "123456");
+    env.insert("SETTLEMENT_EVM_EIP712_NAME", "USD Coin");
+    env.insert("SETTLEMENT_EVM_EIP712_VERSION", "2");
+    env.insert("SETTLEMENT_EVM_ASSET_TRANSFER_METHOD", "permit2");
     let render = run_render(&env, Some(ACME_LISTINGS), None, &[]);
+    assert!(render.ok, "{}", render.stderr);
+    let connector: toml::Value = toml::from_str(&render.read("connector.toml")).unwrap();
+    let evm = &connector["settlement"]["evm"];
+    assert_eq!(evm["asset_eip712_name"].as_str(), Some("USD Coin"));
+    assert_eq!(evm["asset_transfer_method"].as_str(), Some("permit2"));
+    // No preset, no facilitator named for it: the line is dropped, because
+    // the connector refuses `facilitator_url = ""`.
+    assert!(evm.get("facilitator_url").is_none(), "{evm:?}");
+    // The Solana preset is untouched by the EVM change.
+    assert_eq!(
+        connector["settlement"]["solana"]["min_sponsored_deposit"].as_integer(),
+        Some(1_000_000)
+    );
+
+    // A transfer method x402 does not have.
+    env.insert("SETTLEMENT_EVM_ASSET_TRANSFER_METHOD", "eip2612");
+    let render = run_render(&env, Some(ACME_LISTINGS), None, &[]);
+    assert!(!render.ok);
     assert!(
-        render.ok,
-        "render.sh refused a custom chain's override:\n{}",
+        render.stderr.contains("neither eip3009 nor permit2"),
+        "{}",
         render.stderr
     );
+
+    // Another Solana mint: its minimum sponsored deposit is required too.
+    let mut env = acme_env();
+    env.insert(
+        "SETTLEMENT_SOLANA_TOKEN",
+        "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    );
+    let render = run_render(&env, Some(ACME_LISTINGS), None, &[]);
+    assert!(!render.ok);
+    assert!(
+        render
+            .stderr
+            .contains("SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT is not set"),
+        "{}",
+        render.stderr
+    );
+    env.insert("SETTLEMENT_SOLANA_MIN_SPONSORED_DEPOSIT", "5000000");
+    let render = run_render(&env, Some(ACME_LISTINGS), None, &[]);
+    assert!(render.ok, "{}", render.stderr);
     let connector: toml::Value = toml::from_str(&render.read("connector.toml")).unwrap();
     assert_eq!(
-        connector["settlement"]["evm"]["channel_index_from_block"].as_integer(),
-        Some(123_456)
+        connector["settlement"]["solana"]["min_sponsored_deposit"].as_integer(),
+        Some(5_000_000)
     );
+}
+
+#[test]
+fn an_operator_on_the_devnet_preset_may_name_no_facilitator() {
+    // EMPTY in .env is a choice (no facilitator: a tenant deposits with its
+    // own ETH), not a gap for the preset to fill.
+    let mut env = acme_env();
+    env.insert("SETTLEMENT_EVM_FACILITATOR_URL", "");
+    let render = run_render(&env, Some(ACME_LISTINGS), None, &[]);
+    assert!(render.ok, "{}", render.stderr);
+    let connector: toml::Value = toml::from_str(&render.read("connector.toml")).unwrap();
+    assert!(connector["settlement"]["evm"]
+        .get("facilitator_url")
+        .is_none());
+    assert_eq!(
+        connector["settlement"]["evm"]["asset_eip712_name"].as_str(),
+        Some("USDC")
+    );
+}
+
+#[test]
+fn a_box_env_from_before_x402_still_renders_and_is_told_what_to_delete() {
+    // A live box's .env carries the TOON-channel values the old template
+    // needed. auto-apply re-renders it after a fast-forward, so they must
+    // not be a refusal; they are named so the operator removes them.
+    let mut env = acme_env();
+    env.insert(
+        "SETTLEMENT_EVM_REGISTRY",
+        "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5",
+    );
+    env.insert(
+        "SETTLEMENT_SOLANA_PROGRAM_ID",
+        "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip",
+    );
+    env.insert("SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK", "47285026");
+    let render = run_render(&env, Some(ACME_LISTINGS), None, &[]);
+    assert!(render.ok, "{}", render.stderr);
+    for stale in [
+        "SETTLEMENT_EVM_REGISTRY",
+        "SETTLEMENT_SOLANA_PROGRAM_ID",
+        "SETTLEMENT_EVM_CHANNEL_INDEX_FROM_BLOCK",
+    ] {
+        assert!(
+            render
+                .stderr
+                .contains(&format!("note: {stale} in .env is no longer used")),
+            "{}",
+            render.stderr
+        );
+    }
+    let connector = render.read("connector.toml");
+    for value in [
+        "0x0c41D9D424d6B075A3cEa1068a694f7847a8CCa5",
+        "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip",
+        "47285026",
+    ] {
+        assert!(
+            !connector.contains(value),
+            "connector.toml still carries {value}"
+        );
+    }
 }
 
 #[test]
@@ -859,7 +964,7 @@ fn the_firewall_opens_exactly_the_workload_ports_the_config_hands_out() {
 
 #[test]
 fn the_connector_pin_is_immutable_and_written_once() {
-    const PIN: &str = "ghcr.io/toon-protocol/connector:rust-2026.09.27.1";
+    const PIN: &str = "ghcr.io/toon-protocol/connector:rust-2026.09.29.1";
 
     // A dated release alias or an exact commit. Never `rust-main`, and never
     // the retired `rust-release` pointer, which is frozen on a build whose
@@ -1410,10 +1515,14 @@ fn a_hidden_connector_publishes_the_circuit_and_reaches_the_preset_rpcs_through_
         "0x0C996d7c934c79a6255254875607Fe69df25C0E1"
     );
     assert_eq!(
-        value["settlement"]["solana"]["program_id"]
+        value["settlement"]["solana"]["token_address"]
             .as_str()
             .unwrap(),
-        "2aEVJ8koKD8LTZrLRSGtAtU7LBt4e7QjjCgf1kzQ7Rip"
+        "34eSxY7qxQ4GzyhDJ8GpUcTz1WWzruGbJbR8q6TtxfQU"
+    );
+    assert_eq!(
+        value["settlement"]["evm"]["facilitator_url"].as_str(),
+        Some("https://onboard.devnet.toonprotocol.dev")
     );
 
     // bootstrap.sh's first render: the connector's config must be the one
@@ -1440,7 +1549,18 @@ fn a_self_hosting_hidden_connector_settles_on_the_operators_own_nodes_directly()
         connector_settlement(&value, "solana"),
         rpc(HIDDEN_SOLANA_RPC, false)
     );
-    let set = settings(connector);
+    // `facilitator_url` is the one https URL left, and it is PUBLISHED, never
+    // dialled by the connector (connector ADR 0076): a tenant with no ETH
+    // deposits through it from its own side. Everything else is.
+    assert_eq!(
+        value["settlement"]["evm"]["facilitator_url"].as_str(),
+        Some("https://onboard.devnet.toonprotocol.dev")
+    );
+    let set: String = settings(connector)
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("facilitator_url"))
+        .collect::<Vec<_>>()
+        .join("\n");
     for public in ["publicnode.com", "api.devnet.solana.com", "https://"] {
         assert!(
             !set.contains(public),

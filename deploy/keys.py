@@ -503,7 +503,10 @@ def addresses(role):
     rows = [(
         "The connector's Solana settlement address",
         solana,
-        "REQUIRED TO BOOT: the connector pays for a transaction at startup",
+        # And afterwards: it sponsors every Solana channel a tenant opens here
+        # (about 0.0047 SOL of rent each, until the channel is reclaimed) and
+        # pays for every landing (x402, provider#66).
+        "REQUIRED TO BOOT: the connector pays for a transaction at startup, then each tenant channel's rent",
         [
             "1-2 devnet SOL, from https://faucet.solana.com (paste the address, pick devnet)",
             f"or, with the Solana CLI: solana airdrop 1 {solana} --url devnet",
@@ -541,12 +544,15 @@ def addresses(role):
     rows.append((
         "The connector's EVM settlement address",
         evm,
-        "Not needed to boot: only to redeem earnings on chain",
+        # The x402-only connector lands what tenants pay on its own, every ten
+        # minutes, and on a `POST /channels/:id/land` (provider#66);
+        # each landing is a transaction this key pays gas for.
+        "Not needed to boot: only to land earnings on chain (the connector does, every ten minutes)",
         [
-            "Base Sepolia ETH, before your first redeem:",
+            "Base Sepolia ETH, before your first tenant pays on Base:",
             "https://www.alchemy.com/faucets/base-sepolia or https://portal.cdp.coinbase.com/products/faucet",
         ] if env("SETTLEMENT_EVM_CHAIN_ID") in ("", "84532") and devnet else [
-            "the native coin of the chain SETTLEMENT_EVM_RPC_URL serves, before your first redeem",
+            "the native coin of the chain SETTLEMENT_EVM_RPC_URL serves, before your first tenant pays on it",
         ],
     ))
     facts = []
