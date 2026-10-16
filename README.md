@@ -70,7 +70,7 @@ Liveness:
 
 ```bash
 nak req -k 10432 -k 30432 -k 10433 -a "$(nak key public <NOSTR_PRIVATE_KEY>)" \
-  wss://relay-ws.devnet.toonprotocol.dev
+  wss://relay.toonprotocol.dev
 ```
 
 Or run `node sandbox/scripts/devnet-status.mjs` in a clone of
