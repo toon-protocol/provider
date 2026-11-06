@@ -614,8 +614,9 @@ async fn nothing_a_tenant_sent_is_ever_published() {
             "a provider publishes only what it signs itself: {:?}",
             event.kind
         );
+        // Except the NIP-01 kind 0 profile, which is not a TOON Compute event.
         assert!(
-            has_tag(&event, &["L", TOON_LABEL]),
+            event.kind.as_u16() == K_METADATA || has_tag(&event, &["L", TOON_LABEL]),
             "every directory event carries the toon.network label: {:?}",
             event.kind
         );
@@ -669,4 +670,72 @@ async fn spawn_a_lease(h: &Harness) -> (StatusCode, Value) {
         status,
         serde_json::from_slice(&bytes).unwrap_or(Value::Null),
     )
+}
+
+// ── the kind 0 profile ──────────────────────────────────────────────────────
+
+const K_METADATA: u16 = 0;
+
+#[tokio::test]
+async fn startup_publishes_a_kind_0_named_for_the_provider_signed_like_the_profile() {
+    let h = harness().await;
+    assert!(h.service.publish_directory_at_startup().await);
+
+    let metadata = h.directory.of_kind(K_METADATA);
+    assert_eq!(metadata.len(), 1);
+    assert_eq!(metadata[0].pubkey, h.provider);
+    assert_eq!(h.directory.of_kind(K_PROFILE)[0].pubkey, h.provider);
+    assert!(metadata[0].verify().is_ok());
+    let content: Value = serde_json::from_str(&metadata[0].content).unwrap();
+    assert_eq!(content, json!({ "name": "TOON Provider" }));
+}
+
+#[test]
+fn about_website_and_picture_appear_only_when_configured() {
+    use toon_provider::nostr::directory_events::metadata_event;
+    let keys = Keys::generate();
+    let cfg = ProviderConfig {
+        about: Some("GPU boxes".to_string()),
+        website: Some("https://acme.example".to_string()),
+        picture: Some("https://acme.example/logo.png".to_string()),
+        ..ProviderConfig::default()
+    };
+    let event = metadata_event(&cfg, &keys, NOW).unwrap();
+    let content: Value = serde_json::from_str(&event.content).unwrap();
+    assert_eq!(
+        content,
+        json!({
+            "name": "TOON Provider",
+            "about": "GPU boxes",
+            "website": "https://acme.example",
+            "picture": "https://acme.example/logo.png",
+        })
+    );
+
+    let event = metadata_event(&ProviderConfig::default(), &keys, NOW).unwrap();
+    let content: Value = serde_json::from_str(&event.content).unwrap();
+    assert_eq!(content, json!({ "name": "TOON Provider" }));
+}
+
+#[tokio::test]
+async fn a_refused_kind_0_does_not_make_the_publication_retry() {
+    let h = harness().await;
+    h.directory.refuse_kind(K_METADATA);
+
+    assert!(h.service.publish_directory_at_startup().await);
+    // The kind 0 was offered and refused, and nothing was sent a second time.
+    assert_eq!(h.directory.of_kind(K_METADATA).len(), 1);
+    assert_eq!(h.directory.of_kind(K_PROFILE).len(), 1);
+    assert!(h.service.publish_directory().await.unwrap());
+}
+
+#[tokio::test]
+async fn liveness_never_sends_a_kind_0() {
+    let h = harness().await;
+    h.service.publish_directory_at_startup().await;
+    assert_eq!(h.directory.of_kind(K_METADATA).len(), 1);
+
+    h.service.publish_liveness(NOW + CADENCE).await.unwrap();
+    h.service.publish_liveness(NOW + 2 * CADENCE).await.unwrap();
+    assert_eq!(h.directory.of_kind(K_METADATA).len(), 1);
 }

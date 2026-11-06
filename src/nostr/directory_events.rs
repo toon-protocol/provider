@@ -157,6 +157,41 @@ pub fn gpu_grammar_refusal(value: &str) -> Option<String> {
     None
 }
 
+/// The NIP-01 kind 0 metadata a provider publishes about itself. Unset
+/// fields are left out of the JSON, never written as empty strings or nulls.
+/// Only these four fields: a hidden provider's carries nothing that names
+/// where it runs, because config loading refuses `website` and `picture`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataContent {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
+}
+
+/// The kind 0 content this config describes.
+pub fn metadata_content(config: &ProviderConfig) -> MetadataContent {
+    MetadataContent {
+        name: config.provider_name.clone(),
+        about: config.about.clone(),
+        website: config.website.clone(),
+        picture: config.picture.clone(),
+    }
+}
+
+/// The provider's NIP-01 kind 0 profile, signed by the directory key. A
+/// NIP-01 kind, not a TOON Compute kind, so it is not in the kind register.
+pub fn metadata_event(config: &ProviderConfig, keys: &Keys, now: u64) -> Result<Event> {
+    let content = serde_json::to_string(&metadata_content(config))?;
+    Ok(EventBuilder::new(Kind::Metadata, content)
+        .custom_created_at(Timestamp::from(now))
+        .sign_with_keys(keys)?)
+}
+
 /// The Provider Profile. Replaceable: one per provider, and republishing it
 /// is how a provider changes its connector, its Relay Set or its cadence.
 pub fn profile_event(config: &ProviderConfig, keys: &Keys, now: u64) -> Result<Event> {

@@ -495,6 +495,9 @@ pub struct FakeDirectory {
     /// (`refuse_liveness_on`), taking everything else. What a primary's own
     /// majority count reads (spec §7.1).
     liveness_refusals: Mutex<Vec<String>>,
+    /// Kinds every relay refuses (`refuse_kind`): recorded, then reported
+    /// as failed on every relay that would have taken them.
+    refused_kinds: Mutex<Vec<u16>>,
     /// Image Registry entries `get_image_entry` answers with, as relays
     /// holding them would: matched by kind, signer and `d`, newest first.
     image_entries: Mutex<Vec<nostr_sdk::Event>>,
@@ -601,6 +604,11 @@ impl FakeDirectory {
     /// `publishes_to`, which says what the whole Relay Set is.
     pub fn refuse_liveness_on(&self, relays: &[&str]) {
         *self.liveness_refusals.lock().unwrap() = relays.iter().map(|r| r.to_string()).collect();
+    }
+
+    /// Every relay refuses events of this kind from now on and takes the rest.
+    pub fn refuse_kind(&self, kind: u16) {
+        self.refused_kinds.lock().unwrap().push(kind);
     }
 
     /// A relay holds this Image Registry entry (or any addressable event):
@@ -715,6 +723,11 @@ impl FakeDirectory {
                 failed: Default::default(),
             },
         };
+        if self.refused_kinds.lock().unwrap().contains(&kind) {
+            for relay in std::mem::take(&mut report.accepted) {
+                report.failed.insert(relay, "relay refused".to_string());
+            }
+        }
         if let Some(relay) = self.relay_always_refuses.lock().unwrap().clone() {
             report.failed.insert(relay, "relay refused".to_string());
         }

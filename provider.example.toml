@@ -3,7 +3,14 @@
 # Which ComputeBackend runs workloads. "docker" is the only one today.
 backend = "docker"
 
+# PUBLIC: provider_name and the optional about / website / picture below are
+# published at startup as a NIP-01 kind 0 profile, which Nostr clients and the
+# relay's /compute pages show. `website` and `picture` are refused when
+# `hidden = true`; `name` and `about` stay allowed.
 provider_name = "Example Provider"
+# about = "What this provider offers"
+# website = "https://provider.example"
+# picture = "https://provider.example/logo.png"
 
 # The provider's ILP address. Every route is a suffix of it:
 # <ilp_address>.<listing>.v<n>.spawn / .extend, and the free

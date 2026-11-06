@@ -34,7 +34,9 @@ use tracing::{error, info, warn};
 use super::persistence::{count_live, LeaseRecord};
 use super::ProviderService;
 use crate::directory::{DirectoryEntry, PublishReport};
-use crate::nostr::directory_events::{listing_event, liveness_event, profile_event};
+use crate::nostr::directory_events::{
+    listing_event, liveness_event, metadata_event, profile_event,
+};
 use crate::provider_http::AppState;
 
 impl AppState {
@@ -202,6 +204,23 @@ impl ProviderService {
             let what = format!("Listing {} v{}", listing.name, listing.version);
             let event = listing_event(listing, &state.config, &state.keys, now)?;
             note(&what, state.publish_one(&what, event).await);
+        }
+
+        // The kind 0 profile (NIP-01) goes with the Profile and Listings, but
+        // does NOT count toward `landed`, not even when it cannot be built: a
+        // missed kind 0 must not make the loop repeat the Profile and
+        // Listings, which are paid writes, and the provider is purchasable
+        // without it. Logged like any publication.
+        let published = match metadata_event(&state.config, &state.keys, now) {
+            Ok(metadata) => {
+                state
+                    .publish_one("Provider metadata (kind 0)", metadata)
+                    .await
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = published {
+            warn!("Provider metadata (kind 0) was not published: {e:#}");
         }
 
         Ok(if landed {

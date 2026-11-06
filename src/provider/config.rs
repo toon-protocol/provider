@@ -288,8 +288,25 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub backend: BackendKind,
 
-    /// Name this provider publishes for itself.
+    /// Name this provider publishes for itself, as the `name` of its NIP-01
+    /// kind 0 profile. PUBLIC: Nostr clients and the relay's `/compute` pages
+    /// show it.
     pub provider_name: String,
+
+    /// `about` of the kind 0 profile. PUBLIC, and allowed on a Hidden
+    /// Provider: it is operator-chosen text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
+
+    /// `website` of the kind 0 profile. PUBLIC, and refused beside
+    /// `hidden = true`: it would name where the provider runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub website: Option<String>,
+
+    /// `picture` of the kind 0 profile (a URL). PUBLIC, and refused beside
+    /// `hidden = true` for the same reason as `website`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub picture: Option<String>,
 
     /// The provider's ILP address, e.g. `g.acme`. Every route is a suffix
     /// of it (`<ilp_address>.<listing>.v<n>.spawn`), and the Provider Profile
@@ -891,6 +908,14 @@ impl ProviderConfig {
             return Ok(());
         }
 
+        for (field, value) in [("website", &self.website), ("picture", &self.picture)] {
+            if let Some(value) = value {
+                bail!(
+                    "hidden = true, so {field} ({value:?}) must not be set: it is published in the \
+                     provider's kind 0 profile and would name where a Hidden Provider runs"
+                );
+            }
+        }
         if let Some(ip) = &self.public_ip {
             bail!(
                 "hidden = true, so public_ip ({:?}) must not be set: a Hidden Provider publishes \
@@ -1358,6 +1383,9 @@ impl Default for ProviderConfig {
         Self {
             backend: BackendKind::Docker,
             provider_name: "TOON Provider".to_string(),
+            about: None,
+            website: None,
+            picture: None,
             ilp_address: default_ilp_address(),
             hidden: false,
             public_ip: Some("127.0.0.1".to_string()),
@@ -1876,6 +1904,40 @@ storage_gb = 1
         cfg.validate()
             .expect_err("this config must be refused")
             .to_string()
+    }
+
+    #[test]
+    fn a_hidden_provider_refuses_website_and_picture_but_keeps_about() {
+        for (field, cfg) in [
+            (
+                "website",
+                ProviderConfig {
+                    website: Some("https://x.example".to_string()),
+                    ..hidden()
+                },
+            ),
+            (
+                "picture",
+                ProviderConfig {
+                    picture: Some("https://x.example/p.png".to_string()),
+                    ..hidden()
+                },
+            ),
+        ] {
+            let err = cfg.validate().unwrap_err().to_string();
+            assert!(err.contains(field), "{err}");
+        }
+        let cfg = ProviderConfig {
+            about: Some("anonymous".to_string()),
+            ..hidden()
+        };
+        cfg.validate().expect("about is operator-chosen text");
+        // So a hidden provider's kind 0 carries only `name` and `about`.
+        let content = crate::nostr::directory_events::metadata_content(&cfg);
+        assert_eq!(
+            serde_json::to_value(&content).unwrap(),
+            serde_json::json!({ "name": cfg.provider_name, "about": "anonymous" })
+        );
     }
 
     #[test]
