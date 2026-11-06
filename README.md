@@ -189,6 +189,12 @@ parts:
   `http://127.0.0.1:8090`): the loopback-only operator endpoint `toon-provider
   evict` talks to. See [Eviction](#eviction) — **this port must never be
   exposed off the host the provider runs on.**
+- `provider_name`, `about`, `website`, `picture`: **public.** Published at
+  startup as the provider's NIP-01 kind 0 profile (`name`, plus the others
+  when set), which Nostr clients and the relay's `/compute` pages show. A
+  kind 0 that a relay refuses is logged and does not make the directory
+  publication retry. `website` and `picture` are refused beside
+  `hidden = true`; `name` and `about` stay allowed.
 - `public_ip`: the host a lease's access details name. Required unless the
   provider is hidden, and refused beside `hidden = true`.
 - `hidden` and `[anon]`: the Hidden Provider declaration and everything it

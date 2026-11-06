@@ -27,6 +27,7 @@
 # per-lease cgroup slice carrying the tier's CPU and memory limits.
 backend = "docker"
 
+# PUBLIC: published as the name in the provider's kind 0 profile.
 provider_name = "${PROVIDER_NAME}"
 
 # Every route is a suffix of this: <ilp_address>.<tier>.v1.spawn / .extend
