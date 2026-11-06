@@ -722,8 +722,11 @@ async fn a_refused_kind_0_does_not_make_the_publication_retry() {
     let h = harness().await;
     h.directory.refuse_kind(K_METADATA);
 
-    assert!(h.service.publish_directory().await.unwrap());
     assert!(h.service.publish_directory_at_startup().await);
+    // The kind 0 was offered and refused, and nothing was sent a second time.
+    assert_eq!(h.directory.of_kind(K_METADATA).len(), 1);
+    assert_eq!(h.directory.of_kind(K_PROFILE).len(), 1);
+    assert!(h.service.publish_directory().await.unwrap());
 }
 
 #[tokio::test]

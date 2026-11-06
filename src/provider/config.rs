@@ -1927,12 +1927,17 @@ storage_gb = 1
             let err = cfg.validate().unwrap_err().to_string();
             assert!(err.contains(field), "{err}");
         }
-        ProviderConfig {
+        let cfg = ProviderConfig {
             about: Some("anonymous".to_string()),
             ..hidden()
-        }
-        .validate()
-        .expect("about is operator-chosen text");
+        };
+        cfg.validate().expect("about is operator-chosen text");
+        // So a hidden provider's kind 0 carries only `name` and `about`.
+        let content = crate::nostr::directory_events::metadata_content(&cfg);
+        assert_eq!(
+            serde_json::to_value(&content).unwrap(),
+            serde_json::json!({ "name": cfg.provider_name, "about": "anonymous" })
+        );
     }
 
     #[test]

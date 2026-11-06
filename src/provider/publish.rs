@@ -207,14 +207,19 @@ impl ProviderService {
         }
 
         // The kind 0 profile (NIP-01) goes with the Profile and Listings, but
-        // does NOT count toward `landed`: those are paid writes a missed
-        // kind 0 must not make the loop repeat, and the provider is
-        // purchasable without it. Logged like any publication.
-        let metadata = metadata_event(&state.config, &state.keys, now)?;
-        if let Err(e) = state
-            .publish_one("Provider metadata (kind 0)", metadata)
-            .await
-        {
+        // does NOT count toward `landed`, not even when it cannot be built: a
+        // missed kind 0 must not make the loop repeat the Profile and
+        // Listings, which are paid writes, and the provider is purchasable
+        // without it. Logged like any publication.
+        let published = match metadata_event(&state.config, &state.keys, now) {
+            Ok(metadata) => {
+                state
+                    .publish_one("Provider metadata (kind 0)", metadata)
+                    .await
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = published {
             warn!("Provider metadata (kind 0) was not published: {e:#}");
         }
 
